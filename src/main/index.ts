@@ -7,6 +7,11 @@ import { createTray, destroyTray } from './tray'
 import { createMainWindow, getMainWindow, markQuitting } from './windows/mainWindow'
 import { pythonBridge } from './py/bridge'
 
+// 固定应用名，让开发态与打包态落在同一个 userData 目录。
+// 否则打包后 productName「尚搏 Agent」会另建一个目录，用户会以为数据丢了。
+// 必须在 requestSingleInstanceLock 之前调用——单实例锁文件也在 userData 下。
+app.setName('shangbo-agent')
+
 // 单实例：第二次启动时唤出已有窗口，而不是再开一个进程
 const gotLock = app.requestSingleInstanceLock()
 

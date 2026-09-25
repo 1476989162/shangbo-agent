@@ -174,6 +174,10 @@ const runCommand: ToolDefinition = {
       })
       .parse(input)
 
+    // 有意设计：命令失败不抛异常，而是把退出码、stdout、stderr 作为正常观察结果回给模型。
+    // 命令失败（在不存在的目录里执行、测试没通过、某个工具没装）是探索过程的常态，
+    // 模型需要读到真实报错才能自己纠正下一步；若在这里抛出，整轮工具链会被中断，
+    // 模型只能看到一句"工具执行失败"，反而失去了自救的依据。
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd: cwd ? resolve(cwd) : undefined,

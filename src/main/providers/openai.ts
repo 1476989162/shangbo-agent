@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { ProviderHttpError, readSse } from './sse'
 import {
   textOf,
@@ -190,7 +191,9 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       if (!acc.name) continue
       yield {
         type: 'tool_use',
-        id: acc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+        // 极少数兼容实现不回传 tool_calls[].id，而回传历史时 tool_call_id 必须能被引用，
+        // 因此仍需兜底生成一个。用 UUID 而不是随机串，保证同一个响应重放时 id 一致、便于排查。
+        id: acc.id || `call_${randomUUID()}`,
         name: acc.name,
         input: parseArgs(acc.args)
       }

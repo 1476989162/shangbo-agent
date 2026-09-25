@@ -1,11 +1,17 @@
 import log from 'electron-log/main'
+import { ProviderHttpError } from './sse'
 import { adapterFor, getApiKey, routingOrder } from './store'
 import type { CompletionRequest, StreamChunk } from './types'
 import type { Provider } from '../../shared/types'
 
 /**
- * 统一网关：按优先级路由，并在"尚未产出任何内容"时静默降级到下一个供应商。
- * 一旦已经向界面吐出过内容就不再做降级，否则用户会看到两段互相矛盾的回复。
+ * 统一网关：按优先级路由，并在"尚未产出任何内容"时降级到下一个供应商。
+ *
+ * 两条边界必须守住：
+ *  1. 一旦已经向界面吐出过内容就不再做降级，否则用户会看到两段互相矛盾的回复。
+ *  2. 只有可重试的失败（网络错误、408、429、5xx）才降级。401/400/404 属于配置类
+ *     错误，继续降级会把"你的主供应商没配好"掩盖成"某个模型偶发失败"——
+ *     用户最终看到的是下一个供应商的报错，根本定位不到真正的问题。
  */
 export async function* streamWithFallback(
   request: CompletionRequest,
@@ -49,6 +55,12 @@ export async function* streamWithFallback(
         log.error(`[gateway] ${provider.name} 在流式输出中途失败，不再降级`)
         throw error
       }
+
+      if (error instanceof ProviderHttpError && !error.retryable) {
+        log.error(`[gateway] ${provider.name} 返回不可重试的 ${error.status}，中止降级`)
+        throw error
+      }
+
       log.warn(`[gateway] ${provider.name} 失败，尝试降级到下一个供应商`)
     }
   }
