@@ -1,0 +1,40 @@
+appId: com.shangbo.agent
+productName: 尚搏 Agent
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# out/ 是 electron-vite 的产物；package.json 用于读取版本与主进程入口
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+
+# Python 边车不进 asar，必须以真实文件形式存在才能被 spawn
+extraResources:
+  - from: python
+    to: python
+    filter:
+      - '**/*.py'
+
+# better-sqlite3 是原生模块，交给 electron-builder 重建到 Electron 的 ABI
+npmRebuild: true
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 尚搏 Agent
+
+publish: null
