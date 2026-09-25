@@ -1,0 +1,2 @@
+# 提交前跑类型检查与全量测试；跳过用 git commit --no-verify
+npm run typecheck && npm test

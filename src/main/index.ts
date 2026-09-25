@@ -1,6 +1,7 @@
 import { BrowserWindow, app } from 'electron'
 import log from 'electron-log/main'
 import { closeDatabase, getDb } from './db'
+import { settleOrphanStreamingMessages } from './db/repo'
 import { ensureDefaultProviders } from './providers/store'
 import { registerIpcHandlers } from './ipc'
 import { createTray, destroyTray } from './tray'
@@ -33,6 +34,7 @@ if (!gotLock) {
 
     // 数据库必须在任何 IPC 之前就绪
     getDb()
+    settleOrphanStreamingMessages()
     ensureDefaultProviders()
 
     registerIpcHandlers()

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { ProviderHttpError, readSse } from './sse'
+import { isResponsesModel, openAiResponsesAdapter } from './responses'
 import {
   textOf,
   type CompletionRequest,
@@ -100,6 +101,12 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
   kind: 'openai-compatible',
 
   async *stream(request: CompletionRequest, context: ProviderContext): AsyncGenerator<StreamChunk> {
+    // 若模型或端点属于 Responses API（如 OpenCode Go 下的 muse-spark 系列），自动走 responses 协议
+    if (isResponsesModel(request.model, context.baseUrl)) {
+      yield* openAiResponsesAdapter.stream(request, context)
+      return
+    }
+
     const body: Record<string, unknown> = {
       model: request.model,
       messages: toOpenAiMessages(request.system, request.messages),
@@ -123,14 +130,21 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${context.apiKey}`
+        authorization: `Bearer ${context.apiKey}`,
+        // 供应商自定义头（如 x-opencode-session）可覆盖默认值
+        ...(context.headers ?? {})
       },
       body: JSON.stringify(body),
       signal: context.signal
     })
 
     if (!response.ok || !response.body) {
-      throw new ProviderHttpError(response.status, await readErrorBody(response), 'OpenAI 兼容接口')
+      throw new ProviderHttpError(
+        response.status,
+        await readErrorBody(response),
+        'OpenAI 兼容接口',
+        response.headers.get('retry-after')
+      )
     }
 
     const toolCalls = new Map<number, ToolCallAccumulator>()
@@ -169,7 +183,16 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
           const index: number = call.index ?? 0
           const acc = toolCalls.get(index) ?? { id: '', name: '', args: '' }
           if (call.id) acc.id = call.id
-          if (call.function?.name) acc.name += call.function.name
+          if (call.function?.name) {
+            // 标准协议按分片递增拼接函数名；但部分兼容网关（某些 GLM/千问中转）
+            // 每个 chunk 都重发完整函数名，直接拼接会得到重复串。
+            // 已有名字且新名是它的后缀时视为重发，保持不变；否则按分片拼接。
+            if (acc.name && acc.name.endsWith(call.function.name)) {
+              // 网关重发完整名：忽略
+            } else {
+              acc.name += call.function.name
+            }
+          }
           if (call.function?.arguments) acc.args += call.function.arguments
           toolCalls.set(index, acc)
         }
@@ -205,11 +228,16 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
 
   async listModels(context: ProviderContext): Promise<string[]> {
     const response = await fetch(joinUrl(context.baseUrl, '/models'), {
-      headers: { authorization: `Bearer ${context.apiKey}` },
+      headers: { authorization: `Bearer ${context.apiKey}`, ...(context.headers ?? {}) },
       signal: context.signal
     })
     if (!response.ok) {
-      throw new ProviderHttpError(response.status, await readErrorBody(response), 'OpenAI 兼容接口')
+      throw new ProviderHttpError(
+        response.status,
+        await readErrorBody(response),
+        'OpenAI 兼容接口',
+        response.headers.get('retry-after')
+      )
     }
     const payload = (await response.json()) as { data?: { id: string }[] }
     return (payload.data ?? []).map((item) => item.id).sort()

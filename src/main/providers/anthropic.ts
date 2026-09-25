@@ -135,14 +135,21 @@ export const anthropicAdapter: ProviderAdapter = {
       headers: {
         'content-type': 'application/json',
         'x-api-key': context.apiKey,
-        'anthropic-version': ANTHROPIC_VERSION
+        'anthropic-version': ANTHROPIC_VERSION,
+        // 供应商自定义头（如经企业代理转发时需要的追踪头）可覆盖默认值
+        ...(context.headers ?? {})
       },
       body: JSON.stringify(body),
       signal: context.signal
     })
 
     if (!response.ok || !response.body) {
-      throw new ProviderHttpError(response.status, await readErrorBody(response), 'Anthropic')
+      throw new ProviderHttpError(
+        response.status,
+        await readErrorBody(response),
+        'Anthropic',
+        response.headers.get('retry-after')
+      )
     }
 
     const toolUses = new Map<number, ToolUseAccumulator>()
@@ -231,12 +238,18 @@ export const anthropicAdapter: ProviderAdapter = {
     const response = await fetch(joinUrl(context.baseUrl, '/v1/models'), {
       headers: {
         'x-api-key': context.apiKey,
-        'anthropic-version': ANTHROPIC_VERSION
+        'anthropic-version': ANTHROPIC_VERSION,
+        ...(context.headers ?? {})
       },
       signal: context.signal
     })
     if (!response.ok) {
-      throw new ProviderHttpError(response.status, await readErrorBody(response), 'Anthropic')
+      throw new ProviderHttpError(
+        response.status,
+        await readErrorBody(response),
+        'Anthropic',
+        response.headers.get('retry-after')
+      )
     }
     const payload = (await response.json()) as { data?: { id: string }[] }
     return (payload.data ?? []).map((item) => item.id).sort()

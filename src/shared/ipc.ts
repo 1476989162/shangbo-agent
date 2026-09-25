@@ -6,6 +6,8 @@ export const IPC = {
   conversationDelete: 'conversation:delete',
   conversationMessages: 'conversation:messages',
   conversationSetLeaf: 'conversation:setLeaf',
+  conversationSetWorkingDir: 'conversation:setWorkingDir',
+  conversationExport: 'conversation:export',
 
   chatSend: 'chat:send',
   chatAbort: 'chat:abort',
@@ -25,7 +27,10 @@ export const IPC = {
 
   appInfo: 'app:info',
   windowHide: 'window:hide',
-  windowQuit: 'window:quit'
+  windowQuit: 'window:quit',
+
+  dialogPickFolder: 'dialog:pickFolder',
+  usageGetStats: 'usage:getStats'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

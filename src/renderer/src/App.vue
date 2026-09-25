@@ -10,7 +10,13 @@ type ThemeChoice = 'light' | 'dark' | 'system'
 
 const store = useChatStore()
 const settingsOpen = ref(false)
+const settingsInitialTab = ref('preferences')
 const theme = ref<ThemeChoice>('system')
+
+function openSettings(tab = 'preferences'): void {
+  settingsInitialTab.value = tab
+  settingsOpen.value = true
+}
 
 const media = window.matchMedia('(prefers-color-scheme: dark)')
 
@@ -51,11 +57,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app">
-    <Sidebar @open-settings="settingsOpen = true" />
-    <ChatView />
+  <div class="app" :class="{ 'sidebar-collapsed': store.sidebarCollapsed }">
+    <Sidebar @open-settings="openSettings" />
+    <ChatView @open-settings="openSettings" />
     <SettingsDialog
       v-model:open="settingsOpen"
+      :initial-tab="settingsInitialTab"
       :theme="theme"
       @update:theme="setTheme"
     />
@@ -68,5 +75,10 @@ onBeforeUnmount(() => {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app.sidebar-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr);
 }
 </style>

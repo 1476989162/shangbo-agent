@@ -4,6 +4,7 @@ import { deleteSecret, getSecret, hasSecret, setSecret } from '../secrets'
 import { getSetting, setSetting } from '../settings'
 import { anthropicAdapter } from './anthropic'
 import { openAiCompatibleAdapter } from './openai'
+import { openAiResponsesAdapter } from './responses'
 import type { Provider, ProviderInput, ProviderKind } from '../../shared/types'
 import type { ProviderAdapter } from './types'
 
@@ -18,6 +19,7 @@ interface ProviderRow {
   models: string
   enabled: number
   priority: number
+  headers: string
   created_at: number
   updated_at: number
 }
@@ -31,6 +33,7 @@ function toProvider(row: ProviderRow): Provider {
     models: JSON.parse(row.models) as string[],
     enabled: row.enabled === 1,
     priority: row.priority,
+    headers: JSON.parse(row.headers || '{}') as Record<string, string>,
     hasApiKey: hasSecret(secretKey(row.id)),
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -62,7 +65,7 @@ export function upsertProvider(input: ProviderInput): Provider {
     db.prepare(
       `UPDATE providers
        SET name = @name, kind = @kind, base_url = @baseUrl, models = @models,
-           enabled = @enabled, priority = @priority, updated_at = @updatedAt
+           enabled = @enabled, priority = @priority, headers = @headers, updated_at = @updatedAt
        WHERE id = @id`
     ).run({
       id,
@@ -72,13 +75,14 @@ export function upsertProvider(input: ProviderInput): Provider {
       models: JSON.stringify(input.models),
       enabled: input.enabled ? 1 : 0,
       priority: input.priority,
+      headers: JSON.stringify(input.headers ?? {}),
       updatedAt: now
     })
   } else {
     db.prepare(
       `INSERT INTO providers
-         (id, name, kind, base_url, models, enabled, priority, created_at, updated_at)
-       VALUES (@id, @name, @kind, @baseUrl, @models, @enabled, @priority, @createdAt, @updatedAt)`
+         (id, name, kind, base_url, models, enabled, priority, headers, created_at, updated_at)
+       VALUES (@id, @name, @kind, @baseUrl, @models, @enabled, @priority, @headers, @createdAt, @updatedAt)`
     ).run({
       id,
       name: input.name,
@@ -87,6 +91,7 @@ export function upsertProvider(input: ProviderInput): Provider {
       models: JSON.stringify(input.models),
       enabled: input.enabled ? 1 : 0,
       priority: input.priority,
+      headers: JSON.stringify(input.headers ?? {}),
       createdAt: now,
       updatedAt: now
     })
@@ -113,7 +118,9 @@ export function getApiKey(id: string): string | null {
 }
 
 export function adapterForKind(kind: ProviderKind): ProviderAdapter {
-  return kind === 'anthropic' ? anthropicAdapter : openAiCompatibleAdapter
+  if (kind === 'anthropic') return anthropicAdapter
+  if (kind === 'openai-responses') return openAiResponsesAdapter
+  return openAiCompatibleAdapter
 }
 
 export function adapterFor(provider: Provider): ProviderAdapter {

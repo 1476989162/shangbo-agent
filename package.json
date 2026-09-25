@@ -13,7 +13,10 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "dist": "npm run build && electron-builder"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "npm run build && electron-builder",
+    "prepare": "husky"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
@@ -29,11 +32,13 @@
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "husky": "^9.1.7",
     "markdown-it": "^15.0.2",
     "pinia": "^4.0.3",
     "shiki": "^4.4.3",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
+    "vitest": "^5.0.1",
     "vue": "^3.5.43",
     "vue-tsc": "^3.3.11"
   }

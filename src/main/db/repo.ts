@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import log from 'electron-log/main'
 import { getDb } from './index'
 import type {
   ContentBlock,
@@ -17,6 +18,7 @@ interface ConversationRow {
   id: string
   title: string
   project_id: string | null
+  working_dir: string | null
   provider_id: string | null
   model: string | null
   system_prompt: string | null
@@ -45,6 +47,7 @@ function toConversation(row: ConversationRow): Conversation {
     id: row.id,
     title: row.title,
     projectId: row.project_id,
+    workingDir: row.working_dir,
     providerId: row.provider_id,
     model: row.model,
     systemPrompt: row.system_prompt,
@@ -99,13 +102,14 @@ export function createConversation(input?: Partial<Conversation>): Conversation 
   getDb()
     .prepare(
       `INSERT INTO conversations
-         (id, title, project_id, provider_id, model, system_prompt, created_at, updated_at)
-       VALUES (@id, @title, @projectId, @providerId, @model, @systemPrompt, @createdAt, @updatedAt)`
+         (id, title, project_id, working_dir, provider_id, model, system_prompt, created_at, updated_at)
+       VALUES (@id, @title, @projectId, @workingDir, @providerId, @model, @systemPrompt, @createdAt, @updatedAt)`
     )
     .run({
       id,
       title: input?.title ?? '新对话',
       projectId: input?.projectId ?? null,
+      workingDir: input?.workingDir ?? null,
       providerId: input?.providerId ?? null,
       model: input?.model ?? null,
       systemPrompt: input?.systemPrompt ?? null,
@@ -120,7 +124,9 @@ export function createConversation(input?: Partial<Conversation>): Conversation 
 
 export function updateConversation(
   id: string,
-  patch: Partial<Pick<Conversation, 'title' | 'providerId' | 'model' | 'systemPrompt'>>
+  patch: Partial<
+    Pick<Conversation, 'title' | 'providerId' | 'model' | 'systemPrompt' | 'workingDir'>
+  >
 ): void {
   const current = getConversation(id)
   if (!current) return
@@ -128,15 +134,17 @@ export function updateConversation(
     .prepare(
       `UPDATE conversations
        SET title = @title, provider_id = @providerId, model = @model,
-           system_prompt = @systemPrompt, updated_at = @updatedAt
+           system_prompt = @systemPrompt, working_dir = @workingDir, updated_at = @updatedAt
        WHERE id = @id`
     )
     .run({
       id,
-      title: patch.title ?? current.title,
-      providerId: patch.providerId ?? current.providerId,
-      model: patch.model ?? current.model,
-      systemPrompt: patch.systemPrompt ?? current.systemPrompt,
+      // null 是合法值（如清除会话级 systemPrompt / 供应商绑定 / 项目目录），不能用 ?? 吞掉
+      title: patch.title !== undefined ? patch.title : current.title,
+      providerId: patch.providerId !== undefined ? patch.providerId : current.providerId,
+      model: patch.model !== undefined ? patch.model : current.model,
+      systemPrompt: patch.systemPrompt !== undefined ? patch.systemPrompt : current.systemPrompt,
+      workingDir: patch.workingDir !== undefined ? patch.workingDir : current.workingDir,
       updatedAt: Date.now()
     })
 }
@@ -282,6 +290,19 @@ export function deleteSubtree(messageId: string): void {
 }
 
 /**
+ * 进程上次退出时（崩溃、断电、强杀）可能留下停在 streaming/pending 的消息，
+ * 界面会永远显示"正在思考…"。启动时统一收敛为 aborted。
+ */
+export function settleOrphanStreamingMessages(): void {
+  const result = getDb()
+    .prepare("UPDATE messages SET status = 'aborted' WHERE status IN ('streaming', 'pending')")
+    .run()
+  if (result.changes > 0) {
+    log.info(`[db] 已将 ${result.changes} 条中断的流式消息标记为 aborted`)
+  }
+}
+
+/**
  * 从指定消息沿 parent_id 回溯到根，得到当前激活分支的完整链路（时间正序）。
  * 每次都从 active_leaf 回溯，因此切换分支无需重写任何消息。
  */
@@ -301,4 +322,138 @@ export function getActivePath(conversationId: string): Message[] {
   }
 
   return path.reverse()
+}
+
+/**
+ * 聚合真实历史 Token 消耗（100% 来自本地 SQLite 数据库）
+ */
+export function getUsageStats(days: number): import('../../shared/types').UsageSummaryStats {
+  const safeDays = Math.max(1, Math.min(days, 365))
+  const now = new Date()
+  const dayMs = 24 * 60 * 60 * 1000
+
+  // 1. 初始化连续日期桶
+  const dayMap = new Map<
+    string,
+    {
+      date: string
+      fullDate: string
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+      toolCallsCount: number
+      coworkTokens: number
+      codeTokens: number
+    }
+  >()
+
+  for (let i = safeDays - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * dayMs)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const fullDate = `${y}-${m}-${day}`
+    const date = `${d.getMonth() + 1}/${d.getDate()}`
+    dayMap.set(fullDate, {
+      date,
+      fullDate,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      toolCallsCount: 0,
+      coworkTokens: 0,
+      codeTokens: 0
+    })
+  }
+
+  // 2. 查询真实 messages 数据
+  const startTimestamp = now.getTime() - (safeDays - 1) * dayMs
+  const startOfDay = new Date(new Date(startTimestamp).setHours(0, 0, 0, 0)).getTime()
+
+  interface RawUsageRow {
+    created_at: number
+    usage: string | null
+    blocks: string | null
+    working_dir: string | null
+  }
+
+  const rows = getDb()
+    .prepare(
+      `SELECT m.created_at, m.usage, m.blocks, c.working_dir
+       FROM messages m
+       LEFT JOIN conversations c ON m.conversation_id = c.id
+       WHERE m.created_at >= ? AND m.usage IS NOT NULL`
+    )
+    .all(startOfDay) as RawUsageRow[]
+
+  let totalTokens = 0
+  let coworkTokens = 0
+  let codeTokens = 0
+  let totalToolCalls = 0
+
+  for (const row of rows) {
+    if (!row.usage) continue
+    let u: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null
+    try {
+      u = JSON.parse(row.usage)
+    } catch {
+      continue
+    }
+    if (!u) continue
+
+    const pTokens = u.promptTokens || 0
+    const cTokens = u.completionTokens || 0
+    const itemTotal = u.totalTokens || pTokens + cTokens
+
+    // 工具调用次数分析
+    let toolCount = 0
+    if (row.blocks) {
+      try {
+        const blocks = JSON.parse(row.blocks) as { type: string }[]
+        if (Array.isArray(blocks)) {
+          toolCount = blocks.filter((b) => b.type === 'tool_call' || b.type === 'tool_result').length
+        }
+      } catch {
+        // 忽略
+      }
+    }
+
+    const d = new Date(row.created_at)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const key = `${y}-${m}-${day}`
+
+    const bucket = dayMap.get(key)
+    const isCode = Boolean(row.working_dir)
+
+    if (bucket) {
+      bucket.promptTokens += pTokens
+      bucket.completionTokens += cTokens
+      bucket.totalTokens += itemTotal
+      bucket.toolCallsCount += toolCount
+      if (isCode) {
+        bucket.codeTokens += itemTotal
+      } else {
+        bucket.coworkTokens += itemTotal
+      }
+    }
+
+    totalTokens += itemTotal
+    totalToolCalls += toolCount
+    if (isCode) {
+      codeTokens += itemTotal
+    } else {
+      coworkTokens += itemTotal
+    }
+  }
+
+  return {
+    days: safeDays,
+    totalTokens,
+    coworkTokens,
+    codeTokens,
+    toolCallsCount: totalToolCalls,
+    dailyList: Array.from(dayMap.values())
+  }
 }

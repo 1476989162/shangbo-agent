@@ -1,4 +1,4 @@
-import { BrowserWindow, app, ipcMain } from 'electron'
+import { BrowserWindow, app, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { IPC } from '../../shared/ipc'
 import * as repo from '../db/repo'
@@ -14,6 +14,7 @@ import {
   upsertProvider
 } from '../providers/store'
 import { probeProvider } from '../providers/gateway'
+import { exportConversation } from '../exporter'
 import { markQuitting } from '../windows/mainWindow'
 import type { AgentEvent, AppInfo, ProviderInput } from '../../shared/types'
 
@@ -27,7 +28,8 @@ const ProviderInputSchema = z.object({
   apiKey: z.string().optional(),
   models: z.array(z.string()),
   enabled: z.boolean(),
-  priority: z.number().int()
+  priority: z.number().int(),
+  headers: z.record(z.string(), z.string()).optional()
 })
 
 const SendPayloadSchema = z.object({
@@ -56,8 +58,21 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.conversationList, () => repo.listConversations())
 
-  ipcMain.handle(IPC.conversationCreate, (_event, input: { title?: string } | undefined) =>
-    repo.createConversation({ title: input?.title ?? '新对话' })
+  ipcMain.handle(
+    IPC.conversationCreate,
+    (
+      _event,
+      input: string | { title?: string; workingDir?: string | null; projectId?: string | null } | undefined
+    ) => {
+      if (typeof input === 'string') {
+        return repo.createConversation({ title: input })
+      }
+      return repo.createConversation({
+        title: input?.title ?? '新对话',
+        workingDir: input?.workingDir ?? null,
+        projectId: input?.projectId ?? null
+      })
+    }
   )
 
   ipcMain.handle(IPC.conversationRename, (_event, id: string, title: string) => {
@@ -80,6 +95,16 @@ export function registerIpcHandlers(): void {
     repo.setActiveLeaf(conversationId, leafId)
     return true
   })
+
+  ipcMain.handle(IPC.conversationSetWorkingDir, (_event, conversationId: string, dir: unknown) => {
+    if (dir !== null && typeof dir !== 'string') throw new Error('目录必须是字符串或 null')
+    repo.updateConversation(conversationId, { workingDir: dir })
+    return repo.getConversation(conversationId)
+  })
+
+  ipcMain.handle(IPC.conversationExport, (_event, conversationId: string) =>
+    exportConversation(conversationId)
+  )
 
   /* 对话 ---------------------------------------------------------- */
 
@@ -146,6 +171,7 @@ export function registerIpcHandlers(): void {
       return await adapterForKind(parsed.kind).listModels({
         baseUrl: parsed.baseUrl,
         apiKey,
+        headers: parsed.headers,
         signal: controller.signal
       })
     } finally {
@@ -162,6 +188,13 @@ export function registerIpcHandlers(): void {
     return true
   })
 
+  /* Token 用量真实统计 -------------------------------------------- */
+
+  ipcMain.handle(IPC.usageGetStats, (_event, days: unknown) => {
+    const numDays = typeof days === 'number' ? days : 30
+    return repo.getUsageStats(numDays)
+  })
+
   ipcMain.handle(IPC.appInfo, (): AppInfo => {
     return {
       name: '尚搏 Agent',
@@ -171,13 +204,40 @@ export function registerIpcHandlers(): void {
       chrome: process.versions.chrome,
       platform: process.platform,
       userDataPath: app.getPath('userData'),
-      dbPath: getDbPath()
+      dbPath: getDbPath(),
+      username: process.env.USERNAME || process.env.USER || 'Administrator'
+    }
+  })
+
+  ipcMain.handle('git:branch', async (_event, dir: string | null) => {
+    if (!dir) return 'main'
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const exec = promisify(execFile)
+      const { stdout } = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: dir,
+        timeout: 2000
+      })
+      return stdout.trim() || 'main'
+    } catch {
+      return 'main'
     }
   })
 
   ipcMain.handle(IPC.windowHide, () => {
     BrowserWindow.getFocusedWindow()?.hide()
     return true
+  })
+
+  /** 系统目录选择对话框；取消时返回 null。 */
+  ipcMain.handle(IPC.dialogPickFolder, async () => {
+    const focused = BrowserWindow.getFocusedWindow() ?? undefined
+    const result = await dialog.showOpenDialog(focused!, {
+      title: '选择项目文件夹',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
   ipcMain.handle(IPC.windowQuit, () => {

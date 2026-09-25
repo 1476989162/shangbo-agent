@@ -95,6 +95,16 @@ const MIGRATIONS: Migration[] = [
         updated_at   INTEGER NOT NULL
       );
     `
+  },
+  {
+    // v2：供应商支持自定义 HTTP 请求头（部分网关如 opencode 要求 x-opencode-session）
+    version: 2,
+    sql: `ALTER TABLE providers ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';`
+  },
+  {
+    // v3：对话可绑定本机项目目录，作为工具相对路径与命令工作目录的锚点
+    version: 3,
+    sql: `ALTER TABLE conversations ADD COLUMN working_dir TEXT;`
   }
 ]
 

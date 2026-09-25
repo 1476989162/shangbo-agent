@@ -1,5 +1,5 @@
 import { app, safeStorage } from 'electron'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import log from 'electron-log/main'
 
@@ -31,8 +31,25 @@ function load(): Record<string, string> {
   return cache
 }
 
+/**
+ * 原子写入：先写临时文件再 rename 替换，避免进程在写入中途崩溃
+ * 留下半个损坏的 JSON（load 的容错会静默重置为空，密钥等于全部丢失）。
+ */
 function persist(): void {
-  writeFileSync(filePath(), JSON.stringify(cache ?? {}, null, 2), 'utf8')
+  const path = filePath()
+  const tmp = `${path}.tmp`
+  writeFileSync(tmp, JSON.stringify(cache ?? {}, null, 2), 'utf8')
+  try {
+    if (process.platform !== 'win32') chmodSync(tmp, 0o600)
+  } catch {
+    // 权限收紧失败不影响主流程（如某些网络盘不支持）
+  }
+  try {
+    if (existsSync(path)) unlinkSync(path)
+  } catch {
+    // Windows 上目标被占用时 rename 会失败，先尝试删除
+  }
+  renameSync(tmp, path)
 }
 
 export function setSecret(key: string, value: string): void {

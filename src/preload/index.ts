@@ -6,12 +6,17 @@ import type { AgentEvent, ApprovalDecision, ProviderInput, SendPayload } from '.
 const api: ShangboApi = {
   conversation: {
     list: () => ipcRenderer.invoke(IPC.conversationList),
-    create: (title) => ipcRenderer.invoke(IPC.conversationCreate, title ? { title } : undefined),
+    create: (arg) => {
+      const payload = typeof arg === 'string' ? { title: arg } : arg
+      return ipcRenderer.invoke(IPC.conversationCreate, payload)
+    },
     rename: (id, title) => ipcRenderer.invoke(IPC.conversationRename, id, title),
     remove: (id) => ipcRenderer.invoke(IPC.conversationDelete, id),
     messages: (id) => ipcRenderer.invoke(IPC.conversationMessages, id),
     setLeaf: (conversationId, leafId) =>
-      ipcRenderer.invoke(IPC.conversationSetLeaf, conversationId, leafId)
+      ipcRenderer.invoke(IPC.conversationSetLeaf, conversationId, leafId),
+    setWorkingDir: (id, dir) => ipcRenderer.invoke(IPC.conversationSetWorkingDir, id, dir),
+    export: (id) => ipcRenderer.invoke(IPC.conversationExport, id)
   },
 
   chat: {
@@ -44,8 +49,17 @@ const api: ShangboApi = {
 
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo),
+    getGitBranch: (dir: string | null) => ipcRenderer.invoke('git:branch', dir),
     hideWindow: () => ipcRenderer.invoke(IPC.windowHide),
     quit: () => ipcRenderer.invoke(IPC.windowQuit)
+  },
+
+  dialog: {
+    pickFolder: () => ipcRenderer.invoke(IPC.dialogPickFolder)
+  },
+
+  usage: {
+    getStats: (days: number) => ipcRenderer.invoke(IPC.usageGetStats, days)
   }
 }
 
