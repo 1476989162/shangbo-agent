@@ -20,6 +20,11 @@ export interface CompletionRequest {
   tools?: ToolSchema[]
   maxTokens?: number
   temperature?: number
+  /**
+   * 思考强度原始值（minimal/low/medium/high/max）。
+   * 各 adapter 按自家线制转发，不支持的家族必须忽略——严格网关会对未知参数 400。
+   */
+  reasoningEffort?: string
 }
 
 export type StreamChunk =

@@ -45,7 +45,19 @@ function toOpenAiMessages(system: string | undefined, messages: LLMMessage[]): u
     if (message.role === 'tool') {
       for (const block of message.blocks) {
         if (block.type === 'tool_result') {
-          out.push({ role: 'tool', tool_call_id: block.toolUseId, content: block.content })
+          // 带图结果（Computer Use 截图）：tool 消息支持图文混排。
+          if (block.image?.dataUrl) {
+            out.push({
+              role: 'tool',
+              tool_call_id: block.toolUseId,
+              content: [
+                { type: 'text', text: block.content },
+                { type: 'image_url', image_url: { url: block.image.dataUrl } }
+              ]
+            })
+          } else {
+            out.push({ role: 'tool', tool_call_id: block.toolUseId, content: block.content })
+          }
         }
       }
       continue
@@ -69,7 +81,7 @@ function toOpenAiMessages(system: string | undefined, messages: LLMMessage[]): u
       continue
     }
 
-    const images = message.blocks.filter((b) => b.type === 'image')
+    const images = message.blocks.filter((b) => b.type === 'image' && b.dataUrl)
     if (images.length > 0) {
       out.push({
         role: message.role,
@@ -77,7 +89,8 @@ function toOpenAiMessages(system: string | undefined, messages: LLMMessage[]): u
           { type: 'text', text: textOf(message.blocks) },
           ...images.map((b) => ({
             type: 'image_url',
-            image_url: { url: b.type === 'image' ? b.dataUrl : '' }
+            // 已过滤掉未水合的图片，这里 dataUrl 必定存在
+            image_url: { url: b.type === 'image' ? (b.dataUrl as string) : '' }
           }))
         ]
       })
@@ -115,6 +128,11 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     }
     if (request.temperature !== undefined) body.temperature = request.temperature
     if (request.maxTokens !== undefined) body.max_tokens = request.maxTokens
+    // DeepSeek V4 与 SenseNova 吃顶层 reasoning_effort；其他模型不发送，
+    // 严格网关会对未知参数直接 400。
+    if (request.reasoningEffort !== undefined && /deepseek|sensenova/i.test(request.model)) {
+      body.reasoning_effort = request.reasoningEffort
+    }
     if (request.tools && request.tools.length > 0) {
       body.tools = request.tools.map((tool) => ({
         type: 'function',

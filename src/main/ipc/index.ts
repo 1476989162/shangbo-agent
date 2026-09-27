@@ -14,8 +14,15 @@ import {
   upsertProvider
 } from '../providers/store'
 import { probeProvider } from '../providers/gateway'
+import { mcpManager } from '../mcp/manager'
 import { exportConversation } from '../exporter'
 import { markQuitting } from '../windows/mainWindow'
+import {
+  deleteConversationImages,
+  MAX_IMAGE_BYTES,
+  saveImage,
+  type ResolvedImage
+} from '../storage/images'
 import type { AgentEvent, AppInfo, ProviderInput } from '../../shared/types'
 
 /* 渲染进程传来的一切数据都在这里做一次校验，主进程内部不再重复防御。 */
@@ -32,13 +39,34 @@ const ProviderInputSchema = z.object({
   headers: z.record(z.string(), z.string()).optional()
 })
 
-const SendPayloadSchema = z.object({
-  conversationId: z.string().min(1),
-  parentMessageId: z.string().nullable(),
-  content: z.string().min(1, '消息不能为空'),
-  providerId: z.string().optional(),
-  model: z.string().optional()
+const MAX_IMAGES_PER_MESSAGE = 8
+
+const ImageAttachmentSchema = z.object({
+  // 只放行真正的图片类型，避免把任意二进制数据当图片落盘并塞进模型上下文
+  mimeType: z
+    .string()
+    .regex(/^image\/(png|jpeg|jpg|webp|gif|bmp)$/i, '仅支持 png/jpeg/webp/gif/bmp 图片'),
+  // 传原始字节而非 base64：结构化克隆下 Uint8Array 比字符串省 33% 体积，
+  // 也省掉一次编解码。大小上限在下方按字节校验。
+  data: z.instanceof(Uint8Array)
 })
+
+const SendPayloadSchema = z
+  .object({
+    conversationId: z.string().min(1),
+    parentMessageId: z.string().nullable(),
+    content: z.string().default(''),
+    images: z
+      .array(ImageAttachmentSchema)
+      .max(MAX_IMAGES_PER_MESSAGE, '一次最多发送 8 张图片')
+      .optional(),
+    providerId: z.string().optional(),
+    model: z.string().optional()
+  })
+  // 允许「只发图不发字」，但两者不能同时为空
+  .refine((value) => value.content.trim().length > 0 || (value.images?.length ?? 0) > 0, {
+    message: '消息不能为空'
+  })
 
 const ApprovalSchema = z.object({
   runId: z.string().min(1),
@@ -80,9 +108,11 @@ export function registerIpcHandlers(): void {
     return repo.getConversation(id)
   })
 
-  ipcMain.handle(IPC.conversationDelete, (_event, id: string) => {
+  ipcMain.handle(IPC.conversationDelete, async (_event, id: string) => {
     agentRuntime.abortConversation(id)
     repo.deleteConversation(id)
+    // 方案 A：会话没了，图片目录同步删掉，不在磁盘上留垃圾
+    await deleteConversationImages(id)
     return true
   })
 
@@ -108,9 +138,21 @@ export function registerIpcHandlers(): void {
 
   /* 对话 ---------------------------------------------------------- */
 
-  ipcMain.handle(IPC.chatSend, (_event, payload: unknown) => {
+  ipcMain.handle(IPC.chatSend, async (_event, payload: unknown) => {
     const parsed = SendPayloadSchema.parse(payload)
-    return agentRuntime.send(parsed, broadcast)
+    const conversationId = parsed.conversationId
+
+    // 落盘并把字节换成相对路径：DB 里从此不再有 base64
+    const images: ResolvedImage[] = []
+    for (const attachment of parsed.images ?? []) {
+      if (attachment.data.byteLength > MAX_IMAGE_BYTES) {
+        throw new Error('单张图片过大，请压缩后再发送')
+      }
+      const file = await saveImage(conversationId, attachment.mimeType, attachment.data)
+      images.push({ mimeType: attachment.mimeType, file })
+    }
+
+    return agentRuntime.send({ ...parsed, images: images.length > 0 ? images : undefined }, broadcast)
   })
 
   ipcMain.handle(IPC.chatAbort, (_event, runId: string) => {
@@ -194,6 +236,10 @@ export function registerIpcHandlers(): void {
     const numDays = typeof days === 'number' ? days : 30
     return repo.getUsageStats(numDays)
   })
+
+  /* MCP 实时状态（设置页列表数据源，全部实测） ------------------------ */
+
+  ipcMain.handle(IPC.mcpStatus, () => mcpManager.status())
 
   ipcMain.handle(IPC.appInfo, (): AppInfo => {
     return {

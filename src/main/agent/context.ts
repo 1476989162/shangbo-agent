@@ -1,5 +1,6 @@
 import type { ContentBlock, Message } from '../../shared/types'
 import type { LLMMessage } from '../providers/types'
+import { hydrateImages } from '../storage/images'
 
 /**
  * 粗粒度 token 估算：中日韩字符约 1 字 1 token，其余按 4 字符 1 token。
@@ -27,7 +28,7 @@ export function estimateBlocks(blocks: ContentBlock[]): number {
         total += estimateTokens(JSON.stringify(block.input ?? {})) + 24
         break
       case 'tool_result':
-        total += estimateTokens(block.content) + 12
+        total += estimateTokens(block.content) + 12 + (block.image ? 800 : 0)
         break
       case 'image':
         // 图片按固定值粗估，模型侧实际开销远高于文本
@@ -43,8 +44,7 @@ export function estimateBlocks(blocks: ContentBlock[]): number {
  * 裁剪上下文必须以轮为单位——否则会出现 assistant 的 tool_use 还在、
  * 对应的 tool_result 被裁掉的非法序列，模型会直接报错。
  */
-export function groupIntoTurns(messages: Message[]): Message[][] {
-  const turns: Message[][] = []
+export function groupIntoTurns(messages: Message[]): Message[][] {  const turns: Message[][] = []
   let current: Message[] | null = null
 
   for (const message of messages) {
@@ -93,6 +93,20 @@ export interface BuiltContext {
   messages: LLMMessage[]
   omittedTurns: number
   estimatedTokens: number
+}
+
+/**
+ * 把落盘的图片补成 base64，仅在即将发往模型时调用。
+ *
+ * 刻意与 buildContext 分开：buildContext 是同步的纯函数，只按 token 预算
+ * 做块级裁剪，完全不碰磁盘；水合必须发生在裁剪之后，这样被裁掉的历史轮次
+ * 里的图片永远不会被读进内存。
+ */
+export async function hydrateContextImages(context: BuiltContext): Promise<BuiltContext> {
+  for (const message of context.messages) {
+    await hydrateImages(message.blocks)
+  }
+  return context
 }
 
 export function buildContext(

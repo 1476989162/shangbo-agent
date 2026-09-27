@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { ContentBlock, Message } from '@shared/types'
+import { imageFileUrl } from '@shared/imageUrl'
 import type { BranchInfo } from '../stores/chat'
 import MarkdownBlock from './MarkdownBlock.vue'
 
-const props = defineProps<{ message: Message; isLast: boolean; branch?: BranchInfo | null }>()
+const props = defineProps<{
+  message: Message
+  isLast: boolean
+  branch?: BranchInfo | null
+  /** 该消息还在队列里没轮到生成回复 */
+  queued?: boolean
+}>()
 const emit = defineEmits<{
   regenerate: [messageId: string]
   switchBranch: [messageId: string]
@@ -34,6 +41,39 @@ const textContent = computed(() =>
     .map((block) => block.text)
     .join('')
 )
+
+/**
+ * 用户消息里粘贴进来的图片，按原顺序展示在气泡顶部。
+ * 图片以 file 路径持久化，这里转成 shangbo-image:// URL 交给 <img>，
+ * 页面不接触真实文件系统路径。
+ *
+ * 单条脏数据（路径非法、被手工改过）只让这一张图不显示，
+ * 不能让整条消息因渲染期抛错而整块崩掉——因此逐张 try/catch。
+ */
+const userImages = computed(() => {
+  const urls: string[] = []
+  for (const block of props.message.blocks) {
+    if (block.type !== 'image') continue
+    try {
+      if (block.file) {
+        urls.push(imageFileUrl(block.file))
+      } else if (block.dataUrl) {
+        // 旧数据兜底：可能是上一版直接存 base64 的会话
+        urls.push(block.dataUrl)
+      }
+    } catch {
+      // 路径非法：跳过这一张
+    }
+  }
+  return urls
+})
+
+/** 点击放大：同一张图换成 img 标签直接铺满，Esc 或点击空白关闭。 */
+const previewImage = ref<string | null>(null)
+
+function onPreviewKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') previewImage.value = null
+}
 
 const renderItems = computed<RenderItem[]>(() => {
   const results = new Map<string, { content: string; isError: boolean }>()
@@ -191,8 +231,24 @@ async function copy(): Promise<void> {
   <article class="message" :class="isUser ? 'message-user' : 'message-assistant'">
     <div v-if="isUser" class="bubble-wrap">
       <div class="bubble">
-        <p class="user-text">{{ textContent }}</p>
+        <div v-if="userImages.length > 0" class="user-images">
+          <img
+            v-for="(src, index) in userImages"
+            :key="index"
+            :src="src"
+            class="user-image"
+            :alt="`图片 ${index + 1}`"
+            title="点击查看大图"
+            @click="previewImage = src"
+          />
+        </div>
+        <p v-if="textContent" class="user-text">{{ textContent }}</p>
       </div>
+      <!-- 排队中：明确告诉用户这条已接收、会自动接力，而不是"发出去没反应" -->
+      <p v-if="queued" class="queued-badge">
+        <span class="queued-dot" aria-hidden="true" />
+        排队中，将在当前回复完成后自动处理
+      </p>
       <div class="bubble-actions">
         <button
           class="btn btn-ghost tiny"
@@ -325,6 +381,17 @@ async function copy(): Promise<void> {
       </div>
     </template>
   </article>
+
+  <!-- 图片放大遮罩：Esc 或点击空白关闭 -->
+  <div
+    v-if="previewImage"
+    class="image-preview-mask"
+    tabindex="0"
+    @click="previewImage = null"
+    @keydown="onPreviewKeydown"
+  >
+    <img :src="previewImage" class="image-preview-img" alt="图片预览" />
+  </div>
 </template>
 
 <style scoped>
@@ -402,6 +469,80 @@ async function copy(): Promise<void> {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 用户粘贴的图片 */
+.user-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.user-images:has(+ .user-text) {
+  margin-bottom: 8px;
+}
+
+.user-image {
+  width: 132px;
+  max-width: 100%;
+  height: 132px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  display: block;
+}
+
+/* 图片放大遮罩 */
+.image-preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+  outline: none;
+}
+
+.image-preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* 排队中的标记 */
+.queued-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  align-self: flex-end;
+}
+
+.queued-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: queued-pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes queued-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
 }
 
 .assistant-body {

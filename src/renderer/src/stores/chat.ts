@@ -1,6 +1,13 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { AgentEvent, ContentBlock, Conversation, Message, Provider } from '@shared/types'
+import type {
+  AgentEvent,
+  ContentBlock,
+  Conversation,
+  ImageAttachment,
+  Message,
+  Provider
+} from '@shared/types'
 
 export interface ApprovalRequest {
   runId: string
@@ -33,6 +40,19 @@ export interface BranchInfo {
   total: number
   prevId: string | null
   nextId: string | null
+}
+
+/**
+ * 某个会话当前这一轮的信息。
+ * 运行态按会话索引存，而不是全局单值——否则切走再切回来就看不到「正在运行」，
+ * 且任何一个会话在跑都会锁死全局输入框。
+ */
+export interface ConversationRun {
+  runId: string
+  /** 正在流式输出的助手消息，用于渲染「生成中」状态 */
+  streamingMessageId: string | null
+  /** 该会话还有几个排队项 */
+  queued: number
 }
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'max'
@@ -70,12 +90,33 @@ export const useChatStore = defineStore('chat', () => {
   // 模型可见性设置：记录被隐藏的模型标识符列表（格式为 `${providerId}::${model}` 或 `${model}`）
   const hiddenModels = ref<string[]>([])
 
-  const activeRunId = ref<string | null>(null)
+  // 运行态按会话索引，而不是全局单值。
+  // 早期用单个 activeRunId，导致切到别的会话就看不到「正在运行」，
+  // 而且任何一个会话在跑都会锁死全局输入框。
+  const runsByConversation = ref<Record<string, ConversationRun>>({})
   const streamingMessageId = ref<string | null>(null)
   const approval = ref<ApprovalRequest | null>(null)
   const lastError = ref<string | null>(null)
   const switchNotice = ref<SwitchNotice | null>(null)
   const retryInfo = ref<RetryInfo | null>(null)
+
+  const activeRunId = computed(
+    () => (activeConversationId.value ? (runsByConversation.value[activeConversationId.value]?.runId ?? null) : null)
+  )
+  const streamingMessageOfCurrent = computed(() =>
+    activeConversationId.value
+      ? (runsByConversation.value[activeConversationId.value]?.streamingMessageId ?? null)
+      : null
+  )
+  /** 当前会话是否正在跑（含排队）——输入区据此显示「排队」而非「发送」。 */
+  const isStreaming = computed(() => activeRunId.value !== null)
+  /** 侧边栏列表用：某会话是否在跑，不受当前选中哪个会话影响。 */
+  function isConversationRunning(conversationId: string): boolean {
+    return runsByConversation.value[conversationId] !== undefined
+  }
+  function queuedCountOf(conversationId: string): number {
+    return runsByConversation.value[conversationId]?.queued ?? 0
+  }
 
   // 仿 Claude Desktop 现代工程特性
   const viewMode = ref<'cowork' | 'code'>('cowork')
@@ -159,9 +200,6 @@ export const useChatStore = defineStore('chat', () => {
   const historyIndex = ref(-1)
   let navigatingHistory = false
 
-  /** 发送前记下用户消息的落点，用于在 run_start 事件到达时补出本地消息。 */
-  let pendingSend: { parentId: string | null; content: string } | null = null
-
   /**
    * 当前激活分支：从 activeLeafId 沿 parentId 回溯。
    * 消息全量都在 messages 里，切换分支只是改 activeLeafId，不重写任何数据。
@@ -181,8 +219,6 @@ export const useChatStore = defineStore('chat', () => {
 
     return path.reverse()
   })
-
-  const isStreaming = computed(() => activeRunId.value !== null)
 
   const activeConversation = computed(
     () => conversations.value.find((item) => item.id === activeConversationId.value) ?? null
@@ -264,8 +300,9 @@ export const useChatStore = defineStore('chat', () => {
         const parts = conv.workingDir.split(/[\\/]/).filter(Boolean)
         projectName = parts[parts.length - 1] || conv.workingDir
       }
-      const isCurrentStreaming = activeRunId.value !== null && activeConversationId.value === conv.id
-      const status: 'needs_input' | 'in_progress' | 'ready' = isCurrentStreaming
+      // 运行态按会话查，不再依赖「当前选中的恰好是它」
+      const running = isConversationRunning(conv.id)
+      const status: 'needs_input' | 'in_progress' | 'ready' = running
         ? 'in_progress'
         : approval.value && activeConversationId.value === conv.id
         ? 'needs_input'
@@ -289,46 +326,79 @@ export const useChatStore = defineStore('chat', () => {
     return messages.value.find((message) => message.id === id)
   }
 
+  /** 写入/更新某会话的运行态。 */
+  function setRun(conversationId: string, run: ConversationRun | null): void {
+    const next = { ...runsByConversation.value }
+    if (run) next[conversationId] = run
+    else delete next[conversationId]
+    runsByConversation.value = next
+  }
+
+  function getRun(conversationId: string): ConversationRun | null {
+    return runsByConversation.value[conversationId] ?? null
+  }
+
   function handleEvent(event: AgentEvent): void {
-    // 事件流是全局广播的：只处理当前正在查看的会话，
-    // 否则后台会话的流式输出会污染当前会话的消息列表和 activeLeaf。
-    if ('conversationId' in event && event.conversationId !== activeConversationId.value) {
-      // message_done / run_end / run_error 仍需刷新会话列表（标题、时间可能已更新）
-      if (
-        event.type === 'message_done' ||
-        event.type === 'run_end' ||
-        event.type === 'run_error'
-      ) {
-        void refreshConversations()
-      }
-      if (event.type === 'run_end' && event.runId === activeRunId.value) {
-        activeRunId.value = null
-        streamingMessageId.value = null
-        approval.value = null
+    // 事件流是全局广播的。关键点：不再因为「不是当前会话」就丢弃事件——
+    // 运行态必须按会话记下，否则切走再切回来就看不出它还在跑（问题 1 的根因）。
+    const isCurrent = !('conversationId' in event) || event.conversationId === activeConversationId.value
+
+    if (!isCurrent) {
+      // 后台会话：只维护它的运行态与标题时间，不碰当前视图的消息与 activeLeaf
+      switch (event.type) {
+        case 'run_start':
+        case 'run_queued': {
+          setRun(event.conversationId, {
+            runId: event.runId,
+            streamingMessageId: event.type === 'run_start' ? event.assistantMessageId : null,
+            queued: event.type === 'run_queued' ? event.position : 0
+          })
+          void refreshConversations()
+          break
+        }
+        case 'run_end': {
+          if (event.queued > 0) {
+            // 还有排队项：运行态不能清掉，否则切回来会以为空闲
+            const current = getRun(event.conversationId)
+            if (current) setRun(event.conversationId, { ...current, queued: event.queued })
+          } else {
+            setRun(event.conversationId, null)
+          }
+          void refreshConversations()
+          break
+        }
+        case 'run_error':
+        case 'message_done':
+          void refreshConversations()
+          break
       }
       return
     }
 
     switch (event.type) {
-      case 'run_start': {
-        activeRunId.value = event.runId
-        streamingMessageId.value = event.assistantMessageId
+      case 'run_queued': {
+        // 这条消息已落库、排在当前回合之后：照常显示，状态由 queued 表达
+        setRun(event.conversationId, {
+          runId: event.runId,
+          streamingMessageId: null,
+          queued: event.position
+        })
+        if (!findMessage(event.userMessageId)) messages.value.push(event.userMessage)
+        void refreshConversations()
+        break
+      }
 
-        if (pendingSend && !findMessage(event.userMessageId)) {
-          messages.value.push({
-            id: event.userMessageId,
-            conversationId: event.conversationId,
-            parentId: pendingSend.parentId,
-            role: 'user',
-            blocks: [{ type: 'text', text: pendingSend.content }],
-            status: 'done',
-            error: null,
-            providerId: null,
-            model: null,
-            usage: null,
-            createdAt: Date.now(),
-            updatedAt: Date.now()
-          })
+      case 'run_start': {
+        setRun(event.conversationId, {
+          runId: event.runId,
+          streamingMessageId: event.assistantMessageId,
+          queued: 0
+        })
+
+        if (!findMessage(event.userMessageId)) {
+          // 直接采用主进程回传的消息实体：图片此时已带上 file 路径，
+          // 渲染层能立刻显示出图片，不必自己猜内容或二次请求
+          messages.value.push(event.userMessage)
         }
 
         if (!findMessage(event.assistantMessageId)) {
@@ -349,7 +419,6 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         activeLeafId.value = event.assistantMessageId
-        pendingSend = null
         break
       }
 
@@ -444,7 +513,8 @@ export const useChatStore = defineStore('chat', () => {
             activeLeafId.value = event.messageId
           }
         }
-        streamingMessageId.value = null
+        const run = getRun(event.conversationId)
+        if (run) setRun(event.conversationId, { ...run, streamingMessageId: null })
         retryInfo.value = null
         void refreshConversations()
         break
@@ -463,10 +533,16 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'run_end': {
-        activeRunId.value = null
-        streamingMessageId.value = null
+        // 还有排队项就不能清运行态——那样输入框会以为空闲，用户能重复排队
+        if (event.queued > 0) {
+          const run = getRun(event.conversationId)
+          if (run) setRun(event.conversationId, { ...run, streamingMessageId: null })
+        } else {
+          setRun(event.conversationId, null)
+        }
         approval.value = null
         retryInfo.value = null
+        void refreshConversations()
         break
       }
     }
@@ -584,9 +660,18 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function send(content: string, parentMessageId?: string | null): Promise<void> {
+  /**
+   * 发送一条用户消息。会话正在跑时不再拒绝，而是交给主进程排队，
+   * 用户因此可以在 AI 回复途中继续录入，提交后作为下一轮自动接力。
+   */
+  async function send(
+    content: string,
+    parentMessageId?: string | null,
+    images?: ImageAttachment[]
+  ): Promise<void> {
     const text = content.trim()
-    if (!text || isStreaming.value) return
+    const attachments = images ?? []
+    if (!text && attachments.length === 0) return
 
     let conversationId = activeConversationId.value
     if (!conversationId) {
@@ -598,7 +683,6 @@ export const useChatStore = defineStore('chat', () => {
     lastError.value = null
     // 编辑重发时以被编辑消息的父节点为锚点，生成兄弟分支；正常发送以当前叶子为锚点
     const anchor = parentMessageId !== undefined ? parentMessageId : activeLeafId.value
-    pendingSend = { parentId: anchor, content: text }
     switchNotice.value = null
     retryInfo.value = null
 
@@ -607,28 +691,39 @@ export const useChatStore = defineStore('chat', () => {
         conversationId,
         parentMessageId: anchor,
         content: text,
+        ...(attachments.length > 0 ? { images: attachments } : {}),
         providerId: selectedProviderId.value || undefined,
         model: selectedModel.value || undefined
       })
-      activeRunId.value = runId
+      // 先乐观占位：主进程很快会下发 run_start 或 run_queued 覆盖它
+      setRun(conversationId, {
+        runId,
+        streamingMessageId: null,
+        queued: isConversationRunning(conversationId) ? 1 : 0
+      })
     } catch (error) {
-      pendingSend = null
       lastError.value = error instanceof Error ? error.message : String(error)
     }
   }
 
+  /** 停止：只中断正在跑的那一轮，队列里排着的会继续接力执行。 */
   async function stop(): Promise<void> {
     if (!activeRunId.value) return
     await window.shangbo.chat.abort(activeRunId.value)
   }
 
+  /** 重新生成：同样走队列，不打断正在跑的回合。 */
   async function regenerate(assistantMessageId: string): Promise<void> {
-    if (isStreaming.value) return
+    const target = findMessage(assistantMessageId)
+    if (!target) return
     lastError.value = null
-    pendingSend = null
     try {
       const { runId } = await window.shangbo.chat.regenerate(assistantMessageId)
-      activeRunId.value = runId
+      setRun(target.conversationId, {
+        runId,
+        streamingMessageId: null,
+        queued: isConversationRunning(target.conversationId) ? 1 : 0
+      })
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : String(error)
     }
@@ -727,7 +822,10 @@ export const useChatStore = defineStore('chat', () => {
     availableModels,
     usableProviders,
     activeRunId,
-    streamingMessageId,
+    runsByConversation,
+    streamingMessageOfCurrent,
+    isConversationRunning,
+    queuedCountOf,
     approval,
     lastError,
     switchNotice,

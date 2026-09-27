@@ -1,6 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { Message } from '@shared/types'
+import type { ImageAttachment, Message } from '@shared/types'
+import { imageFileUrl } from '@shared/imageUrl'
+
+/**
+ * 待发送图片在渲染层的形态。
+ * 预览用 objectURL，发给主进程用原始字节——两者都不经过 base64 字符串，
+ * 避免大图在页面里被复制成 1.33 倍的字符串。
+ */
+interface PendingImage {
+  id: string
+  mimeType: string
+  data: Uint8Array
+  /** 仅用于 <img> 预览的临时 URL，移除时必须 revoke */
+  previewUrl: string
+}
 import { useChatStore } from '../stores/chat'
 import type { BranchInfo, EffortLevel } from '../stores/chat'
 import MessageItem from './MessageItem.vue'
@@ -10,6 +24,11 @@ const emit = defineEmits<{ openSettings: [tab?: string] }>()
 const store = useChatStore()
 
 const draft = ref('')
+/** 待发送的图片附件（剪贴板粘贴的截图等），与草稿文本一起在发送时提交。 */
+const pendingImages = ref<PendingImage[]>([])
+/** 图片处理失败时的一行临时提示。 */
+const imageHint = ref<string | null>(null)
+let imageHintTimer: ReturnType<typeof setTimeout> | null = null
 const scrollEl = ref<HTMLElement | null>(null)
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const pinnedToBottom = ref(true)
@@ -110,6 +129,8 @@ watch(
   () => store.activeConversationId,
   async () => {
     pinnedToBottom.value = true
+    // 换会话就清掉待发图片，否则上一条会话的截图会被误发到新会话
+    clearPendingImages()
     await nextTick()
     scrollToBottom()
     textareaEl.value?.focus()
@@ -123,15 +144,143 @@ function autoGrow(): void {
   element.style.height = `${Math.min(element.scrollHeight, 220)}px`
 }
 
+/** 与主进程 zod 校验保持一致的图片约束，避免用户粘贴后才被拒绝。 */
+const MAX_IMAGE_COUNT = 8
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024
+const IMAGE_MIME_RE = /^image\/(png|jpeg|jpg|webp|gif|bmp)$/i
+
+function showImageHint(text: string): void {
+  imageHint.value = text
+  if (imageHintTimer) clearTimeout(imageHintTimer)
+  imageHintTimer = setTimeout(() => (imageHint.value = null), 4000)
+}
+
+function readAsBytes(file: File): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      // FileReader 读 Blob 走的是 ArrayBuffer 分支，不会触发字符串的按码点截断
+      const result = reader.result
+      if (!(result instanceof ArrayBuffer)) {
+        reject(new Error('读取图片失败'))
+        return
+      }
+      resolve(new Uint8Array(result))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('读取图片失败'))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+/** 把一张图片文件收进待发列表：字节用于发送，objectURL 仅用于预览。 */
+async function collectImage(file: File): Promise<boolean> {
+  if (file.size > MAX_IMAGE_BYTES) {
+    showImageHint(`「${file.type || '图片'}」超过 ${MAX_IMAGE_BYTES / 1024 / 1024}MB，已跳过`)
+    return false
+  }
+  try {
+    const data = await readAsBytes(file)
+    // 用 Blob 而不是直接用字节造 URL：浏览器需要正确的 MIME 才会渲染。
+    // 显式标注 ArrayBuffer 视图，绕开 Uint8Array<ArrayBufferLike> 与
+    // BlobPart 之间的 SharedArrayBuffer 联合类型不兼容。
+    const previewUrl = URL.createObjectURL(
+      new Blob([new Uint8Array(data)], { type: file.type })
+    )
+    pendingImages.value.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      mimeType: file.type.toLowerCase(),
+      data,
+      previewUrl
+    })
+    return true
+  } catch {
+    showImageHint('读取图片失败，请重新粘贴')
+    return false
+  }
+}
+
+/**
+ * 从剪贴板事件里收集图片（截图、复制的图片文件、网页图片地址）。
+ * 纯文本粘贴交还给 textarea 自身处理，此处不拦截。
+ */
+async function onPaste(event: ClipboardEvent): Promise<void> {
+  const items = event.clipboardData?.items
+  if (!items) return
+
+  const files: File[] = []
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file && IMAGE_MIME_RE.test(file.type)) files.push(file)
+  }
+
+  // 没有图片就不接管这次粘贴，让浏览器照常插入文字
+  if (files.length === 0) return
+  event.preventDefault()
+
+  const room = MAX_IMAGE_COUNT - pendingImages.value.length
+  if (room <= 0) {
+    showImageHint(`一次最多发送 ${MAX_IMAGE_COUNT} 张图片`)
+    return
+  }
+  if (files.length > room) {
+    showImageHint(`一次最多发送 ${MAX_IMAGE_COUNT} 张图片，多余的已忽略`)
+  }
+
+  for (const file of files.slice(0, room)) {
+    await collectImage(file)
+  }
+  await nextTick()
+  autoGrow()
+}
+
+/** 也支持直接拖拽图片文件到输入框。 */
+async function onDrop(event: DragEvent): Promise<void> {
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  const images = files.filter((file) => IMAGE_MIME_RE.test(file.type))
+  if (images.length === 0) return
+  event.preventDefault()
+
+  const room = MAX_IMAGE_COUNT - pendingImages.value.length
+  if (room <= 0) {
+    showImageHint(`一次最多发送 ${MAX_IMAGE_COUNT} 张图片`)
+    return
+  }
+  for (const file of images.slice(0, room)) {
+    await collectImage(file)
+  }
+  await nextTick()
+  autoGrow()
+}
+
+function removeImage(id: string): void {
+  const index = pendingImages.value.findIndex((item) => item.id === id)
+  if (index < 0) return
+  // 预览用的 objectURL 必须显式回收，否则 blob 会一直占着内存
+  URL.revokeObjectURL(pendingImages.value[index].previewUrl)
+  pendingImages.value.splice(index, 1)
+}
+
+function clearPendingImages(): void {
+  for (const item of pendingImages.value) URL.revokeObjectURL(item.previewUrl)
+  pendingImages.value = []
+}
+
 async function submit(): Promise<void> {
   const text = draft.value.trim()
-  if (!text || store.isStreaming) return
+  const images: ImageAttachment[] = pendingImages.value.map((item) => ({
+    mimeType: item.mimeType,
+    data: item.data
+  }))
+  // 不再因为「正在生成」而拒绝提交：主进程会把它排进队列，接在当前回合之后
+  if (!text && images.length === 0) return
   const anchor = editing.value?.parentId
   draft.value = ''
+  clearPendingImages()
   editing.value = null
   await nextTick()
   autoGrow()
-  await store.send(text, anchor)
+  await store.send(text, anchor, images)
 }
 
 function onEdit(payload: { content: string; parentId: string | null }): void {
@@ -165,6 +314,13 @@ function onKeydown(event: KeyboardEvent): void {
     if (editing.value) {
       event.preventDefault()
       editing.value = null
+      return
+    }
+    // 没有草稿可撤时，Esc 用来清空待发图片
+    if (!draft.value && pendingImages.value.length > 0) {
+      event.preventDefault()
+      clearPendingImages()
+      showImageHint('已清空待发图片')
       return
     }
     if (effortMenuOpen.value || modelMenuOpen.value || contextWindowOpen.value) {
@@ -212,6 +368,8 @@ watch(
 onBeforeUnmount(() => {
   if (exportTimer) clearTimeout(exportTimer)
   if (countdownTimer) clearInterval(countdownTimer)
+  if (imageHintTimer) clearTimeout(imageHintTimer)
+  clearPendingImages()
 })
 
 async function decide(approved: boolean, alwaysAllow = false): Promise<void> {
@@ -270,6 +428,17 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 // 用户在设置或浮层中指定的上下文预算上限 (null 表示按模型自适应)
+/**
+ * 这条用户消息是否已经有助手回复挂在它下面。
+ * 排队中的消息主进程尚未创建助手节点，用它区分
+ * 「已发送、正在等回复」与「还在队列里没轮到」。
+ */
+function hasAssistantReply(userMessageId: string): boolean {
+  return store.messages.some(
+    (item) => item.parentId === userMessageId && item.role === 'assistant'
+  )
+}
+
 const userContextBudget = ref<number | null>(null)
 
 async function loadContextBudgetSetting(): Promise<void> {
@@ -604,6 +773,7 @@ const suggestions = [
             :message="message"
             :is-last="message.id === lastAssistantId && !store.isStreaming"
             :branch="branchInfo(message)"
+            :queued="message.role === 'user' && !hasAssistantReply(message.id)"
             @regenerate="store.regenerate"
             @switch-branch="store.switchBranch"
             @edit="onEdit"
@@ -759,14 +929,43 @@ const suggestions = [
 
           <!-- 输入卡片主体 -->
           <div class="composer-card">
+            <!-- 生成中的排队提示：告诉用户可以继续录入，提交后会排在当前回合之后 -->
+            <p v-if="store.isStreaming" class="queue-hint">
+              <span class="queue-dot" aria-hidden="true" />
+              <span v-if="store.queuedCountOf(store.activeConversationId ?? '') > 0">
+                还有 {{ store.queuedCountOf(store.activeConversationId ?? '') }} 条排队中，将依次自动发送
+              </span>
+              <span v-else>正在生成中，可继续录入下一条，发送后将自动排队</span>
+            </p>
+
+            <!-- 图片粘贴失败的临时提示（超大图 / 超出张数上限等） -->
+            <p v-if="imageHint" class="image-hint">{{ imageHint }}</p>
+
+            <!-- 待发图片缩略图条：粘贴/拖入的截图先落在这里，可逐张删除 -->
+            <div v-if="pendingImages.length > 0" class="pending-images">
+              <div v-for="image in pendingImages" :key="image.id" class="pending-image">
+                <img :src="image.previewUrl" alt="待发送图片" />
+                <button
+                  class="pending-image-remove"
+                  title="移除这张图片"
+                  @click="removeImage(image.id)"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
             <textarea
               ref="textareaEl"
               v-model="draft"
               class="composer-textarea"
               rows="1"
-              placeholder="输入任务或提出问题，按 / 可使用常用命令…"
+              placeholder="输入任务或提出问题，按 / 可使用常用命令… 也可直接 Ctrl+V 粘贴截图"
               @input="autoGrow"
               @keydown="onKeydown"
+              @paste="onPaste"
+              @drop="onDrop"
+              @dragover.prevent
             />
 
             <!-- 输入卡片底栏：左侧权限模式 + 右侧模型药丸、思考强度与发送 -->
@@ -1137,19 +1336,31 @@ const suggestions = [
                   </div>
                 </div>
 
-                <!-- 发送 / 停止按钮 -->
-                <button
-                  v-if="store.isStreaming"
-                  class="submit-action stop-btn"
-                  title="停止生成"
-                  @click="store.stop()"
-                >
-                  <span class="stop-icon" />
-                </button>
+                <!-- 生成中：保留停止按钮，同时给出「排队发送」，让用户能继续录入 -->
+                <div v-if="store.isStreaming" class="dual-actions">
+                  <button
+                    class="submit-action stop-btn"
+                    title="停止生成"
+                    @click="store.stop()"
+                  >
+                    <span class="stop-icon" />
+                  </button>
+                  <button
+                    class="submit-action enqueue-btn"
+                    :disabled="!draft.trim() && pendingImages.length === 0"
+                    title="加入队列，当前回复完成后自动发送 (Enter)"
+                    @click="submit"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <path d="M8 2.5v8M5.2 7.6L8 10.4l2.8-2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                      <path d="M3 12.8h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </svg>
+                  </button>
+                </div>
                 <button
                   v-else
                   class="submit-action send-btn"
-                  :disabled="!draft.trim()"
+                  :disabled="!draft.trim() && pendingImages.length === 0"
                   title="发送 (Enter)"
                   @click="submit"
                 >
@@ -1643,6 +1854,103 @@ const suggestions = [
 .composer-card:focus-within {
   border-color: var(--accent);
   box-shadow: 0 4px 20px rgba(217, 119, 87, 0.15);
+}
+
+/* 生成中的排队提示 */
+.queue-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.queue-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: queue-pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes queue-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* 生成中：停止 + 排队发送 并排 */
+.dual-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.enqueue-btn {
+  background: var(--accent);
+  color: #fff;
+}
+
+.enqueue-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.enqueue-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 图片粘贴提示 */
+.image-hint {
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+
+/* 待发图片缩略图条 */
+.pending-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 2px;
+}
+
+.pending-image {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.pending-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.pending-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.pending-image-remove:hover {
+  background: var(--danger);
 }
 
 .composer-textarea {

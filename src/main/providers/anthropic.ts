@@ -62,12 +62,28 @@ function toAnthropicMessages(messages: LLMMessage[]): AnthropicMessage[] {
         'user',
         message.blocks
           .filter((b) => b.type === 'tool_result')
-          .map((b) => ({
-            type: 'tool_result',
-            tool_use_id: b.type === 'tool_result' ? b.toolUseId : '',
-            content: b.type === 'tool_result' ? b.content : '',
-            is_error: b.type === 'tool_result' ? b.isError : false
-          }))
+          .map((b) => {
+            if (b.type !== 'tool_result') return { type: 'text', text: '' }
+            // 带图结果（Computer Use 截图）：tool_result 内容支持内嵌图片块。
+            if (b.image?.dataUrl) {
+              const { mimeType, data } = parseDataUrl(b.image.dataUrl)
+              return {
+                type: 'tool_result',
+                tool_use_id: b.toolUseId,
+                content: [
+                  { type: 'text', text: b.content },
+                  ...(data ? [{ type: 'image', source: { type: 'base64', media_type: mimeType, data } }] : [])
+                ],
+                is_error: b.isError
+              }
+            }
+            return {
+              type: 'tool_result',
+              tool_use_id: b.toolUseId,
+              content: b.content,
+              is_error: b.isError
+            }
+          })
       )
       continue
     }
@@ -90,6 +106,9 @@ function toAnthropicMessages(messages: LLMMessage[]): AnthropicMessage[] {
     if (text) blocks.push({ type: 'text', text })
     for (const block of message.blocks) {
       if (block.type === 'image') {
+        // dataUrl 可能缺失：图片以文件形式落盘，尚未水合，或文件已丢失。
+        // 缺图就跳过该块，文本部分照常发送，不让整轮请求失败。
+        if (!block.dataUrl) continue
         const { mimeType, data } = parseDataUrl(block.dataUrl)
         if (data) {
           blocks.push({ type: 'image', source: { type: 'base64', media_type: mimeType, data } })

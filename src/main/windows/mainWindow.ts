@@ -1,14 +1,18 @@
-import { BrowserWindow, app, session, shell } from 'electron'
+import { BrowserWindow, app, protocol, session, shell } from 'electron'
 import { join } from 'node:path'
 import log from 'electron-log/main'
+import { IMAGE_PROTOCOL } from '../../shared/imageUrl'
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
 
 // 与 index.html 的 meta CSP 保持一致。'wasm-unsafe-eval' 是窄指令：只允许
 // WebAssembly 编译（Shiki 的 oniguruma 引擎需要），不放开 JS eval。
-const DEV_CSP =
-  "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*"
+// img-src 额外放开 shangbo-image: 以便直接 <img> 渲染落在 userData 下的图片，
+// 而不必把整张图以 base64 塞进页面内存。
+const CSP_IMG_SRC = `'self' data: blob: ${IMAGE_PROTOCOL}:`
+
+const DEV_CSP = `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src ${CSP_IMG_SRC}; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*`
 
 let devCspRegistered = false
 

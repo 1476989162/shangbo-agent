@@ -82,6 +82,13 @@ export function toResponsesInput(messages: LLMMessage[]): Record<string, unknown
             call_id: block.toolUseId,
             output: block.content
           })
+          // Responses 的 function_call_output 只收文本：图片以后续 user 消息补（input_image）。
+          if (block.image?.dataUrl) {
+            input.push({
+              role: 'user',
+              content: [{ type: 'input_image', image_url: block.image.dataUrl }]
+            })
+          }
         }
       }
       continue
@@ -118,7 +125,8 @@ export function toResponsesInput(messages: LLMMessage[]): Record<string, unknown
       contentParts.push({ type: 'input_text', text })
     }
     for (const img of images) {
-      if (img.type === 'image') {
+      // 同样跳过未水合（dataUrl 缺失）的图片，避免发出 undefined
+      if (img.type === 'image' && img.dataUrl) {
         contentParts.push({ type: 'input_image', image_url: img.dataUrl })
       }
     }
@@ -161,6 +169,11 @@ export const openAiResponsesAdapter: ProviderAdapter = {
     if (request.maxTokens !== undefined) {
       // Responses API 规定 max_output_tokens 必须 >= 16
       body.max_output_tokens = Math.max(16, request.maxTokens)
+    }
+    // muse-spark 走 reasoning.effort（minimal…max）；用 reasoning_effort 会 400。
+    // 非 muse 模型不发送，线制未知。
+    if (request.reasoningEffort !== undefined && /muse/i.test(request.model)) {
+      body.reasoning = { effort: request.reasoningEffort }
     }
     if (request.tools && request.tools.length > 0) {
       body.tools = request.tools.map((tool) => ({

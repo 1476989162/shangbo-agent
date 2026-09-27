@@ -12,8 +12,14 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean }
-  | { type: 'image'; mimeType: string; dataUrl: string }
+  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }
+  /**
+   * 图片块。二者至少要有一个：
+   * - file：已落盘的相对路径（持久化形态，DB 只存它，体积不膨胀）
+   * - dataUrl：内存态直传，仅在发往模型前短暂存在，不入库
+   * 两者皆空时由各 provider 降级为纯文本（见 providers/types.ts 的 textOf）。
+   */
+  | { type: 'image'; mimeType: string; file?: string; dataUrl?: string }
 
 export interface Usage {
   /** 末次请求的输入 tokens——多步工具循环时，这才是单次请求上下文的真实规模 */
@@ -141,17 +147,56 @@ export interface ProviderTestResult {
   message: string
 }
 
+/** MCP 服务实时状态（设置页列表的数据源，状态全部实测而来）。 */
+export interface McpServerStatus {
+  id: string
+  name: string
+  enabled: boolean
+  /** ready=进程活着且工具已拉回；error=起不来或缺东西；disabled=开关关了。 */
+  state: 'ready' | 'error' | 'disabled'
+  toolCount: number
+  tools: { name: string; description?: string }[]
+  error?: string
+}
+
 /* ------------------------------------------------------------------ */
 /* Agent 运行时事件                                                     */
 /* ------------------------------------------------------------------ */
+
+/**
+ * 随消息发送的图片附件（IPC 线格式）。
+ * 刻意不传 base64：粘贴的截图动辄数 MB，编成 base64 既膨胀 33% 又会在
+ * IPC、结构化克隆、DB 写入上反复搬运。改为传原始字节，由主进程落盘，
+ * 渲染层与 DB 之间只传递路径。
+ */
+export interface ImageAttachment {
+  /** 仅允许常见图片类型，如 image/png、image/jpeg、image/webp、image/gif */
+  mimeType: string
+  /** 原始字节 */
+  data: Uint8Array
+}
+
+/** 落盘后的图片引用：DB 里的 image 块与运行时的请求都用它，file 为相对路径。 */
+export interface StoredImage {
+  mimeType: string
+  /** 形如 `<conversationId>/<uuid>.png`，相对于 userData/images */
+  file: string
+}
 
 export interface SendPayload {
   conversationId: string
   /** 新消息挂载到哪个父消息下；为 null 表示作为根消息（新分支起点）。 */
   parentMessageId: string | null
   content: string
+  /** 随消息一起发送的图片（如从剪贴板粘贴的截图），以原始字节表达。 */
+  images?: ImageAttachment[]
   providerId?: string
   model?: string
+}
+
+/** 主进程内部使用的发送请求：图片已落盘，只剩路径。 */
+export interface AgentSendRequest extends Omit<SendPayload, 'images'> {
+  images?: StoredImage[]
 }
 
 export type AgentEvent =
@@ -161,6 +206,11 @@ export type AgentEvent =
       conversationId: string
       userMessageId: string
       assistantMessageId: string
+      /**
+       * 刚落库的用户消息。图片此时已带 file 路径，渲染层可直接用它渲染气泡，
+       * 无需自己猜内容——也避免乐观渲染与真实落库结果出现偏差。
+       */
+      userMessage: Message
     }
   | { type: 'text_delta'; runId: string; conversationId: string; messageId: string; text: string }
   | {
@@ -198,6 +248,23 @@ export type AgentEvent =
       input: unknown
       reason: string
     }
+  | {
+      type: 'subagent_start'
+      runId: string
+      conversationId: string
+      messageId: string
+      toolUseId: string
+      task: string
+    }
+  | {
+      type: 'subagent_done'
+      runId: string
+      conversationId: string
+      messageId: string
+      toolUseId: string
+      task: string
+      isError: boolean
+    }
   | { type: 'usage'; runId: string; conversationId: string; messageId: string; usage: Usage }
   | {
       type: 'provider_switched'
@@ -232,7 +299,26 @@ export type AgentEvent =
       messageId: string
       error: string
     }
-  | { type: 'run_end'; runId: string; conversationId: string }
+  | {
+      type: 'run_end'
+      runId: string
+      conversationId: string
+      /** 该会话（含正在跑的）还剩几个排队项。会话被删除时为 0。 */
+      queued: number
+    }
+  /**
+   * 轮次进入等待队列：同会话已有回合在跑，本轮排在它后面。
+   * 渲染层据此把消息标成「排队中」，而不是凭空消失。
+   */
+  | {
+      type: 'run_queued'
+      runId: string
+      conversationId: string
+      userMessageId: string
+      /** 前面还有几个回合在等（含正在跑的那个） */
+      position: number
+      userMessage: Message
+    }
 
 export interface ApprovalDecision {
   runId: string

@@ -223,6 +223,18 @@ function openTab(tab: string): void {
 
             <span class="tree-title" :title="conv.title">{{ conv.title }}</span>
 
+            <!-- 后台会话的运行标记：不切过去也能看出它在跑 / 排着队 -->
+            <span
+              v-if="store.isConversationRunning(conv.id)"
+              class="run-indicator"
+              :class="{ queued: store.queuedCountOf(conv.id) > 0 }"
+              :title="
+                store.queuedCountOf(conv.id) > 0
+                  ? `运行中，另有 ${store.queuedCountOf(conv.id)} 条排队`
+                  : '正在生成回复'
+              "
+            />
+
             <!-- 删除操作 -->
             <div v-if="pendingDeleteId === conv.id" class="confirm-box" @click.stop>
               <button class="btn btn-ghost tiny btn-danger" @click="confirmDelete(conv.id)">删除</button>
@@ -897,6 +909,27 @@ function openTab(tab: string): void {
 
 .gateway-tag {
   color: var(--text-muted);
+}
+
+/* 后台会话的运行指示灯 */
+.run-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+/* 队列里还有待处理项：改成静态的次级色，区别于「正在生成」 */
+.run-indicator.queued {
+  background: var(--text-subtle);
+  animation: none;
+}
+
+@keyframes run-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
 }
 
 .status-dot {

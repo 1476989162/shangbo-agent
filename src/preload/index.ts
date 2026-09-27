@@ -60,6 +60,10 @@ const api: ShangboApi = {
 
   usage: {
     getStats: (days: number) => ipcRenderer.invoke(IPC.usageGetStats, days)
+  },
+
+  mcp: {
+    status: () => ipcRenderer.invoke(IPC.mcpStatus)
   }
 }
 
