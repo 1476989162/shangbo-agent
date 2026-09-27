@@ -30,7 +30,9 @@ export const IPC = {
   windowQuit: 'window:quit',
 
   dialogPickFolder: 'dialog:pickFolder',
-  usageGetStats: 'usage:getStats'
+  usageGetStats: 'usage:getStats',
+
+  mcpStatus: 'mcp:status'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

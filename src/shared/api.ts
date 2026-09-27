@@ -70,4 +70,9 @@ export interface ShangboApi {
   usage: {
     getStats(days: number): Promise<import('./types').UsageSummaryStats>
   }
+
+  mcp: {
+    /** 各 MCP 服务实时状态（是否启用、进程是否活着、工具清单）。 */
+    status(): Promise<import('./types').McpServerStatus[]>
+  }
 }

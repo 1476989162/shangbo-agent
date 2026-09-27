@@ -4,6 +4,15 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { app } from 'electron'
 import { z } from 'zod'
+import {
+  clickAt,
+  pressKey,
+  scrollAt,
+  supportedKeysHint,
+  takeScreenshot,
+  typeText,
+  type Screenshot
+} from '../computer'
 
 const execAsync = promisify(exec)
 
@@ -26,6 +35,13 @@ function resolveUserPath(context: ToolContext, path: string): string {
   return context.workingDirectory ? resolve(context.workingDirectory, path) : resolve(path)
 }
 
+/** 工具执行结果：纯文本工具直接返回 string，只有截图这类才用对象带图。 */
+export interface ToolResult {
+  content: string
+  isError: boolean
+  image?: { mimeType: string; dataUrl: string }
+}
+
 export interface ToolDefinition {
   name: string
   description: string
@@ -35,7 +51,7 @@ export interface ToolDefinition {
   requiresApproval: boolean
   /** 展示在确认弹窗里的风险说明。 */
   approvalReason?: string
-  execute(input: unknown, context: ToolContext): Promise<string>
+  execute(input: unknown, context: ToolContext): Promise<string | ToolResult>
 }
 
 /** 单次工具输出上限，避免一次目录列举就把上下文撑爆。 */
@@ -353,18 +369,203 @@ const runCommand: ToolDefinition = {
   }
 }
 
+const searchFiles: ToolDefinition = {
+  name: 'search_files',
+  description:
+    '在项目目录内按文件名或文件内容搜索。找文件、定位报错、查某段代码在哪里时优先用它，不要用 list_directory 逐层翻。',
+  parameters: {
+    type: 'object',
+    properties: {
+      filename: { type: 'string', description: '文件名关键字或片段，如 approval、runtime.ts。缺省则不限文件名' },
+      content: { type: 'string', description: '文件内容关键字，如 approval_required。缺省则只按文件名找' },
+      path: { type: 'string', description: '搜索起点目录，缺省为项目目录' },
+      maxResults: { type: 'integer', description: '最多返回条数，默认 50，最大 200' }
+    },
+    required: []
+  },
+  requiresApproval: false,
+  async execute(input, context) {
+    const { filename, content, path, maxResults } = z
+      .object({
+        filename: z.string().optional(),
+        content: z.string().optional(),
+        path: z.string().optional(),
+        maxResults: z.number().int().positive().max(200).optional()
+      })
+      .parse(input ?? {})
+    if (!filename && !content) throw new Error('请至少提供 filename 或 content 其中之一')
+    const limit = maxResults ?? 50
+    const root = resolveUserPath(context, path ?? '.')
+    guardPrivatePath(root)
+    const skipDirs = new Set(['node_modules', '.git', 'dist', 'out', 'release', '.vite', 'coverage'])
+    const nameNeedle = filename?.toLowerCase() ?? null
+    const contentNeedle = content?.toLowerCase() ?? null
+    const results: string[] = []
+    let scanned = 0
+    const stack: string[] = [root]
+    while (stack.length > 0 && results.length < limit && scanned < 5000) {
+      const dir = stack.pop()!
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (results.length >= limit || scanned >= 5000) break
+        const full = resolve(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (!skipDirs.has(entry.name)) stack.push(full)
+          continue
+        }
+        scanned++
+        if (nameNeedle && !entry.name.toLowerCase().includes(nameNeedle)) {
+          // 按文件名搜时不读内容；同时给了 content 才需要读文件过滤
+          if (!contentNeedle) continue
+        }
+        if (!contentNeedle) {
+          results.push(full)
+          continue
+        }
+        let buffer
+        try {
+          const info = await stat(full)
+          if (info.size > 512_000) continue
+          buffer = await readFile(full)
+        } catch {
+          continue
+        }
+        if (buffer.includes(0)) continue
+        if (buffer.toString('utf8').toLowerCase().includes(contentNeedle)) {
+          results.push(full)
+        }
+      }
+    }
+    if (results.length === 0) return `在 ${root} 未找到匹配（已扫描约 ${scanned} 个文件）`
+    return truncate(`在 ${root} 找到 ${results.length} 个匹配（已扫描约 ${scanned} 个文件）：\n${results.join('\n')}`)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Computer Use：屏幕截图 + 键鼠输入（设置里开 computerUse 才挂给模型）      */
+/* ------------------------------------------------------------------ */
+
+/** 最近一次截图的尺寸：点击坐标按截图像素给，本层换算到物理像素。 */
+let lastShot: Screenshot | null = null
+
+const computerScreenshot: ToolDefinition = {
+  name: 'computer_screenshot',
+  description: '截取主屏画面并直接展示给你。看清按钮/输入框位置后，用截图像素坐标调用 computer_click。返回含坐标系说明。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute(): Promise<ToolResult> {
+    const shot = await takeScreenshot()
+    lastShot = shot
+    return {
+      content: `屏幕 ${shot.realWidth}×${shot.realHeight}（截图 ${shot.shotWidth}×${shot.shotHeight}，坐标按截图尺寸给，左上为原点）。请先描述你看到的关键元素位置，再决定下一步。`,
+      isError: false,
+      image: { mimeType: shot.mimeType, dataUrl: shot.dataUrl }
+    }
+  }
+}
+
+const computerClick: ToolDefinition = {
+  name: 'computer_click',
+  description: '在屏幕指定位置点击。坐标必须是最近一次截图里的像素坐标（左上原点）。',
+  parameters: {
+    type: 'object',
+    properties: {
+      x: { type: 'number', description: '截图横坐标' },
+      y: { type: 'number', description: '截图纵坐标' },
+      button: { type: 'string', description: 'left/right/middle，默认 left', enum: ['left', 'right', 'middle'] }
+    },
+    required: ['x', 'y']
+  },
+  requiresApproval: true,
+  approvalReason: '将直接操控你的鼠标点击屏幕，可能触发任意按钮，请确认坐标无误。',
+  async execute(input) {
+    const { x, y, button } = z
+      .object({ x: z.number(), y: z.number(), button: z.enum(['left', 'right', 'middle']).optional() })
+      .parse(input)
+    if (!lastShot) throw new Error('请先调用 computer_screenshot 看清画面再点。')
+    return clickAt(x, y, button ?? 'left', lastShot)
+  }
+}
+
+const computerType: ToolDefinition = {
+  name: 'computer_type',
+  description: '向当前聚焦的窗口输入文本。输入前请确认焦点在正确的输入框。',
+  parameters: {
+    type: 'object',
+    properties: { text: { type: 'string', description: '要输入的文本' } },
+    required: ['text']
+  },
+  requiresApproval: true,
+  approvalReason: '将向当前窗口输入文本，可能发送消息或填写表单，请确认。',
+  async execute(input) {
+    const { text } = z.object({ text: z.string().min(1).max(2000) }).parse(input)
+    return typeText(text)
+  }
+}
+
+const computerPressKey: ToolDefinition = {
+  name: 'computer_press_key',
+  description: '按一次键盘按键。',
+  parameters: {
+    type: 'object',
+    properties: { key: { type: 'string', description: `按键名，可用：${supportedKeysHint()}` } },
+    required: ['key']
+  },
+  requiresApproval: true,
+  approvalReason: '将模拟键盘按键，可能触发快捷键或系统操作，请确认。',
+  async execute(input) {
+    const { key } = z.object({ key: z.string().min(1) }).parse(input)
+    return pressKey(key)
+  }
+}
+
+const computerScroll: ToolDefinition = {
+  name: 'computer_scroll',
+  description: '在鼠标当前位置滚动。',
+  parameters: {
+    type: 'object',
+    properties: {
+      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
+      amount: { type: 'integer', description: '格数 1～10，默认 3' }
+    },
+    required: ['direction']
+  },
+  requiresApproval: true,
+  approvalReason: '将滚动鼠标滚轮改变当前视图，请确认。',
+  async execute(input) {
+    const { direction, amount } = z
+      .object({ direction: z.enum(['up', 'down', 'left', 'right']), amount: z.number().int().min(1).max(10).optional() })
+      .parse(input)
+    return scrollAt(direction, amount ?? 3)
+  }
+}
+
 /* ------------------------------------------------------------------ */
 
 const definitions: ToolDefinition[] = [
   getCurrentTime,
   listDirectory,
   readFileTool,
+  searchFiles,
   writeFileTool,
   patchFileTool,
-  runCommand
+  runCommand,
+  computerScreenshot,
+  computerClick,
+  computerType,
+  computerPressKey,
+  computerScroll
 ]
 
 const byName = new Map(definitions.map((tool) => [tool.name, tool]))
+
+/** 只读复查模式下开放的工具：全部免审批，模型看不到写与执行能力。 */
+const READ_ONLY_TOOL_NAMES = new Set(['get_current_time', 'list_directory', 'read_file', 'search_files'])
 
 export const toolRegistry = {
   all(): ToolDefinition[] {
@@ -375,9 +576,10 @@ export const toolRegistry = {
     return byName.get(name)
   },
 
-  /** 传给模型的工具清单。 */
-  schemas(): { name: string; description: string; parameters: Record<string, unknown> }[] {
-    return definitions.map((tool) => ({
+  /** 传给模型的工具清单。readOnly 时只给读工具（Codex 式 read-only 沙箱档）。 */
+  schemas(options?: { readOnly?: boolean }): { name: string; description: string; parameters: Record<string, unknown> }[] {
+    const list = options?.readOnly ? definitions.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name)) : definitions
+    return list.map((tool) => ({
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters

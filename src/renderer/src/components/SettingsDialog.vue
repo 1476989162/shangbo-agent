@@ -102,7 +102,7 @@ const customInstructions = ref('')
 const chatFont = ref('default')
 const reduceMotion = ref(false)
 const notifyOnCompletion = ref(true)
-const maxSteps = ref(15)
+const readOnlyReview = ref(false)
 
 // Token 用量统计周期
 const usageDays = ref<7 | 30 | 90>(30)
@@ -153,18 +153,14 @@ async function load(): Promise<void> {
   chatFont.value = (settings['agent.chatFont'] as string) ?? 'default'
   reduceMotion.value = (settings['agent.reduceMotion'] as boolean) ?? false
   notifyOnCompletion.value = (settings['agent.notifyCompletion'] as boolean) ?? true
-  maxSteps.value = Number(settings['agent.maxSteps']) || 15
+  readOnlyReview.value = (settings['agent.readOnly'] as boolean) ?? false
   computerUseEnabled.value = (settings['agent.computerUse'] as boolean) ?? true
   builtinBrowserEnabled.value = (settings['agent.browser.builtin'] as boolean) ?? true
   externalBrowserEnabled.value = (settings['agent.browser.external'] as boolean) ?? true
   defaultBrowser.value = (settings['agent.browser.default'] as 'external' | 'builtin') ?? 'external'
   autoScreenshot.value = (settings['agent.browser.autoScreenshot'] as boolean) ?? true
-  const savedMcp = settings['agent.mcpServers'] as string[] | undefined
-  if (Array.isArray(savedMcp)) {
-    for (const s of mcpServers.value) {
-      s.enabled = savedMcp.includes(s.id)
-    }
-  }
+  // MCP 开关由 refreshMcp 从主进程实测状态还原，这里只触发拉取（不阻塞）。
+  void refreshMcp()
   if (typeof settings['cowork.filesPath'] === 'string') {
     coworkFilesPath.value = settings['cowork.filesPath'] as string
   }
@@ -299,10 +295,9 @@ async function toggleNotify(val: boolean): Promise<void> {
   await window.shangbo.settings.set('agent.notifyCompletion', val)
 }
 
-async function saveMaxSteps(): Promise<void> {
-  await window.shangbo.settings.set('agent.maxSteps', Number(maxSteps.value))
-  feedback.value = { ok: true, message: `单轮工具连续调用上限已设为 ${maxSteps.value} 步` }
-  setTimeout(() => (feedback.value = null), 2500)
+async function toggleReadOnly(val: boolean): Promise<void> {
+  readOnlyReview.value = val
+  await window.shangbo.settings.set('agent.readOnly', val)
 }
 
 // 供应商管理逻辑
@@ -699,32 +694,34 @@ async function copyPrompt(text: string): Promise<void> {
 }
 
 // ========================================================
-// MCP Servers 管理 (对标图片 1)
+// MCP Servers 管理（实测驱动：列表、状态、工具数全部来自主进程）
 // ========================================================
 export interface McpServerItem {
   id: string
   name: string
-  desc: string
-  iconType: string
   enabled: boolean
-  status: 'ready' | 'needs_auth' | 'connecting'
-  builtin: boolean
+  state: 'ready' | 'error' | 'disabled'
+  toolCount: number
+  tools: { name: string; description?: string }[]
+  error?: string
 }
 
-const mcpServers = ref<McpServerItem[]>([
-  { id: 'context7', name: 'context7', desc: '工程全景知识库与符号上下文索引', iconType: 'T7', enabled: true, status: 'ready', builtin: true },
-  { id: 'windows-cli', name: 'windows-cli', desc: 'Windows 本机命令行执行与 PowerShell 环境控制', iconType: 'cli', enabled: true, status: 'ready', builtin: true },
-  { id: 'docker', name: 'docker', desc: 'Docker 容器编排、服务启停与镜像管理', iconType: 'docker', enabled: true, status: 'ready', builtin: false },
-  { id: 'memory', name: 'Memory', desc: '本地 SQLite 持久化多轮记忆库与关键事实检索', iconType: 'memory', enabled: true, status: 'ready', builtin: true },
-  { id: 'fetch', name: 'Fetch', desc: 'HTTP/HTTPS 网页拉取与 RESTful 接口抓取转换', iconType: 'fetch', enabled: true, status: 'ready', builtin: true },
-  { id: 'web-research', name: 'web research', desc: '联网深度研究与多源网页信息自动整合分析', iconType: 'globe', enabled: true, status: 'ready', builtin: true },
-  { id: 'playwright', name: 'Playwright', desc: 'Playwright 无头浏览器驱动，支持点击输入与网页爬虫', iconType: 'playwright', enabled: true, status: 'ready', builtin: false },
-  { id: 'duckduckgo', name: 'duckduckgo', desc: 'DuckDuckGo 实时隐私搜索与答案卡片提取', iconType: 'ddg', enabled: true, status: 'ready', builtin: true },
-  { id: 'computer-use', name: 'Computer Use (Built-in)', desc: '系统级电脑控制，操控鼠标与键盘与桌面应用交互', iconType: 'desktop', enabled: true, status: 'ready', builtin: true },
-  { id: 'chrome-devtools', name: 'chrome-devtools', desc: 'Chrome 开发者工具协议联动，支持控制外部已启动浏览器', iconType: 'chrome', enabled: true, status: 'ready', builtin: true },
-  { id: 'context7-cache', name: 'context7', desc: '代码分析与语法高亮分词缓存节点', iconType: 'T7', enabled: true, status: 'ready', builtin: true },
-  { id: 'github', name: 'github', desc: 'GitHub 官方仓库协同、Issue、PR 管理与自动化审查', iconType: 'github', enabled: true, status: 'needs_auth', builtin: false }
-])
+const mcpServers = ref<McpServerItem[]>([])
+const mcpLoading = ref(false)
+const expandedMcp = ref<string | null>(null)
+
+/** 拉取实时状态（会按需拉起服务进程，首次可能慢，不阻塞设置页打开）。 */
+async function refreshMcp(): Promise<void> {
+  if (mcpLoading.value) return
+  mcpLoading.value = true
+  try {
+    mcpServers.value = await window.shangbo.mcp.status()
+  } catch {
+    mcpServers.value = []
+  } finally {
+    mcpLoading.value = false
+  }
+}
 
 async function toggleMcpServer(item: McpServerItem): Promise<void> {
   item.enabled = !item.enabled
@@ -735,6 +732,7 @@ async function toggleMcpServer(item: McpServerItem): Promise<void> {
     message: item.enabled ? `已启用 MCP 服务「${item.name}」` : `已停用 MCP 服务「${item.name}」`
   }
   setTimeout(() => (feedback.value = null), 2000)
+  void refreshMcp()
 }
 
 async function toggleComputerUse(): Promise<void> {
@@ -1125,24 +1123,25 @@ async function toggleAutoScreenshot(): Promise<void> {
 
           <div class="divider" />
 
-          <!-- Agent 执行与安全策略 (单轮工具调用上限控制) -->
+          <!-- Agent 执行与安全策略 (步数上限已移除：循环到模型收手为止，防打转只靠行为保险丝) -->
           <div class="section-block">
             <h3 class="pane-title">执行与安全策略 (Execution & Safety)</h3>
 
             <div class="setting-row">
               <div class="row-text">
-                <span class="setting-label">单轮工具连续调用上限 (Max Tool Steps)</span>
+                <span class="setting-label">只读复查模式 (Read-Only Review)</span>
                 <span class="row-sub">
-                  限制助手在单次回合中最多连续调用本地工具（读取/写入/执行终端命令等）的步数。到达上限后自动暂停并提示回复「继续」，防止死循环与 Token 扣费失控。
+                  打开后模型只能读取与搜索文件，看不到写入与执行命令的工具，适合代码 review、全仓巡检。修代码前记得关掉。
                 </span>
               </div>
-              <select v-model="maxSteps" class="select-control" @change="saveMaxSteps">
-                <option :value="10">10 步 (节能谨慎，适合日常轻量问答)</option>
-                <option :value="12">12 步 (标准安全保护值)</option>
-                <option :value="15">15 步 (推荐默认，兼顾效率与安全)</option>
-                <option :value="25">25 步 (深度工程，适合多文件复杂重构)</option>
-                <option :value="50">50 步 (极限自主，适合大型连续任务)</option>
-              </select>
+              <label class="switch-control">
+                <input
+                  v-model="readOnlyReview"
+                  type="checkbox"
+                  @change="toggleReadOnly(readOnlyReview)"
+                />
+                <span class="switch-slider" />
+              </label>
             </div>
           </div>
         </section>
@@ -1688,12 +1687,13 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <p class="servers-subtle">管理您已添加的 MCP 服务端，可启用、配置或添加新的工具能力。</p>
               </div>
               <div class="servers-head-actions">
-                <button class="btn btn-ghost tiny" title="刷新服务状态">↻</button>
+                <button class="btn btn-ghost tiny" title="刷新服务状态" @click="refreshMcp">↻</button>
                 <button class="btn btn-primary tiny btn-add-mcp">+ 添加 ▾</button>
               </div>
             </div>
 
-            <!-- 12 个 MCP Servers 列表 (图片 1 核心卡片) -->
+            <!-- MCP Servers 列表（状态与工具数全部实测，点击展开看工具） -->
+            <div v-if="mcpLoading && mcpServers.length === 0" class="servers-subtle">正在检测服务状态…</div>
             <div class="mcp-servers-list">
               <div
                 v-for="server in mcpServers"
@@ -1701,16 +1701,24 @@ async function toggleAutoScreenshot(): Promise<void> {
                 class="mcp-server-row"
                 :class="{ disabled: !server.enabled }"
               >
-                <div class="server-left">
-                  <span class="server-expand-arrow">›</span>
-                  <div class="server-icon-badge" :class="server.iconType">
-                    <span>{{ server.iconType === 'T7' ? 'T7' : server.name.slice(0, 2).toUpperCase() }}</span>
+                <div class="server-left" @click="expandedMcp = expandedMcp === server.id ? null : server.id">
+                  <span class="server-expand-arrow">{{ expandedMcp === server.id ? '▾' : '›' }}</span>
+                  <div class="server-icon-badge">
+                    <span>{{ server.name.slice(0, 2).toUpperCase() }}</span>
                   </div>
                   <div class="server-meta-col">
                     <div class="server-name-row">
                       <span class="server-name-txt">{{ server.name }}</span>
-                      <span v-if="server.status === 'ready'" class="server-check-mark" title="服务已就绪">✓</span>
-                      <span v-else-if="server.status === 'needs_auth'" class="server-warn-pill">⚠ 前往验证</span>
+                      <span v-if="server.state === 'ready'" class="server-check-mark" :title="`服务已就绪（${server.toolCount} 个工具）`">✓ {{ server.toolCount }}</span>
+                      <span v-else-if="server.state === 'error'" class="server-warn-pill" :title="server.error ?? '启动失败'">⚠ 未就绪</span>
+                      <span v-else class="servers-subtle">已停用</span>
+                    </div>
+                    <div v-if="expandedMcp === server.id" class="servers-subtle">
+                      <div v-if="server.error" :title="server.error">{{ server.error }}</div>
+                      <div v-for="tool in server.tools" :key="tool.name" :title="tool.description ?? tool.name">
+                        · {{ tool.name }}
+                      </div>
+                      <div v-if="server.state === 'ready' && server.tools.length === 0">（未返回工具）</div>
                     </div>
                   </div>
                 </div>
