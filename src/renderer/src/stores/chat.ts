@@ -217,7 +217,25 @@ export const useChatStore = defineStore('chat', () => {
       cursor = message.parentId
     }
 
-    return path.reverse()
+    path.reverse()
+
+    // 排队中的消息已经落库，但主进程还没为它创建助手节点——
+    // 因此 activeLeafId 仍指向上一个助手消息，回溯时看不到它们。
+    // 这里把「挂在路径末端、且尚无任何子回复」的用户消息补进来，
+    // 否则用户提交后界面毫无反应，会以为消息没发出去。
+    const replied = new Set(
+      path.map((m) => m.id).filter((id) => byId.get(id)?.role === 'user')
+    )
+    for (const message of messages.value) {
+      if (message.conversationId !== activeConversationId.value) continue
+      if (message.role !== 'user') continue
+      if (replied.has(message.id)) continue
+      // 仅当它是当前路径末端的子节点时才补进来，避免把别的分支混进来
+      if (message.parentId !== path[path.length - 1]?.id) continue
+      path.push(message)
+    }
+
+    return path
   })
 
   const activeConversation = computed(
@@ -707,6 +725,59 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /** 停止：只中断正在跑的那一轮，队列里排着的会继续接力执行。 */
+  /** 该会话中处于排队状态（已落库但尚未开跑）的用户消息 id。 */
+  function queuedUserMessageIds(conversationId: string): string[] {
+    const replied = new Set<string>()
+    for (const message of messages.value) {
+      if (message.role === 'assistant' && message.parentId) replied.add(message.parentId)
+    }
+    return messages.value
+      .filter(
+        (m) =>
+          m.conversationId === conversationId &&
+          m.role === 'user' &&
+          !replied.has(m.id)
+      )
+      .map((m) => m.id)
+  }
+
+  /** 编辑一条排队中的消息：主进程改库后同步本地，避免界面与真实内容脱节。 */
+  async function editQueued(userMessageId: string, content: string): Promise<boolean> {
+    const conversationId = activeConversationId.value
+    if (!conversationId) return false
+    const ok = await window.shangbo.chat.editQueued(conversationId, userMessageId, content)
+    if (!ok) {
+      lastError.value = '这条消息已经开始生成，无法再编辑'
+      return false
+    }
+    const message = findMessage(userMessageId)
+    if (message) {
+      // 保留图片块，只替换文本——图片是这条消息的一部分
+      const images = message.blocks.filter((b) => b.type === 'image')
+      message.blocks = [...images, { type: 'text', text: content.trim() }]
+    }
+    return true
+  }
+
+  /** 撤回一条排队中的消息：同时移除本地消息与主进程记录（含已落盘图片）。 */
+  async function cancelQueued(userMessageId: string): Promise<boolean> {
+    const conversationId = activeConversationId.value
+    if (!conversationId) return false
+    const ok = await window.shangbo.chat.cancelQueued(conversationId, userMessageId)
+    if (!ok) {
+      lastError.value = '撤回失败：这条消息可能已经开始生成'
+      return false
+    }
+    const index = messages.value.findIndex((m) => m.id === userMessageId)
+    if (index >= 0) messages.value.splice(index, 1)
+    // 运行态里的排队计数也要跟着减，否则会一直显示「还有 1 条排队」
+    const run = getRun(conversationId)
+    if (run && run.queued > 0) {
+      setRun(conversationId, { ...run, queued: run.queued - 1 })
+    }
+    return true
+  }
+
   async function stop(): Promise<void> {
     if (!activeRunId.value) return
     await window.shangbo.chat.abort(activeRunId.value)
@@ -862,6 +933,9 @@ export const useChatStore = defineStore('chat', () => {
     renameConversation,
     send,
     stop,
+    queuedUserMessageIds,
+    editQueued,
+    cancelQueued,
     regenerate,
     switchBranch,
     setWorkingDir,

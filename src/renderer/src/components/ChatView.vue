@@ -825,6 +825,8 @@ const suggestions = [
             @switch-branch="store.switchBranch"
             @edit="onEdit"
             @auto-continue="onAutoContinue"
+            @edit-queued="store.editQueued"
+            @cancel-queued="store.cancelQueued"
           />
   <!-- 图片放大遮罩：Esc 或点击空白关闭 -->
   <div

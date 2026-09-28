@@ -24,6 +24,10 @@ const api: ShangboApi = {
     abort: (runId) => ipcRenderer.invoke(IPC.chatAbort, runId),
     approve: (decision: ApprovalDecision) => ipcRenderer.invoke(IPC.chatApprove, decision),
     regenerate: (assistantMessageId) => ipcRenderer.invoke(IPC.chatRegenerate, assistantMessageId),
+    editQueued: (conversationId, userMessageId, content) =>
+      ipcRenderer.invoke(IPC.chatEditQueued, conversationId, userMessageId, content),
+    cancelQueued: (conversationId, userMessageId) =>
+      ipcRenderer.invoke(IPC.chatCancelQueued, conversationId, userMessageId),
     // 事件流是全局单例，因此不做按 handler 的精确解绑，避免跨 contextBridge 传递函数引用
     onEvent: (handler: (event: AgentEvent) => void) => {
       ipcRenderer.removeAllListeners(IPC.agentEvent)

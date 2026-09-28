@@ -14,6 +14,9 @@ export const IPC = {
   chatApprove: 'chat:approve',
   chatRegenerate: 'chat:regenerate',
 
+  chatEditQueued: 'chat:editQueued',
+  chatCancelQueued: 'chat:cancelQueued',
+
   agentEvent: 'agent:event',
 
   providerList: 'provider:list',

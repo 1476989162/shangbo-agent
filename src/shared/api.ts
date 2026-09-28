@@ -39,6 +39,10 @@ export interface ShangboApi {
     abort(runId: string): Promise<boolean>
     approve(decision: ApprovalDecision): Promise<boolean>
     regenerate(assistantMessageId: string): Promise<{ runId: string }>
+    /** 编辑一条排队中（尚未开跑）的消息文本。 */
+    editQueued(conversationId: string, userMessageId: string, content: string): Promise<boolean>
+    /** 撤回一条排队中的消息，同时删除其已落库的记录与图片。 */
+    cancelQueued(conversationId: string, userMessageId: string): Promise<boolean>
     onEvent(handler: (event: AgentEvent) => void): void
     offEvent(): void
   }

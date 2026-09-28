@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import type { ContentBlock, Message } from '@shared/types'
 import { imageFileUrl } from '@shared/imageUrl'
 import type { BranchInfo } from '../stores/chat'
@@ -17,8 +17,36 @@ const emit = defineEmits<{
   switchBranch: [messageId: string]
   edit: [payload: { content: string; parentId: string | null }]
   autoContinue: [messageId: string]
+  editQueued: [messageId: string, content: string]
+  cancelQueued: [messageId: string]
 }>()
 const copied = ref(false)
+
+/** 排队消息的行内编辑态。 */
+const editingQueued = ref(false)
+const editText = ref('')
+const editArea = ref<HTMLTextAreaElement | null>(null)
+
+function startEdit(): void {
+  editText.value = textContent.value
+  editingQueued.value = true
+  void nextTick(() => {
+    const area = editArea.value
+    if (!area) return
+    area.focus()
+    area.setSelectionRange(area.value.length, area.value.length)
+  })
+}
+
+async function submitEdit(): Promise<void> {
+  const text = editText.value.trim()
+  if (!text || text === textContent.value) {
+    editingQueued.value = false
+    return
+  }
+  editingQueued.value = false
+  await emit('editQueued', props.message.id, text)
+}
 
 type RenderItem =
   | { kind: 'text'; key: string; text: string }
@@ -245,10 +273,42 @@ async function copy(): Promise<void> {
         <p v-if="textContent" class="user-text">{{ textContent }}</p>
       </div>
       <!-- 排队中：明确告诉用户这条已接收、会自动接力，而不是"发出去没反应" -->
-      <p v-if="queued" class="queued-badge">
-        <span class="queued-dot" aria-hidden="true" />
-        排队中，将在当前回复完成后自动处理
-      </p>
+      <div v-if="queued" class="queued-row">
+        <p class="queued-badge">
+          <span class="queued-dot" aria-hidden="true" />
+          排队中，将在当前回复完成后自动处理
+        </p>
+        <div class="queued-actions">
+          <button class="btn btn-ghost tiny" title="编辑这条排队消息的内容" @click="startEdit">
+            编辑
+          </button>
+          <button
+            class="btn btn-ghost tiny btn-danger"
+            title="撤回这条排队消息"
+            @click="emit('cancelQueued', message.id)"
+          >
+            撤回
+          </button>
+        </div>
+      </div>
+
+      <!-- 排队消息的行内编辑：与「编辑已发送消息」区分，这里不产生新分支 -->
+      <div v-if="editingQueued" class="queued-editor">
+        <textarea
+          ref="editArea"
+          v-model="editText"
+          class="queued-editor-textarea"
+          rows="2"
+          @keydown.enter.exact.prevent="submitEdit"
+          @keydown.esc.prevent="editingQueued = false"
+        />
+        <div class="queued-editor-actions">
+          <button class="btn btn-ghost tiny" @click="editingQueued = false">取消</button>
+          <button class="btn btn-primary tiny" :disabled="!editText.trim()" @click="submitEdit">
+            保存
+          </button>
+        </div>
+      </div>
       <div class="bubble-actions">
         <button
           class="btn btn-ghost tiny"
@@ -517,6 +577,58 @@ async function copy(): Promise<void> {
 }
 
 /* 排队中的标记 */
+/* 排队中的消息：状态 + 操作一行排布 */
+.queued-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-end;
+  margin-top: 6px;
+}
+
+.queued-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+/* 悬停时才显示操作按钮，避免静止时过于拥挤 */
+.queued-row:hover .queued-actions,
+.queued-row:focus-within .queued-actions {
+  opacity: 1;
+}
+
+/* 排队消息的行内编辑框 */
+.queued-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: flex-end;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.queued-editor-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+
+.queued-editor-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 .queued-badge {
   display: inline-flex;
   align-items: center;

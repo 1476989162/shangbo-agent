@@ -147,6 +147,15 @@ export async function hydrateImages(blocks: ContentBlock[]): Promise<ContentBloc
 }
 
 /** 删除会话时同步清掉它的图片目录，不留垃圾（方案 A）。 */
+/** 删除单个图片文件。撤回一条排队消息时用它清理附件，避免留下孤儿文件。 */
+export async function deleteImageFile(relative: string): Promise<void> {
+  try {
+    await rm(join(imagesRoot(), relative))
+  } catch {
+    // 文件可能已不存在，删除失败不应阻断撤回流程
+  }
+}
+
 export async function deleteConversationImages(conversationId: string): Promise<void> {
   try {
     await rm(conversationDir(conversationId), { recursive: true, force: true })

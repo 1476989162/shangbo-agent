@@ -14,6 +14,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 import { runSubagent, SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME } from './subagent'
 import { mcpManager, parseMcpToolName } from '../mcp/manager'
+import { deleteImageFile } from '../storage/images'
 import type {
   AgentEvent,
   AgentSendRequest,
@@ -110,7 +111,12 @@ interface QueuedRun {
   runId: string
   conversationId: string
   emit: Emitter
-  start: () => Promise<void>
+  /** 这轮对应的用户消息 id：排队期间用于编辑、删除与重新定位。 */
+  userMessageId: string
+  /** 原始发送请求，编辑内容时据此重放。 */
+  payload: AgentSendRequest
+  /** 执行体。接收队列项自身，以便读到编辑后的最新 payload。 */
+  start: (self: QueuedRun) => Promise<void>
 }
 
 export class AgentRuntime {
@@ -188,7 +194,7 @@ export class AgentRuntime {
     })
     // 放到微任务里，确保调用方先拿到 runId 再收到事件
     queueMicrotask(() => {
-      void this.execute(item.runId, item.conversationId, item.emit, item.start)
+      void this.execute(item.runId, item.conversationId, item.emit, () => item.start(item))
     })
   }
 
@@ -256,10 +262,14 @@ export class AgentRuntime {
     return this.enqueue({
       runId,
       conversationId: payload.conversationId,
+      userMessageId: userMessage.id,
+      payload,
       emit,
-      start: async () => {
+      start: async (self) => {
         const controller = this.runs.get(runId)?.controller ?? new AbortController()
-        await this.executeSend(runId, payload, userMessage, emit, controller)
+        // 读 self.payload 而非闭包捕获的入参：编辑排队消息改的是队列项，
+        // 捕获入参会让编辑完全不生效
+        await this.executeSend(runId, self.payload, userMessage, emit, controller)
       }
     }, busy ? { userMessage } : null)
   }
@@ -282,6 +292,13 @@ export class AgentRuntime {
     return this.enqueue({
       runId,
       conversationId,
+      userMessageId,
+      // 重新生成复用已落库的用户消息，这里给一份仅用于取消定位的 payload
+      payload: {
+        conversationId,
+        parentMessageId: userMessage.parentId,
+        content: userMessage.blocks.find((b) => b.type === 'text')?.text ?? ''
+      },
       emit,
       start: async () => {
         const controller = this.runs.get(runId)?.controller ?? new AbortController()
@@ -307,6 +324,69 @@ export class AgentRuntime {
   }
 
   /** 放弃某个会话的全部排队项——会话被删除时调用，避免孤儿任务复活。 */
+  /**
+   * 取消一条排队中的消息：把它从队列里摘掉，并删除已落库的对应消息及其图片。
+   *
+   * 只允许取消「尚未开跑」的轮次。已经开始生成的那一条由 abort 负责，
+   * 语义不同：abort 是保留历史，这里是撤回一条还没生效的提问。
+   * 返回 false 表示这条不在队列里（可能已经开跑，或根本不属于本会话）。
+   */
+  async cancelQueuedMessage(conversationId: string, userMessageId: string): Promise<boolean> {
+    const queue = this.queues.get(conversationId)
+    if (!queue) return false
+
+    const index = queue.findIndex((item) => item.userMessageId === userMessageId)
+    if (index < 0) return false
+
+    const [removed] = queue.splice(index, 1)
+    if (queue.length === 0 && !this.isRunning(conversationId)) {
+      this.queues.delete(conversationId)
+    }
+
+    // 先摘队列再落库：反过来的话，取消失败会留下一条永远不执行的孤儿任务
+    const message = repo.getMessage(removed.userMessageId)
+    repo.deleteSubtree(removed.userMessageId)
+    // 图片已落盘，撤回时一并清理，避免留下孤儿文件
+    for (const block of message?.blocks ?? []) {
+      if (block.type === 'image' && block.file) {
+        await deleteImageFile(block.file)
+      }
+    }
+    return true
+  }
+
+  /**
+   * 编辑一条排队中的消息的内容：就地改库，队列项无需重排。
+   * 图片暂不支持增删（附件已落盘，换图等于换一条消息），仅替换文本。
+   */
+  editQueuedMessage(
+    conversationId: string,
+    userMessageId: string,
+    content: string
+  ): boolean {
+    const queue = this.queues.get(conversationId)
+    if (!queue) return false
+
+    const item = queue.find((q) => q.userMessageId === userMessageId)
+    if (!item) return false
+
+    const text = content.trim()
+    if (!text) return false
+
+    const message = repo.getMessage(userMessageId)
+    if (!message) return false
+
+    // 保留图片块，只替换文本块——图片是这条消息的一部分，不该被编辑抹掉
+    const images = message.blocks.filter((b) => b.type === 'image')
+    repo.updateMessage(userMessageId, {
+      blocks: [...images, { type: 'text', text }]
+    })
+
+    // 同步更新队列项里的 payload，真正开跑时用的就是这份
+    item.payload = { ...item.payload, content: text }
+    return true
+  }
+
   clearQueue(conversationId: string): void {
     this.queues.delete(conversationId)
   }

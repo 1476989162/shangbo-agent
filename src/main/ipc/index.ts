@@ -182,6 +182,26 @@ export function registerIpcHandlers(): void {
     return true
   })
 
+  // 渲染进程传来的一切都在这里校验；排队消息的编辑/撤回只允许作用于本会话
+  ipcMain.handle(
+    IPC.chatEditQueued,
+    (_event, conversationId: unknown, userMessageId: unknown, content: unknown) => {
+      const conv = z.string().min(1).parse(conversationId)
+      const id = z.string().min(1).parse(userMessageId)
+      const text = z.string().min(1, '内容不能为空').parse(content)
+      return agentRuntime.editQueuedMessage(conv, id, text)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.chatCancelQueued,
+    async (_event, conversationId: unknown, userMessageId: unknown) => {
+      const conv = z.string().min(1).parse(conversationId)
+      const id = z.string().min(1).parse(userMessageId)
+      return agentRuntime.cancelQueuedMessage(conv, id)
+    }
+  )
+
   ipcMain.handle(IPC.providerTest, async (_event, id: string) => {
     const provider = getProvider(id)
     if (!provider) return { ok: false, latencyMs: 0, message: '供应商不存在' }
