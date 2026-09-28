@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   AppInfo,
   ApprovalDecision,
+  ContextStatics,
   Conversation,
   Message,
   Provider,
@@ -57,6 +58,7 @@ export interface ShangboApi {
 
   app: {
     info(): Promise<AppInfo>
+    contextStatics(): Promise<ContextStatics>
     getGitBranch(dir: string | null): Promise<string>
     hideWindow(): Promise<boolean>
     quit(): Promise<boolean>

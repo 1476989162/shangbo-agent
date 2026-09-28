@@ -183,6 +183,18 @@ export interface StoredImage {
   file: string
 }
 
+/** 上下文窗口的静态开销（不含会话消息），由主进程实测后回传。 */
+export interface ContextStatics {
+  /** 本地工具 schema 序列化后的 token 估算 */
+  systemTools: number
+  /** MCP 工具 schema 序列化后的 token 估算 */
+  mcp: number
+  skills: number
+  /** 本轮实际拼装的系统提示长度 */
+  systemPrompt: number
+  memory: number
+}
+
 export interface SendPayload {
   conversationId: string
   /** 新消息挂载到哪个父消息下；为 null 表示作为根消息（新分支起点）。 */

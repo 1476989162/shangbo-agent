@@ -9,7 +9,7 @@ import { getSetting, setSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
 import { streamWithFallback } from '../providers/gateway'
 import { routingOrder } from '../providers/store'
-import { buildContext, hydrateContextImages, toLLMMessages } from './context'
+import { buildContext, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
 import { DEFAULT_MAX_OUTPUT_TOKENS, resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 import { runSubagent, SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME } from './subagent'
@@ -19,6 +19,7 @@ import type {
   AgentSendRequest,
   ApprovalDecision,
   ContentBlock,
+  ContextStatics,
   Conversation,
   Message,
   MessageStatus,
@@ -204,6 +205,34 @@ export class AgentRuntime {
       return
     }
     this.startRun(queue.shift() as QueuedRun)
+  }
+
+  /**
+   * 测量每轮请求的静态开销（不含会话消息），供渲染层的上下文浮层显示。
+   *
+   * 刻意用真实序列化结果而不是写死的常量：常量会随工具集、MCP 配置、
+   * 系统提示的演进而失真，曾导致浮层出现「Messages 162.8% + 剩余 0」
+   * 这种分项加起来超过 100% 的自相矛盾显示。
+   */
+  async contextStatics(): Promise<ContextStatics> {
+    const computerOn = getSetting<boolean>('agent.computerUse', true)
+    const systemTools = toolRegistry
+      .schemas({ readOnly: false })
+      .filter((t) => computerOn || !t.name.startsWith('computer_'))
+    const mcpTools = await mcpManager.toolSchemas()
+
+    const baseSystem = DEFAULT_SYSTEM_PROMPT
+    const custom = getSetting<string>('agent.instructions', '')
+
+    return {
+      // 工具 schema 以 JSON 形式进请求体，按字符估算（CJK 约 1 token/字）
+      systemTools: estimateTokens(JSON.stringify([...systemTools, SPAWN_SUBAGENT_SCHEMA])),
+      mcp: estimateTokens(JSON.stringify(mcpTools)),
+      systemPrompt: estimateTokens(custom ? `${baseSystem}\n\n${custom}` : baseSystem),
+      // Skills 与记忆文件当前没有接入请求，这里如实计 0 而不是编一个数
+      skills: 0,
+      memory: 0
+    }
   }
 
   /** 该会话是否还有排队中的轮次（含正在跑的）。渲染层据此显示「排队中 N」。 */

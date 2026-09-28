@@ -242,6 +242,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.mcpStatus, () => mcpManager.status())
 
   ipcMain.handle(IPC.appInfo, (): AppInfo => {
+
+  ipcMain.handle(IPC.appContextStatics, async () => agentRuntime.contextStatics())
     return {
       name: '尚搏 Agent',
       version: app.getVersion(),

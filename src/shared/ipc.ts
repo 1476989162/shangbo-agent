@@ -26,6 +26,7 @@ export const IPC = {
   settingsSet: 'settings:set',
 
   appInfo: 'app:info',
+  appContextStatics: 'app:contextStatics',
   windowHide: 'window:hide',
   windowQuit: 'window:quit',
 

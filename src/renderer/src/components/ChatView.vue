@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { ImageAttachment, Message } from '@shared/types'
+import type { ContextStatics, ImageAttachment, Message } from '@shared/types'
 import { imageFileUrl } from '@shared/imageUrl'
 
 /**
@@ -28,6 +28,8 @@ const draft = ref('')
 const pendingImages = ref<PendingImage[]>([])
 /** 图片处理失败时的一行临时提示。 */
 const imageHint = ref<string | null>(null)
+/** 待发图片 / 已发图片的放大预览 URL，null 表示未打开。 */
+const previewImage = ref<string | null>(null)
 let imageHintTimer: ReturnType<typeof setTimeout> | null = null
 const scrollEl = ref<HTMLElement | null>(null)
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
@@ -323,6 +325,11 @@ function onKeydown(event: KeyboardEvent): void {
       showImageHint('已清空待发图片')
       return
     }
+    if (previewImage.value) {
+      event.preventDefault()
+      previewImage.value = null
+      return
+    }
     if (effortMenuOpen.value || modelMenuOpen.value || contextWindowOpen.value) {
       effortMenuOpen.value = false
       modelMenuOpen.value = false
@@ -455,6 +462,7 @@ async function loadContextBudgetSetting(): Promise<void> {
 
 onMounted(() => {
   void loadContextBudgetSetting()
+  void loadContextStatics()
 })
 
 async function setContextBudget(tokens: number | null): Promise<void> {
@@ -535,37 +543,76 @@ const sessionMessagesTokens = computed(() => {
   return count
 })
 
+
+/**
+ * 上下文占用分解。
+ *
+ * 这里的几项曾经是写死的常量（MCP 41400 / System tools 21400 / Skills 9900 /
+ * System prompt 4000 / Memory 88），只有 messages 用真实值。后果是会话内容一多，
+ * 真实 messages 就会超过整个上限，浮层里出现「Messages 162.8% + 剩余 0」
+ * 这种自相矛盾的显示。
+ *
+ * 现在除 messages 外全部改为真实测量（向主进程要实际序列化后的长度），
+ * 并且占用率一律夹紧：超出时按比例缩放各分项，使它们加起来仍是 100%，
+ * 超出量单独用 overBy 表达，而不是让某个分项自己冒出一个 >100% 的百分比。
+ */
+
+/** 主进程回传的静态开销：工具 schema、MCP 工具、系统提示的真实长度。 */
+const contextStatics = ref<ContextStatics>({
+  mcp: 0,
+  systemTools: 0,
+  skills: 0,
+  systemPrompt: 0,
+  memory: 0
+})
+
+async function loadContextStatics(): Promise<void> {
+  try {
+    contextStatics.value = await window.shangbo.app.contextStatics()
+  } catch {
+    // 取不到就保持 0：宁可少算，也不要显示一个编造的数字
+  }
+}
+
 const contextBreakdown = computed(() => {
   const max = maxContextLimit.value
-  const mcp = 41_400
-  const systemTools = 21_400
-  const skills = 9_900
-  const systemPrompt = 4_000
-  const memory = 88
-  const messages = Math.max(sessionMessagesTokens.value, 66)
+  const mcp = contextStatics.value.mcp
+  const systemTools = contextStatics.value.systemTools
+  const skills = contextStatics.value.skills
+  const systemPrompt = contextStatics.value.systemPrompt
+  const memory = contextStatics.value.memory
+  const messages = sessionMessagesTokens.value
 
   const used = mcp + systemTools + skills + systemPrompt + memory + messages
   const free = Math.max(0, max - used)
-  const pct = Math.min(100, Number(((used / max) * 100).toFixed(1)))
+  const overBy = Math.max(0, used - max)
+  const isOver = used > max
+
+  // 超出时按比例缩放，让各分项加起来仍然是 100%，视觉上自洽
+  const scale = isOver ? max / used : 1
+  const pctOf = (value: number): string => (((value * scale) / max) * 100).toFixed(1)
 
   return {
     max,
     used,
     free,
-    pct,
+    overBy,
+    isOver,
+    // 进度条永远不超过 100
+    pct: Math.min(100, Number(((used / max) * 100).toFixed(1))),
     mcp,
     systemTools,
     skills,
     systemPrompt,
     memory,
     messages,
-    mcpPct: ((mcp / max) * 100).toFixed(1),
-    systemToolsPct: ((systemTools / max) * 100).toFixed(1),
-    skillsPct: ((skills / max) * 100).toFixed(1),
-    systemPromptPct: ((systemPrompt / max) * 100).toFixed(1),
-    memoryPct: ((memory / max) * 100).toFixed(1),
-    messagesPct: ((messages / max) * 100).toFixed(1),
-    freePct: ((free / max) * 100).toFixed(1)
+    mcpPct: pctOf(mcp),
+    systemToolsPct: pctOf(systemTools),
+    skillsPct: pctOf(skills),
+    systemPromptPct: pctOf(systemPrompt),
+    memoryPct: pctOf(memory),
+    messagesPct: pctOf(messages),
+    freePct: '0.0'
   }
 })
 
@@ -779,6 +826,16 @@ const suggestions = [
             @edit="onEdit"
             @auto-continue="onAutoContinue"
           />
+  <!-- 图片放大遮罩：Esc 或点击空白关闭 -->
+  <div
+    v-if="previewImage"
+    class="preview-mask"
+    tabindex="0"
+    @click="previewImage = null"
+  >
+    <img :src="previewImage" class="preview-img" alt="图片预览" />
+  </div>
+
         </template>
       </div>
     </div>
@@ -944,7 +1001,13 @@ const suggestions = [
             <!-- 待发图片缩略图条：粘贴/拖入的截图先落在这里，可逐张删除 -->
             <div v-if="pendingImages.length > 0" class="pending-images">
               <div v-for="image in pendingImages" :key="image.id" class="pending-image">
-                <img :src="image.previewUrl" alt="待发送图片" />
+                <button
+                  class="pending-image-open"
+                  title="点击查看大图"
+                  @click="previewImage = image.previewUrl"
+                >
+                  <img :src="image.previewUrl" alt="待发送图片" />
+                </button>
                 <button
                   class="pending-image-remove"
                   title="移除这张图片"
@@ -1177,6 +1240,7 @@ const suggestions = [
                     <span class="cw-title">Context window</span>
                     <div class="cw-summary">
                       <span class="cw-ratio">{{ formatTokensK(contextBreakdown.used) }} / {{ formatTokensK(contextBreakdown.max) }} ({{ contextBreakdown.pct }}%)</span>
+        <span v-if="contextBreakdown.isOver" class="cw-over">超出 {{ formatTokensK(contextBreakdown.overBy) }}</span>
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" class="cw-chevron">
                         <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
                       </svg>
@@ -1926,11 +1990,44 @@ const suggestions = [
   background: var(--bg-elevated);
 }
 
-.pending-image img {
+/* 缩略图本体：整块可点开大图 */
+.pending-image-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.pending-image-open img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* 图片放大遮罩 */
+.preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+  outline: none;
+}
+
+.preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 
 .pending-image-remove {
@@ -2781,6 +2878,12 @@ const suggestions = [
   gap: 4px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.cw-over {
+  margin-left: 8px;
+  font-size: var(--text-xs);
+  color: var(--danger);
 }
 
 .cw-ratio {
