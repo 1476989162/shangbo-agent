@@ -332,27 +332,33 @@ export interface SecurityAuditResult {
 }
 
 /**
- * 擦盘级目标：根目录 / 家目录 / 盘符根 / 裸通配符。
- * 目标后必须紧跟命令边界（空白、;、&、| 或结尾）——否则 `rm -rf ./dist`、
+ * 擦盘级目标：根目录 / 家目录 / 盘符根 / 裸通配符，允许引号包裹。
+ * 目标后必须紧跟命令边界（空白、;、&、|、引号或结尾）——否则 `rm -rf ./dist`、
  * `rm -rf *.log`、`del /q *.tmp` 这类删除子路径的日常命令会被整个拦死。
+ * 盘符不限 C 盘：`rd /s /q D:\` 同样是擦整盘。
  */
-const WIPE_TARGET = String.raw`(\/|\/\*|\\\*|~\/?|\$home\/?|%home%|\.\/?|\*|c:[\\/]\*?)`
-const CMD_BOUNDARY = String.raw`(\s|$|[;&|])`
+const WIPE_TARGET = String.raw`(\/|\/\*|\\\*|~\/?\*?|\$home\/?\*?|%home%|\.\/?|\*|[a-z]:[\\/]\*?)`
+const CMD_BOUNDARY = String.raw`(\s|$|[;&|"'])`
 
 const RM_ROOT_RE = new RegExp(
-  String.raw`rm\s+(-[a-z]+\s+)*-[a-z]*r[a-z]*\s+` + WIPE_TARGET + CMD_BOUNDARY,
+  String.raw`rm\s+(-[a-z]+\s+)*-[a-z]*r[a-z]*\s+["']?` + WIPE_TARGET + CMD_BOUNDARY,
   'i'
 )
 const RD_ROOT_RE = new RegExp(
-  String.raw`(rd|rmdir)\s+\/s(\s+\/[a-z]+)*\s+(c:[\\/]\*?|\\)` + CMD_BOUNDARY,
+  String.raw`(rd|rmdir)\s+\/s(\s+\/[a-z]+)*\s+["']?([a-z]:[\\/]\*?|\\)["']?` + CMD_BOUNDARY,
   'i'
 )
 const DEL_ROOT_RE = new RegExp(
-  String.raw`del(\s+\/[a-z]+)+\s+(c:[\\/]\*?|\*)` + CMD_BOUNDARY,
+  String.raw`del(\s+\/[a-z]+)+\s+["']?([a-z]:[\\/]\*?|\*)["']?` + CMD_BOUNDARY,
   'i'
 )
-const RMITEM_ROOT_RE = new RegExp(
-  String.raw`remove-item\s+.*-recurse.*\s+` + WIPE_TARGET + CMD_BOUNDARY,
+// Remove-Item 的 -Recurse 与根路径无论先后顺序都算擦盘，各覆盖一个方向
+const RMITEM_RECURSE_FIRST_RE = new RegExp(
+  String.raw`remove-item\s+.*-recurse.*\s+["']?` + WIPE_TARGET + CMD_BOUNDARY,
+  'i'
+)
+const RMITEM_PATH_FIRST_RE = new RegExp(
+  String.raw`remove-item\s+["']?` + WIPE_TARGET + String.raw`["']?` + CMD_BOUNDARY + String.raw`.*-recurse`,
   'i'
 )
 
@@ -363,7 +369,8 @@ export function auditCommandSecurity(cmd: string): SecurityAuditResult {
     RM_ROOT_RE.test(trimmed) ||
     RD_ROOT_RE.test(trimmed) ||
     DEL_ROOT_RE.test(trimmed) ||
-    RMITEM_ROOT_RE.test(trimmed)
+    RMITEM_RECURSE_FIRST_RE.test(trimmed) ||
+    RMITEM_PATH_FIRST_RE.test(trimmed)
   ) {
     return {
       isDangerous: true,
@@ -417,6 +424,11 @@ export function auditCommandSecurity(cmd: string): SecurityAuditResult {
   return { isDangerous: false }
 }
 
+/** 把正则元字符转义，用于把动态字符串（目录名）安全拼进正则。 */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /**
  * 命令字符串是否触碰应用私有数据（密钥库/会话数据库）。
  * guardPrivatePath 只拦文件类工具的路径参数；run_command 的 command/cwd 是
@@ -433,11 +445,21 @@ export function commandTouchesPrivateData(command: string, cwd?: string): boolea
     const normalizedUserData = userData.replace(/\//g, '\\').toLowerCase()
     // userData 绝对路径出现在命令里（读/写/删库文件都算触碰）
     if (normalizedCmd.includes(normalizedUserData)) return true
-    // 命令里出现 userData 目录名（如 shangbo-agent）也算：
-    // `type %APPDATA%\shangbo-agent\secr*`、`gc $env:APPDATA\shangbo-agent\*.json`
-    // 既不含完整文件名也不含展开后的绝对路径，靠目录名兜住
     const dirName = basename(normalizedUserData)
-    if (dirName && normalizedCmd.includes(dirName)) return true
+    if (dirName) {
+      const escaped = escapeRegExp(dirName)
+      // 目录名出现在「路径上下文」里（前是分隔符或开头，后是分隔符或结尾）才算指向
+      // 应用数据目录。不能裸匹配整个单词：`npm test -- shangbo-agent` 这类同名参数、
+      // `git clone .../shangbo-agent.git` 这类仓库名都会被误伤
+      const dirInPath = new RegExp(`(^|\\\\)${escaped}(\\\\|$)`)
+      if (dirInPath.test(normalizedCmd)) return true
+      // 目录名被通配符打断的旁路（`type %APPDATA%\shangbo*\secr*`）：
+      // 「环境变量展开特征」与「私有文件的通配形态」同时出现才拦，
+      // 单独出现 %APPDATA% 或 *.json 不至于误伤普通命令
+      const envExpand = /(%appdata%|%localappdata%|\$env:appdata|\$env:localappdata|appdata\\(roaming|local))/
+      const privateWildcard = new RegExp(`(secr\\w*[*?])|([*?]\\.db)|(\\\\${escaped}\\w*[*?])`)
+      if (envExpand.test(normalizedCmd) && privateWildcard.test(normalizedCmd)) return true
+    }
   }
   if (cwd) {
     if (userData) {

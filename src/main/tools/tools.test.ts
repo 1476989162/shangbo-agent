@@ -85,14 +85,26 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
       'rm -rf *',
       'rm -r /',
       'rm -f -r /',
+      'rm -rf ~/*',
+      'rm -rf $HOME/*',
+      'rm -rf "/"',
       'Remove-Item -Recurse -Force C:\\',
+      'Remove-Item C:\\ -Recurse -Force',
       'rd /s /q C:\\',
+      'rd /s /q D:\\',
       'del /f /s /q C:\\*'
     ]
     for (const cmd of critical) {
       const res = auditCommandSecurity(cmd)
       expect(res.isDangerous, cmd).toBe(true)
       expect(res.severity, cmd).toBe('CRITICAL')
+    }
+  })
+
+  it('A-2 反例补充：根下的子路径与子目录仍然放行', () => {
+    const benign = ['rm -rf ~/docs', 'Remove-Item C:\\projects -Recurse -Force', 'rd /s /q E:\\temp']
+    for (const cmd of benign) {
+      expect(auditCommandSecurity(cmd).isDangerous, cmd).toBe(false)
     }
   })
 
@@ -123,7 +135,20 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
     await expect(
       tool.execute({ command: 'gc $env:APPDATA\\shangbo-agent\\*.json' }, ctx)
     ).rejects.toThrow('禁止访问应用私有数据')
-    expect(commandTouchesPrivateData('type %APPDATA%\\shangbo-agent\\secr*')).toBe(true)
+    // 目录名被通配符打断的旁路：靠「env 特征 + 私有文件通配形态」组合拦住
+    await expect(
+      tool.execute({ command: 'type %APPDATA%\\shangbo*\\secr*' }, ctx)
+    ).rejects.toThrow('禁止访问应用私有数据')
+    expect(commandTouchesPrivateData('type %APPDATA%\\shangbo*\\secr*')).toBe(true)
+  })
+
+  it('A-3 误伤检查：裸的同名参数与单纯的环境变量引用不拦', () => {
+    // 用户开发本应用时，参数里出现 shangbo-agent 这个词不代表触碰私有目录
+    expect(commandTouchesPrivateData('npm test -- shangbo-agent')).toBe(false)
+    expect(commandTouchesPrivateData('git clone git@github.com:me/shangbo-agent.git')).toBe(false)
+    // 只出现 %APPDATA% 本身、没有私有文件通配形态的普通命令
+    expect(commandTouchesPrivateData('echo %APPDATA%')).toBe(false)
+    expect(commandTouchesPrivateData('dir %APPDATA%\\npm')).toBe(false)
   })
 
   it('A-1 工具层：CRITICAL 硬拦截兜底，HIGH 不在工具层拦（交给审批）', async () => {

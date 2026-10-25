@@ -8,3 +8,5 @@ release/
 .env.local
 python/__pycache__/
 python/.venv/
+.workbuddy/
+outputs/
