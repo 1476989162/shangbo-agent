@@ -1,6 +1,6 @@
 import { exec } from 'node:child_process'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { app } from 'electron'
 import { z } from 'zod'
@@ -75,17 +75,46 @@ function describeError(error: unknown): string {
  * 属于应用自身的数据而非用户的普通文件。模型一旦读到密钥库，
  * 注入指令就能把密钥带进对话上下文发往任意供应商——审批拦不住"读"，
  * 所以这里直接禁止文件类工具触碰。
+ *
+ * 单测等无 Electron app 环境下，app.getPath 会抛错：此时按文件名兜底，
+ * 只要目标文件名命中私有前缀同样拦截，保证防护在任何环境不断线。
  */
+function safeUserDataPath(): string | null {
+  try {
+    return app.getPath('userData')
+  } catch {
+    return null
+  }
+}
+
+const PRIVATE_FILE_PREFIXES = ['secrets.json', 'shangbo-agent.db']
+
 function guardPrivatePath(target: string): void {
-  const userData = typeof app?.getPath === 'function' ? app.getPath('userData') : null
+  const normalized = resolve(target).toLowerCase()
+  // 文件名兜底：无 app 环境或路径不在 userData 下时，命中私有文件名同样拦截
+  const base = basename(normalized)
+  if (PRIVATE_FILE_PREFIXES.some((prefix) => base === prefix || base.startsWith(`${prefix}-`) || base.startsWith(`${prefix}.`))) {
+    throw new Error(
+      `禁止访问应用私有数据：${target}。该位置存放密钥与数据库，不作为工具的读取或写入对象。`
+    )
+  }
+  let userData: string | null = null
+  try {
+    userData = typeof app?.getPath === 'function' ? safeUserDataPath() : null
+  } catch {
+    userData = null
+  }
+  // 拿不到应用数据目录时已由文件名兜底覆盖常见旁路；此处不再直接放行判断，
+  // 目录级精确匹配仅作为补充（userData 可用时）。
   if (!userData) return
-  // db 的 -wal / -shm 伴生文件用前缀一并拦住
-  const privatePaths = [resolve(userData, 'secrets.json'), resolve(userData, 'shangbo-agent.db')]
-  const normalized = resolve(target)
-  for (const forbidden of privatePaths) {
-    if (normalized === forbidden || normalized.startsWith(`${forbidden}-`)) {
+  // Windows 文件系统大小写不敏感，比较时统一转小写，避免 Secrets.JSON 类旁路。
+  // 私有文件前缀：密钥库与会话数据库（含 -wal/-shm/-journal 伴生文件与 .tmp/.bak 临时文件）。
+  // secrets.json.tmp 是 secrets.ts 原子写入的中间文件，同样含密钥
+  for (const name of PRIVATE_FILE_PREFIXES) {
+    const lower = resolve(userData, name).toLowerCase()
+    if (normalized === lower || normalized.startsWith(`${lower}-`) || normalized.startsWith(`${lower}.`)) {
       throw new Error(
-        `禁止访问应用私有数据：${forbidden}。该位置存放密钥与数据库，不作为工具的读取或写入对象。`
+        `禁止访问应用私有数据：${resolve(userData, name)}。该位置存放密钥与数据库，不作为工具的读取或写入对象。`
       )
     }
   }
@@ -161,33 +190,63 @@ const readFileTool: ToolDefinition = {
     type: 'object',
     properties: {
       path: { type: 'string', description: '文件路径，相对路径基于项目目录解析' },
-      maxBytes: { type: 'integer', description: '最多读取的字节数，默认 262144' }
+      maxBytes: { type: 'integer', description: '最多读取的字节数，默认 262144' },
+      offsetBytes: { type: 'integer', description: '从第几个字节开始读，默认 0，用于分段读大文件' }
     },
     required: ['path']
   },
   requiresApproval: false,
   async execute(input, context) {
-    const { path, maxBytes } = z
-      .object({ path: z.string().min(1), maxBytes: z.number().int().positive().optional() })
+    const { path, maxBytes, offsetBytes } = z
+      .object({
+        path: z.string().min(1),
+        maxBytes: z.number().int().positive().optional(),
+        offsetBytes: z.number().int().min(0).optional()
+      })
       .parse(input)
 
     const target = resolveUserPath(context, path)
     guardPrivatePath(target)
     const limit = maxBytes ?? 262_144
+    const offset = offsetBytes ?? 0
     const info = await stat(target)
-    const buffer = await readFile(target)
-    const slice = buffer.subarray(0, limit)
+    // 流式只读需要的窗口：几 GB 大文件也不会被全量读进内存
+    const handle = await openFile(target, 'r')
+    try {
+      const length = Math.max(0, Math.min(limit, info.size - offset))
+      const buffer = Buffer.alloc(length)
+      if (length > 0) await handle.read(buffer, 0, length, offset)
+      const slice = buffer.subarray(0, length)
 
-    // 二进制内容没有阅读价值，只会变成一大段乱码污染上下文
-    let nullByteCount = 0
-    for (const byte of slice) if (byte === 0) nullByteCount++
-    if (nullByteCount > 0) {
-      return `${target}（${info.size} 字节）：二进制文件，不提供文本内容。`
+      // 二进制内容没有阅读价值，只会变成一大段乱码污染上下文
+      let nullByteCount = 0
+      for (const byte of slice) if (byte === 0) nullByteCount++
+      if (nullByteCount > 0) {
+        return `${target}（${info.size} 字节）：二进制文件，不提供文本内容。`
+      }
+
+      const end = offset + length
+      // offsetBytes 可能切在 UTF-8 多字节字符中间：开头若是一串连续字节
+      // （0x80-0xBF，说明上个字符被切走了一半），向后挪到下一个字符边界再解码
+      let contentStart = 0
+      if (length > 0 && (slice[0] & 0xc0) === 0x80) {
+        while (contentStart < length && (slice[contentStart] & 0xc0) === 0x80) contentStart++
+      }
+      const text = slice.subarray(contentStart).toString('utf8')
+      const boundaryNote =
+        contentStart > 0
+          ? `\n\n（起点切在多字节字符中间，已跳过前 ${contentStart} 字节的残缺字节。）`
+          : text.endsWith('\uFFFD')
+            ? '\n\n（末尾可能截断了半个多字节字符，续读时把 offsetBytes 回退几个字节可避免乱码。）'
+            : ''
+      const notice =
+        end < info.size
+          ? `\n\n…（文件共 ${info.size} 字节，本次返回 ${offset}-${end} 字节，展示截断上限 16000 字符）`
+          : ''
+      return truncate(`${target}（${info.size} 字节）：\n\n${text}${boundaryNote}${notice}`)
+    } finally {
+      await handle.close()
     }
-
-    const notice =
-      buffer.length > limit ? `\n\n…（文件共 ${buffer.length} 字节，仅读取前 ${limit} 字节）` : ''
-    return truncate(`${target}（${info.size} 字节）：\n\n${slice.toString('utf8')}${notice}`)
   }
 }
 
@@ -256,7 +315,7 @@ const patchFileTool: ToolDefinition = {
     if (count > 1) {
       throw new Error(`在文件 ${target} 中匹配到 ${count} 处完全相同的内容，无法唯一定位。请在 targetContent 中包含更多上下文行以保证唯一性。`)
     }
-    const updated = raw.replace(targetContent, replacementContent)
+    const updated = raw.replace(targetContent, () => replacementContent)
     await writeFile(target, updated, 'utf8')
     return `已成功对 ${target} 进行局部精确补丁更新。`
   }
@@ -272,13 +331,39 @@ export interface SecurityAuditResult {
   reason?: string
 }
 
+/**
+ * 擦盘级目标：根目录 / 家目录 / 盘符根 / 裸通配符。
+ * 目标后必须紧跟命令边界（空白、;、&、| 或结尾）——否则 `rm -rf ./dist`、
+ * `rm -rf *.log`、`del /q *.tmp` 这类删除子路径的日常命令会被整个拦死。
+ */
+const WIPE_TARGET = String.raw`(\/|\/\*|\\\*|~\/?|\$home\/?|%home%|\.\/?|\*|c:[\\/]\*?)`
+const CMD_BOUNDARY = String.raw`(\s|$|[;&|])`
+
+const RM_ROOT_RE = new RegExp(
+  String.raw`rm\s+(-[a-z]+\s+)*-[a-z]*r[a-z]*\s+` + WIPE_TARGET + CMD_BOUNDARY,
+  'i'
+)
+const RD_ROOT_RE = new RegExp(
+  String.raw`(rd|rmdir)\s+\/s(\s+\/[a-z]+)*\s+(c:[\\/]\*?|\\)` + CMD_BOUNDARY,
+  'i'
+)
+const DEL_ROOT_RE = new RegExp(
+  String.raw`del(\s+\/[a-z]+)+\s+(c:[\\/]\*?|\*)` + CMD_BOUNDARY,
+  'i'
+)
+const RMITEM_ROOT_RE = new RegExp(
+  String.raw`remove-item\s+.*-recurse.*\s+` + WIPE_TARGET + CMD_BOUNDARY,
+  'i'
+)
+
 export function auditCommandSecurity(cmd: string): SecurityAuditResult {
   const trimmed = cmd.trim().toLowerCase()
   // 1. 全盘或根目录致命清除命令
   if (
-    /rm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\s+(\/|\\\*|\/\*|c:\\|c:\/\*|c:\\\*)/i.test(trimmed) ||
-    /rmdir\s+\/s\s+\/q\s+(c:\\|c:\/|c:\\\*|\\)/i.test(trimmed) ||
-    /del\s+\/f\s+\/s\s+\/q\s+(c:\\|c:\/|\*)/i.test(trimmed)
+    RM_ROOT_RE.test(trimmed) ||
+    RD_ROOT_RE.test(trimmed) ||
+    DEL_ROOT_RE.test(trimmed) ||
+    RMITEM_ROOT_RE.test(trimmed)
   ) {
     return {
       isDangerous: true,
@@ -286,12 +371,19 @@ export function auditCommandSecurity(cmd: string): SecurityAuditResult {
       reason: 'Freebuff 安全红线：检测到试图全局递归清除磁盘/根目录的高危破坏性命令！'
     }
   }
-  // 2. 磁盘分区与格式化
-  if (/format\s+[a-z]:/i.test(trimmed) || /diskpart/i.test(trimmed) || /mkfs\./i.test(trimmed)) {
+  // 2. 磁盘分区、格式化与引导破坏
+  if (
+    /format\s+[a-z]:/i.test(trimmed) ||
+    /diskpart/i.test(trimmed) ||
+    /mkfs(\s|\.)/i.test(trimmed) ||
+    /bcdedit\s+\/delete/i.test(trimmed) ||
+    /vssadmin\s+delete/i.test(trimmed) ||
+    /cipher\s+\/w:/i.test(trimmed)
+  ) {
     return {
       isDangerous: true,
       severity: 'CRITICAL',
-      reason: 'Freebuff 安全红线：检测到磁盘格式化或重分区高危命令！'
+      reason: 'Freebuff 安全红线：检测到磁盘格式化、重分区或引导/卷影破坏命令！'
     }
   }
   // 3. 生产数据库全库清除
@@ -300,6 +392,14 @@ export function auditCommandSecurity(cmd: string): SecurityAuditResult {
       isDangerous: true,
       severity: 'HIGH',
       reason: 'Freebuff 安全红线：检测到数据库删库/清空表的高危破坏性操作！'
+    }
+  }
+  // 3b. 注册表破坏
+  if (/reg\s+delete\s+hk/i.test(trimmed)) {
+    return {
+      isDangerous: true,
+      severity: 'HIGH',
+      reason: 'Freebuff 安全护栏：检测到注册表删除操作！'
     }
   }
   // 4. 窃取系统级秘密凭据
@@ -315,6 +415,48 @@ export function auditCommandSecurity(cmd: string): SecurityAuditResult {
     }
   }
   return { isDangerous: false }
+}
+
+/**
+ * 命令字符串是否触碰应用私有数据（密钥库/会话数据库）。
+ * guardPrivatePath 只拦文件类工具的路径参数；run_command 的 command/cwd 是
+ * 自由字符串，`type secrets.json`、`type %APPDATA%\shangbo-agent\secr*` 这类
+ * 读法必须在这里拦，否则密钥进上下文。
+ */
+export function commandTouchesPrivateData(command: string, cwd?: string): boolean {
+  const lowered = command.toLowerCase()
+  // 命令文本含私有文件名（大小写不敏感）即命中
+  if (lowered.includes('secrets.json') || lowered.includes('shangbo-agent.db')) return true
+  const userData = safeUserDataPath()
+  if (userData) {
+    const normalizedCmd = command.replace(/\//g, '\\').toLowerCase()
+    const normalizedUserData = userData.replace(/\//g, '\\').toLowerCase()
+    // userData 绝对路径出现在命令里（读/写/删库文件都算触碰）
+    if (normalizedCmd.includes(normalizedUserData)) return true
+    // 命令里出现 userData 目录名（如 shangbo-agent）也算：
+    // `type %APPDATA%\shangbo-agent\secr*`、`gc $env:APPDATA\shangbo-agent\*.json`
+    // 既不含完整文件名也不含展开后的绝对路径，靠目录名兜住
+    const dirName = basename(normalizedUserData)
+    if (dirName && normalizedCmd.includes(dirName)) return true
+  }
+  if (cwd) {
+    if (userData) {
+      const normalizedUserData = userData.replace(/\//g, '\\').toLowerCase()
+      const resolvedCwd = resolve(cwd).replace(/\//g, '\\').toLowerCase()
+      // cwd 落在 userData 目录下（含它本身）就拒绝：
+      // 目录名不叫 secrets.json，文件名兜底拦不住，在里面执行 `type secret*` 即可读到密钥
+      if (resolvedCwd === normalizedUserData || resolvedCwd.startsWith(`${normalizedUserData}\\`)) {
+        return true
+      }
+    }
+    // cwd 恰好指向私有文件本身时，复用文件级防护
+    try {
+      guardPrivatePath(resolve(cwd))
+    } catch {
+      return true
+    }
+  }
+  return false
 }
 
 const runCommand: ToolDefinition = {
@@ -340,6 +482,20 @@ const runCommand: ToolDefinition = {
         timeoutMs: z.number().int().positive().max(300_000).optional()
       })
       .parse(input)
+
+    // 工具层自保：私有目录与 CRITICAL 级命令在执行前直接拦截，不依赖调用方是否记得审计。
+    // HIGH 级（drop database 等）由 runtime 弹窗审批——用户批准后可执行，
+    // 这里再拦就会出现「批准了却执行不了」的自相矛盾。
+    // 抛错走工具错误通道（调用方展示给模型/用户），不进 exec。
+    if (commandTouchesPrivateData(command, cwd ? resolveUserPath(context, cwd) : context.workingDirectory ?? undefined)) {
+      throw new Error(
+        '禁止访问应用私有数据：该命令触碰存放密钥与数据库的位置，不作为工具的执行对象。'
+      )
+    }
+    const audit = auditCommandSecurity(command)
+    if (audit.isDangerous && audit.severity === 'CRITICAL') {
+      throw new Error(audit.reason ?? '【Freebuff 安全护栏拦截】检测到高危系统级操作！')
+    }
 
     // 有意设计：命令失败不抛异常，而是把退出码、stdout、stderr 作为正常观察结果回给模型。
     // 命令失败（在不存在的目录里执行、测试没通过、某个工具没装）是探索过程的常态，
@@ -402,6 +558,8 @@ const searchFiles: ToolDefinition = {
     const contentNeedle = content?.toLowerCase() ?? null
     const results: string[] = []
     let scanned = 0
+    let completed = true
+    const visited = new Set<string>()
     const stack: string[] = [root]
     while (stack.length > 0 && results.length < limit && scanned < 5000) {
       const dir = stack.pop()!
@@ -411,11 +569,25 @@ const searchFiles: ToolDefinition = {
       } catch {
         continue
       }
+      // 同目录按名排序：同版本同仓多次搜索结果稳定
+      entries.sort((a, b) => a.name.localeCompare(b.name))
       for (const entry of entries) {
         if (results.length >= limit || scanned >= 5000) break
         const full = resolve(dir, entry.name)
-        if (entry.isDirectory()) {
-          if (!skipDirs.has(entry.name)) stack.push(full)
+        if (entry.isDirectory() || entry.isSymbolicLink()) {
+          // 软链目录不跟进：防 monorepo 互链/环目录扫描爆炸
+          if (entry.isSymbolicLink()) continue
+          if (!skipDirs.has(entry.name)) {
+            try {
+              const st = await stat(full)
+              const key = `${st.dev}:${st.ino}`
+              if (visited.has(key)) continue
+              visited.add(key)
+              stack.push(full)
+            } catch {
+              stack.push(full)
+            }
+          }
           continue
         }
         scanned++
@@ -436,13 +608,22 @@ const searchFiles: ToolDefinition = {
           continue
         }
         if (buffer.includes(0)) continue
-        if (buffer.toString('utf8').toLowerCase().includes(contentNeedle)) {
-          results.push(full)
+        // 逐行匹配：返回 file:line: snippet，模型一次定位无需再 read_file
+        const lines = buffer.toString('utf8').split('\n')
+        let perFile = 0
+        for (let i = 0; i < lines.length && results.length < limit && perFile < 5; i++) {
+          if (lines[i].toLowerCase().includes(contentNeedle)) {
+            const snippet = lines[i].trim().slice(0, 200)
+            results.push(`${full}:${i + 1}: ${snippet}`)
+            perFile++
+          }
         }
       }
     }
-    if (results.length === 0) return `在 ${root} 未找到匹配（已扫描约 ${scanned} 个文件）`
-    return truncate(`在 ${root} 找到 ${results.length} 个匹配（已扫描约 ${scanned} 个文件）：\n${results.join('\n')}`)
+    if (stack.length > 0 && scanned >= 5000) completed = false
+    const scopeNote = completed ? '已扫完' : '未扫完（达 5000 上限，建议缩小 path 或加 filename 缩小范围后重试）'
+    if (results.length === 0) return `在 ${root} 未找到匹配（已扫描约 ${scanned} 个文件，${scopeNote}）`
+    return truncate(`在 ${root} 找到 ${results.length} 个匹配（已扫描约 ${scanned} 个文件，${scopeNote}）：\n${results.join('\n')}`)
   }
 }
 

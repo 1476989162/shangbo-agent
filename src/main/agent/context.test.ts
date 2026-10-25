@@ -71,7 +71,31 @@ describe('estimateBlocks', () => {
   it('image 按固定值粗估', () => {
     expect(
       estimateBlocks([{ type: 'image', mimeType: 'image/png', dataUrl: 'data:image/png;base64,xx' }])
-    ).toBe(800)
+    ).toBe(1200)
+  })
+
+  it('tool_result 超长输出先截断再计入预算', () => {
+    const long = 'x'.repeat(10000)
+    const result = buildContext(
+      [
+        makeMessage('user', [textBlock('问')]),
+        makeMessage('assistant', [
+          { type: 'tool_use', id: 't1', name: 'read_file', input: {} },
+          { type: 'tool_result', toolUseId: 't1', content: long, isError: false }
+        ])
+      ],
+      { system: 'sys', budgetTokens: 100_000, toolResultMaxChars: 4000 }
+    )
+    // 截断后 tool_result 估值约 2000+12，不再吞掉整轮预算
+    expect(result.estimatedTokens).toBeLessThan(5000)
+  })
+
+  it('CJK 区间判定：假名谚文按 1 token，拉丁重音按 4:1', () => {
+    // あ（3042）、한（D55C）在区间内；é（E9）在区间外
+    expect(estimateTokens('あは')).toBe(2)
+    expect(estimateTokens('한글')).toBe(2)
+    // ée 两个字符按 other 计：2/4 上取整 = 1
+    expect(estimateTokens('éè')).toBe(1)
   })
 })
 

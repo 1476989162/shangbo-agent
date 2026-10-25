@@ -44,9 +44,31 @@ vi.mock('../storage/images', () => ({
 
 vi.mock('../db/repo', () => ({
   getConversation: (id: string) => conversations.get(id) ?? null,
-  getMessage: (id: string) => inserted.find((m) => m.id === id) ?? null,
+  getMessage: (id: string) => inserted.find((m: Message) => m.id === id) ?? null,
   getActiveLeaf: (c: string) => leafByConversation.get(c) ?? null,
+  getLatestMessageId: (c: string) => {
+    const list = inserted.filter((m: Message) => m.conversationId === c)
+    return list.length > 0 ? list[list.length - 1].id : null
+  },
   getActivePath: (c: string) => inserted.filter((m) => m.conversationId === c),
+  getPathTo: (messageId: string) => {
+    const start = inserted.find((m: Message) => m.id === messageId)
+    if (!start) return []
+    const byId = new Map(inserted.map((m: Message) => [m.id, m]))
+    const path: Message[] = []
+    let cursor: string | null = messageId
+    while (cursor) {
+      const current = byId.get(cursor)
+      if (!current) break
+      path.push(current)
+      cursor = current.parentId
+    }
+    return path.reverse()
+  },
+  reparentMessage: (messageId: string, parentId: string | null) => {
+    const message = inserted.find((m: Message) => m.id === messageId)
+    if (message) message.parentId = parentId
+  },
   setActiveLeaf: (c: string, leaf: string) => {
     leafByConversation.set(c, leaf)
   },
@@ -74,6 +96,8 @@ vi.mock('../db/repo', () => ({
 }))
 
 vi.mock('../providers/gateway', () => ({
+  // runtime 逐轮调用它解析首字节超时，缺了会 TypeError 让整轮直接失败
+  resolveFirstByteTimeoutMs: () => 180_000,
   streamWithFallback: async function* () {
     await new Promise<void>((r) => setTimeout(r, 50))
     yield { type: 'stop', reason: 'end_turn' } as const

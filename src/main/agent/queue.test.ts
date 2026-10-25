@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import * as repo from '../db/repo'
 import type { AgentEvent, Message } from '../../shared/types'
 
 /* AgentRuntime 依赖 electron 与 better-sqlite3，这里把两者都替换掉，
@@ -36,9 +37,32 @@ vi.mock('../db/repo', () => ({
   getConversation: (id: string) => conversations.get(id) ?? null,
   getMessage: (id: string) => inserted.find((m) => m.id === id) ?? null,
   getActiveLeaf: (conversationId: string) => leafByConversation.get(conversationId) ?? null,
+  // 排队消息落库时挂在树上最新一条消息下（C-1）
+  getLatestMessageId: (conversationId: string) => {
+    const list = inserted.filter((m) => m.conversationId === conversationId)
+    return list.length > 0 ? list[list.length - 1].id : null
+  },
   // 上下文构建需要一条从叶子回溯的路径
   getActivePath: (conversationId: string) =>
     inserted.filter((m) => m.conversationId === conversationId),
+  getPathTo: (messageId: string) => {
+    const start = inserted.find((m) => m.id === messageId)
+    if (!start) return []
+    const byId = new Map(inserted.map((m) => [m.id, m]))
+    const path: Message[] = []
+    let cursor: string | null = messageId
+    while (cursor) {
+      const current = byId.get(cursor)
+      if (!current) break
+      path.push(current)
+      cursor = current.parentId
+    }
+    return path.reverse()
+  },
+  reparentMessage: (messageId: string, parentId: string | null) => {
+    const message = inserted.find((m) => m.id === messageId)
+    if (message) message.parentId = parentId
+  },
   setActiveLeaf: (conversationId: string, leafId: string) => {
     leafByConversation.set(conversationId, leafId)
   },
@@ -62,6 +86,8 @@ vi.mock('../db/repo', () => ({
 }))
 
 vi.mock('../providers/gateway', () => ({
+  // runtime 逐轮调用它解析首字节超时，缺了会 TypeError 让整轮直接失败
+  resolveFirstByteTimeoutMs: () => 180_000,
   streamWithFallback: async function* () {
     // 挂起直到被 abort，让测试能控制「这一轮跑多久」
     await new Promise<void>((resolve) => {
@@ -228,5 +254,54 @@ describe('AgentRuntime 的同会话串行队列', () => {
     expect(runtime.queueLength('c1')).toBe(1)
     runtime.abortConversation('c1')
     expect(runtime.queueLength('c1')).toBe(0)
+  })
+
+  it('连发排队：B 开跑时能看到 A 的回答，A 跑中 B 不抢叶子', async () => {
+    const { emit } = collector()
+    runtime.send({ conversationId: 'c1', parentMessageId: null, content: '我是小王' }, emit)
+    await tick()
+    // A 跑中时连发 B：B 落库但不抢 activeLeaf
+    runtime.send({ conversationId: 'c1', parentMessageId: null, content: '我叫什么' }, emit)
+    const leafDuringA = leafByConversation.get('c1')
+    // 等两轮都跑完，B 的 user 消息应被修正挂到 A_assistant 下
+    await drain(400)
+    const users = inserted.filter((m) => m.role === 'user' && m.conversationId === 'c1')
+    const assistants = inserted.filter((m) => m.role === 'assistant' && m.conversationId === 'c1')
+    expect(users).toHaveLength(2)
+    expect(assistants).toHaveLength(2)
+    const bUser = users.find((m) => m.blocks.some((b) => b.type === 'text' && b.text === '我叫什么'))
+    const aAssistant = assistants[0]
+    expect(bUser).toBeDefined()
+    expect(aAssistant).toBeDefined()
+    // B 挂在 A 的回答下，不是旁支
+    expect(bUser!.parentId).toBe(aAssistant!.id)
+    // A 跑中时叶子仍是 A 相关，不应已被 B 抢走
+    expect(leafDuringA).not.toBe(bUser!.id)
+  })
+
+  it('排队落库挂在树上最新消息下，不与 A 的回答成为兄弟分支（C-1）', async () => {
+    const { emit } = collector()
+    runtime.send({ conversationId: 'c1', parentMessageId: null, content: 'A 的问题' }, emit)
+    await tick()
+    // A 开跑后 assistant 已落库（streaming），此时 B 排队落库
+    runtime.send({ conversationId: 'c1', parentMessageId: null, content: 'B 的问题' }, emit)
+
+    const aAssistant = inserted.find((m) => m.role === 'assistant' && m.conversationId === 'c1')
+    const aUser = inserted.find(
+      (m) => m.role === 'user' && m.blocks.some((b) => b.type === 'text' && b.text === 'A 的问题')
+    )
+    const bUser = inserted.find(
+      (m) => m.role === 'user' && m.blocks.some((b) => b.type === 'text' && b.text === 'B 的问题')
+    )
+    expect(aAssistant).toBeDefined()
+    expect(bUser).toBeDefined()
+    // B 挂在 A_assistant 下（父子），而不是 A_user 下与 A_assistant 平级成为第二分支
+    expect(bUser!.parentId).toBe(aAssistant!.id)
+    expect(bUser!.parentId).not.toBe(aUser!.id)
+    // 排队期间以 queued 状态落库
+    expect(bUser!.status).toBe('queued')
+    await drain(400)
+    // 开跑后状态恢复
+    expect(repo.getMessage(bUser!.id)?.status).toBe('done')
   })
 })

@@ -25,15 +25,23 @@ function load(): Record<string, string> {
   try {
     cache = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
   } catch (error) {
-    log.error('[secrets] 读取失败，重置为空：', error)
+    // 损坏的 JSON 先备份再重置：静默重置等于密钥全部丢失，用户无从找回
+    try {
+      const backup = `${path}.corrupt-${Date.now()}`
+      writeFileSync(backup, readFileSync(path))
+      log.error(`[secrets] 读取失败，已备份损坏文件到 ${backup} 并重置为空：`, error)
+    } catch {
+      log.error('[secrets] 读取失败且备份失败，重置为空：', error)
+    }
     cache = {}
   }
   return cache
 }
 
 /**
- * 原子写入：先写临时文件再 rename 替换，避免进程在写入中途崩溃
- * 留下半个损坏的 JSON（load 的容错会静默重置为空，密钥等于全部丢失）。
+ * 原子写入：先写临时文件再 rename 替换。Node 在 Windows 上 renameSync 可直接覆盖
+ * 已存在文件，无需先 unlink——unlink+rename 两步之间崩溃会丢密钥。
+ * 失败时（目标被占用等）退回带重试的 unlink+rename。
  */
 function persist(): void {
   const path = filePath()
@@ -45,11 +53,16 @@ function persist(): void {
     // 权限收紧失败不影响主流程（如某些网络盘不支持）
   }
   try {
-    if (existsSync(path)) unlinkSync(path)
+    renameSync(tmp, path)
   } catch {
-    // Windows 上目标被占用时 rename 会失败，先尝试删除
+    // Windows 目标被占用时 rename 可能失败，退回先删后改（带一次重试）
+    try {
+      if (existsSync(path)) unlinkSync(path)
+    } catch {
+      // 删除失败也不阻塞，rename 会再次报错并由上层感知
+    }
+    renameSync(tmp, path)
   }
-  renameSync(tmp, path)
 }
 
 export function setSecret(key: string, value: string): void {

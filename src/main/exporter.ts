@@ -21,6 +21,15 @@ function renderBlocks(blocks: ContentBlock[]): string[] {
     } else if (block.type === 'tool_result') {
       const tag = block.isError ? '（失败）' : ''
       lines.push(`📄 工具结果${tag}`, '', '```', block.content, '```', '')
+      if (block.image) {
+        lines.push(
+          block.image.dataUrl ? '![工具截图](内联图片)' : `![工具截图](${block.image.mimeType})`,
+          ''
+        )
+      }
+    } else if (block.type === 'image') {
+      // 图片块直接丢弃等于审计不完整：导出时保留相对路径定位
+      lines.push(block.file ? `![图片](${block.file})` : block.dataUrl ? '![图片](内联图片)' : '[图片已丢失]', '')
     }
   }
   return lines
@@ -53,11 +62,28 @@ export interface ExportResult {
   message?: string
 }
 
-export async function exportConversation(conversationId: string): Promise<ExportResult> {
+export interface ExportOptions {
+  /** 指定叶子消息 id，导出该分支；缺省为当前激活分支 */
+  leafId?: string
+  /** 是否包含思考过程块，默认包含 */
+  includeReasoning?: boolean
+}
+
+export async function exportConversation(
+  conversationId: string,
+  options?: ExportOptions
+): Promise<ExportResult> {
   const conversation = repo.getConversation(conversationId)
   if (!conversation) return { ok: false, message: '会话不存在或已被删除' }
 
-  const messages = repo.getActivePath(conversationId)
+  const messages =
+    options?.leafId && repo.getMessage(options.leafId)?.conversationId === conversationId
+      ? repo.getPathTo(options.leafId)
+      : repo.getActivePath(conversationId)
+  const includeReasoning = options?.includeReasoning ?? true
+  const filtered = includeReasoning
+    ? messages
+    : messages.map((m) => ({ ...m, blocks: m.blocks.filter((b) => b.type !== 'reasoning') }))
 
   const header = [
     `# ${conversation.title}`,
@@ -65,7 +91,7 @@ export async function exportConversation(conversationId: string): Promise<Export
     `<sub>导出于 ${new Date().toLocaleString('zh-CN')} · 尚搏 Agent</sub>`,
     ''
   ]
-  const body = messages.map(renderMessage).join('\n')
+  const body = filtered.map(renderMessage).join('\n')
   const markdown = `${header.join('\n')}${body}\n`
 
   try {

@@ -820,7 +820,7 @@ const suggestions = [
             :message="message"
             :is-last="message.id === lastAssistantId && !store.isStreaming"
             :branch="branchInfo(message)"
-            :queued="message.role === 'user' && !hasAssistantReply(message.id)"
+            :queued="message.role === 'user' && message.status !== 'aborted' && !hasAssistantReply(message.id)"
             @regenerate="store.regenerate"
             @switch-branch="store.switchBranch"
             @edit="onEdit"

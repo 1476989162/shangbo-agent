@@ -15,6 +15,14 @@ describe('复查意图识别 (matchReviewIntent)', () => {
     expect(matchReviewIntent('')).toBe(false)
   })
 
+  it('preview 不应误判为复查，但 code review 应命中', () => {
+    expect(matchReviewIntent('preview the page')).toBe(false)
+    expect(matchReviewIntent('preview this file')).toBe(false)
+    expect(matchReviewIntent('code review')).toBe(true)
+    expect(matchReviewIntent('review PR #123')).toBe(true)
+    expect(matchReviewIntent('please audit this module')).toBe(true)
+  })
+
   it('方法论包含停止条件与分级要求', () => {
     expect(REVIEW_PLAYBOOK).toContain('见好就收')
     expect(REVIEW_PLAYBOOK).toContain('分级')

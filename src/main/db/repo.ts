@@ -200,6 +200,16 @@ export function listChildren(messageId: string): Message[] {
   return rows.map(toMessage)
 }
 
+/** 该会话树上最新一条消息的 id（排队消息落库时作为临时挂载点）。 */
+export function getLatestMessageId(conversationId: string): string | null {
+  const row = getDb()
+    .prepare(
+      'SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+    )
+    .get(conversationId) as { id: string } | undefined
+  return row?.id ?? null
+}
+
 export function insertMessage(input: {
   id?: string
   conversationId: string
@@ -274,6 +284,37 @@ export function updateMessage(
     })
 }
 
+/**
+ * 把一条已落库消息挂到新的父消息下（排队开跑时修正挂载点用）。
+ * 只改 parent_id，不碰分支切换（active_leaf 由调用方决定）。
+ */
+export function reparentMessage(messageId: string, parentId: string | null): void {
+  getDb()
+    .prepare('UPDATE messages SET parent_id = ?, updated_at = ? WHERE id = ?')
+    .run(parentId, Date.now(), messageId)
+}
+
+/**
+ * 从指定消息沿 parent_id 回溯到根（与 getActivePath 同逻辑，但起点是任意消息）。
+ * runModel 取历史时用它：以本轮 userMessage 为起点，不受排队期间 activeLeaf 漂移影响。
+ * 只查链上的行，不再全表加载。
+ */
+export function getPathTo(messageId: string): Message[] {
+  const ids = collectPathIds(messageId)
+  if (ids.length === 0) return []
+  const placeholders = ids.map(() => '?').join(',')
+  const rows = getDb().prepare(`SELECT * FROM messages WHERE id IN (${placeholders})`).all(...ids) as MessageRow[]
+  const byId = new Map(rows.map((row) => [row.id, toMessage(row)]))
+  // collectPathIds 已是 叶子→根 顺序，过滤掉已删除的断点后反转
+  const path: Message[] = []
+  for (const id of ids) {
+    const message = byId.get(id)
+    if (!message) break
+    path.push(message)
+  }
+  return path.reverse()
+}
+
 /** 删除该消息及其整条子树（分支删除语义）。 */
 export function deleteSubtree(messageId: string): void {
   const db = getDb()
@@ -292,6 +333,8 @@ export function deleteSubtree(messageId: string): void {
 /**
  * 进程上次退出时（崩溃、断电、强杀）可能留下停在 streaming/pending 的消息，
  * 界面会永远显示"正在思考…"。启动时统一收敛为 aborted。
+ * 排队消息（status=queued 的用户消息）同样只在内存队列里有下文——重启后
+ * 队列已丢，永远不会有回复，一并标记为 aborted，避免成为永远挂着的孤立旁支。
  */
 export function settleOrphanStreamingMessages(): void {
   const result = getDb()
@@ -300,6 +343,34 @@ export function settleOrphanStreamingMessages(): void {
   if (result.changes > 0) {
     log.info(`[db] 已将 ${result.changes} 条中断的流式消息标记为 aborted`)
   }
+  const queued = getDb()
+    .prepare("UPDATE messages SET status = 'aborted' WHERE role = 'user' AND status = 'queued'")
+    .run()
+  if (queued.changes > 0) {
+    log.info(`[db] 已将 ${queued.changes} 条崩溃残留的排队消息标记为 aborted`)
+  }
+}
+
+/**
+ * 用递归 CTE 只查某条链上的消息 id，再按 id 精查整行。
+ * 长会话不再 SELECT * 全表 + 全量 JSON.parse，读放大从 O(全会话) 降到 O(链路深度)。
+ */
+function collectPathIds(startId: string): string[] {
+  const ids: string[] = []
+  let cursor: string | null = startId
+  const seen = new Set<string>()
+  // parent 链深度通常 < 200，这里按 id 逐跳回溯（每次 1 行主键查询），
+  // 比递归 CTE 更易读且不受 SQLite 版本限制；断链即停，与旧语义一致
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor)
+    ids.push(cursor)
+    const row = getDb().prepare('SELECT parent_id FROM messages WHERE id = ?').get(cursor) as {
+      parent_id: string | null
+    } | undefined
+    if (!row) break
+    cursor = row.parent_id
+  }
+  return ids
 }
 
 /**
@@ -309,19 +380,7 @@ export function settleOrphanStreamingMessages(): void {
 export function getActivePath(conversationId: string): Message[] {
   const leafId = getActiveLeaf(conversationId)
   if (!leafId) return []
-
-  const byId = new Map(listMessages(conversationId).map((m) => [m.id, m]))
-  const path: Message[] = []
-  let cursor: string | null = leafId
-
-  while (cursor) {
-    const message: Message | undefined = byId.get(cursor)
-    if (!message) break
-    path.push(message)
-    cursor = message.parentId
-  }
-
-  return path.reverse()
+  return getPathTo(leafId).filter((m) => m.conversationId === conversationId)
 }
 
 /**
@@ -411,7 +470,7 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
       try {
         const blocks = JSON.parse(row.blocks) as { type: string }[]
         if (Array.isArray(blocks)) {
-          toolCount = blocks.filter((b) => b.type === 'tool_call' || b.type === 'tool_result').length
+          toolCount = blocks.filter((b) => b.type === 'tool_use').length
         }
       } catch {
         // 忽略

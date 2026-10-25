@@ -5,7 +5,8 @@
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool'
 
-export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'aborted'
+/** queued：排队中的用户消息（已落库但尚未开跑），崩溃重启时收敛为 aborted。 */
+export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'aborted' | 'queued'
 
 /** 助手的回复不是纯字符串，而是有序内容块序列（文本 / 思考 / 工具调用 / 工具结果 / 图片）。 */
 export type ContentBlock =
@@ -26,6 +27,8 @@ export interface Usage {
   promptTokens: number
   /** 末次请求的输出 tokens */
   completionTokens: number
+  /** 整轮累计总 tokens（输入+输出），用于聚合统计；单步请求时等于末次规模 */
+  totalTokens?: number
   /** 整轮（含多次工具请求）累计输入 tokens；单次请求时不填 */
   totalPromptTokens?: number
   /** 整轮累计输出 tokens；单次请求时不填 */

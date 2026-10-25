@@ -27,6 +27,22 @@ export let FIRST_BYTE_TIMEOUT_MS = 180_000
 export function setFirstByteTimeoutForTesting(ms: number): void {
   FIRST_BYTE_TIMEOUT_MS = ms
 }
+
+/** 首字节超时生产可调：设置 providers.firstByteTimeoutMs（毫秒，钳位 15s–600s），默认 180000。 */
+export function getFirstByteTimeoutMs(): number {
+  try {
+    // gateway 层不直接依赖 settings 表（避免循环依赖），调用方透传；此处保留默认值语义
+    return FIRST_BYTE_TIMEOUT_MS
+  } catch {
+    return 180_000
+  }
+}
+
+export function resolveFirstByteTimeoutMs(configured?: unknown): number {
+  const n = typeof configured === 'number' ? Math.floor(configured) : 180_000
+  if (!Number.isFinite(n)) return 180_000
+  return Math.min(600_000, Math.max(15_000, n))
+}
 /** 普通可重试错误（5xx/超时/网络）的尝试次数。 */
 const MAX_ATTEMPTS_TRANSIENT = 3
 /** 429 限流的尝试次数：配合 10 秒间隔覆盖一个完整的每分钟限流窗口。 */
@@ -110,8 +126,12 @@ function resolveCandidates(preferredProviderId?: string | null): Provider[] {
 export async function* streamWithFallback(
   request: CompletionRequest,
   signal: AbortSignal,
-  preferredProviderId?: string | null
+  preferredProviderId?: string | null,
+  options?: { firstByteTimeoutMs?: number }
 ): AsyncGenerator<StreamChunk> {
+  const firstByteTimeout = resolveFirstByteTimeoutMs(
+    options?.firstByteTimeoutMs ?? FIRST_BYTE_TIMEOUT_MS
+  )
   const candidates = resolveCandidates(preferredProviderId)
   const explicitlySelected = Boolean(preferredProviderId)
 
@@ -145,11 +165,16 @@ export async function* streamWithFallback(
       continue
     }
 
-    // 跨供应商的模型清单互不通用：首选模型在该供应商存在则沿用，否则取其首个模型。
-    // 否则把 A 家的模型名发给 B 家必然得到 404 model is not found。
-    const effectiveModel = provider.models.includes(request.model)
-      ? request.model
-      : provider.models[0]
+    // 跨供应商的模型清单互不通用：首选模型在该供应商必须存在，否则明确报错，
+    // 不再静默取 models[0] 顶替——静默换模型等于静默换大脑，且账单归因错位。
+    if (!provider.models.includes(request.model)) {
+      const hint = `供应商「${provider.name}」没有模型「${request.model}」（可用：${provider.models.join('、') || '无'}），已跳过`
+      failures.push(hint)
+      lastFailureReason = `缺少模型 ${request.model}`
+      log.warn(`[gateway] ${hint}`)
+      continue
+    }
+    const effectiveModel = request.model
     if (!effectiveModel) {
       failures.push(`${provider.name}：没有配置可用模型，已跳过`)
       lastFailureReason = '没有配置可用模型'
@@ -175,7 +200,7 @@ export async function* streamWithFallback(
         firstByteTimer = setTimeout(() => {
           firstByteTimedOut = true
           attemptController.abort()
-        }, FIRST_BYTE_TIMEOUT_MS)
+        }, firstByteTimeout)
 
         // 本地 Ollama 不校验密钥，用占位串即可
         for await (const chunk of adapterFor(provider).stream(effectiveRequest, {
@@ -210,7 +235,7 @@ export async function* streamWithFallback(
 
         // 超时触发的是底层的 AbortError，报错文案换成对用户有意义的描述
         const message = firstByteTimedOut
-          ? `${FIRST_BYTE_TIMEOUT_MS / 1000} 秒内未返回任何数据（首字节超时）`
+          ? `${firstByteTimeout / 1000} 秒内未返回任何数据（首字节超时）`
           : error instanceof Error
             ? error.message
             : String(error)

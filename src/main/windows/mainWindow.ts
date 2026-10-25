@@ -45,6 +45,27 @@ export function isQuitting(): boolean {
   return quitting
 }
 
+/**
+ * 外部链接协议白名单：只允许 http/https/mailto，其余（file://、ms-msdt:、
+ * search-ms:、UNC 路径等）一律拦截。模型输出的链接会被 linkify，
+ * 用户点击即触发，若不收口可能被 file:// 或伪协议带到本地执行。
+ */
+export function isSafeExternalUrl(raw: string): boolean {
+  const url = raw.trim()
+  // UNC 路径（\\server\share）直接拒绝，不走协议解析
+  if (url.startsWith('\\\\')) return false
+  const lower = url.toLowerCase()
+  return lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('mailto:')
+}
+
+export function safeOpenExternal(raw: string): void {
+  if (isSafeExternalUrl(raw)) {
+    void shell.openExternal(raw)
+    return
+  }
+  log.warn(`[window] 已拦截不安全外部链接：${raw.slice(0, 200)}`)
+}
+
 export function createMainWindow(): BrowserWindow {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -89,7 +110,7 @@ export function createMainWindow(): BrowserWindow {
 
   // 外部链接一律交给系统浏览器打开
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    safeOpenExternal(url)
     return { action: 'deny' }
   })
 
@@ -101,7 +122,7 @@ export function createMainWindow(): BrowserWindow {
     if (!allowed || !url.startsWith(allowed)) {
       event.preventDefault()
       log.warn(`[window] 已拦截渲染层导航：${url}`)
-      void shell.openExternal(url)
+      safeOpenExternal(url)
     }
   })
 

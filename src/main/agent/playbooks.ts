@@ -6,12 +6,13 @@
  * 停止条件写进方法论本身——防"逛街"靠"知道何时停"，不靠数步数。
  */
 
-const REVIEW_KEYWORDS = ['review', '复查', '审查', '巡检', '走查', '审计', 'audit', '代码质量']
+const EN_REVIEW_PATTERN = /\b(review|audit)\b/i
+const ZH_REVIEW_KEYWORDS = ['复查', '审查', '巡检', '走查', '审计', '代码质量']
 
 /** 本轮用户消息是否在要求代码复查。 */
 export function matchReviewIntent(text: string): boolean {
-  const lowered = text.toLowerCase()
-  return REVIEW_KEYWORDS.some((kw) => lowered.includes(kw.toLowerCase()))
+  if (EN_REVIEW_PATTERN.test(text)) return true
+  return ZH_REVIEW_KEYWORDS.some((kw) => text.includes(kw))
 }
 
 export const REVIEW_PLAYBOOK = `

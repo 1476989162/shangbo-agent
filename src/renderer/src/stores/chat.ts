@@ -230,6 +230,8 @@ export const useChatStore = defineStore('chat', () => {
       if (message.conversationId !== activeConversationId.value) continue
       if (message.role !== 'user') continue
       if (replied.has(message.id)) continue
+      // 崩溃残留的排队消息已由主进程标记为 aborted（已取消），不再补进视图
+      if (message.status === 'aborted') continue
       // 仅当它是当前路径末端的子节点时才补进来，避免把别的分支混进来
       if (message.parentId !== path[path.length - 1]?.id) continue
       path.push(message)
@@ -736,6 +738,7 @@ export const useChatStore = defineStore('chat', () => {
         (m) =>
           m.conversationId === conversationId &&
           m.role === 'user' &&
+          m.status !== 'aborted' &&
           !replied.has(m.id)
       )
       .map((m) => m.id)

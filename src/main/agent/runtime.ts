@@ -7,7 +7,7 @@ import log from 'electron-log/main'
 import * as repo from '../db/repo'
 import { getSetting, setSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
-import { streamWithFallback } from '../providers/gateway'
+import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
 import { routingOrder } from '../providers/store'
 import { buildContext, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
 import { DEFAULT_MAX_OUTPUT_TOKENS, resolveEffort } from './effort'
@@ -255,8 +255,10 @@ export class AgentRuntime {
    *   - 会话在跑 → 发 run_queued，UI 显示「排队中」
    */
   send(payload: AgentSendRequest, emit: Emitter): { runId: string } {
-    const userMessage = this.persistUserMessage(payload)
     const busy = this.isRunning(payload.conversationId)
+    // 忙时延迟抢叶子：B 落库 parent 照常挂当时叶子（UI 能显示在队尾），
+    // 但不立即抢 activeLeaf，开跑时再按当时叶子修正挂载。空闲时走老路径。
+    const userMessage = this.persistUserMessage(payload, busy)
     const runId = randomUUID()
 
     return this.enqueue({
@@ -267,9 +269,13 @@ export class AgentRuntime {
       emit,
       start: async (self) => {
         const controller = this.runs.get(runId)?.controller ?? new AbortController()
+        // 延迟挂载的排队项在这里修正历史挂载点：挂到开跑时刻的叶子下，
+        // 再把叶子推到自己，保证 B 能看到 A_assistant，且 A 不会读到未回答的 B
+        this.anchorQueuedItem(self)
         // 读 self.payload 而非闭包捕获的入参：编辑排队消息改的是队列项，
         // 捕获入参会让编辑完全不生效
-        await this.executeSend(runId, self.payload, userMessage, emit, controller)
+        const fresh = repo.getMessage(self.userMessageId) ?? userMessage
+        await this.executeSend(runId, self.payload, fresh, emit, controller)
       }
     }, busy ? { userMessage } : null)
   }
@@ -289,10 +295,11 @@ export class AgentRuntime {
     const userMessageId = userMessage.id
 
     const runId = randomUUID()
-    return this.enqueue({
-      runId,
-      conversationId,
-      userMessageId,
+    return this.enqueue(
+      {
+        runId,
+        conversationId,
+        userMessageId,
       // 重新生成复用已落库的用户消息，这里给一份仅用于取消定位的 payload
       payload: {
         conversationId,
@@ -315,7 +322,10 @@ export class AgentRuntime {
           controller
         )
       }
-    })
+      },
+      // 与 send 一致：忙时发出 run_queued 让 UI 看到排队状态，空闲时直接开跑
+      this.isRunning(conversationId) ? { userMessage } : null
+    )
   }
 
   /** 停止：只中断正在跑的那一轮，队列里排着的保留（用户没说要丢弃）。 */
@@ -394,6 +404,15 @@ export class AgentRuntime {
   abortConversation(conversationId: string): void {
     // 会话即将消失（删除），排队的轮次没有存在意义，直接丢弃
     this.clearQueue(conversationId)
+    // 该会话挂起的审批按拒绝处理：删会话后弹窗残留 5 分钟，且 decide 可能误放行
+    const runIds = new Set<string>()
+    for (const [runId, run] of this.runs) {
+      if (run.conversationId === conversationId) runIds.add(runId)
+    }
+    for (const [key, pending] of this.approvals) {
+      const runId = key.split(':')[0]
+      if (runIds.has(runId)) pending.settle(false)
+    }
     for (const run of this.runs.values()) {
       if (run.conversationId === conversationId) run.controller.abort()
     }
@@ -420,11 +439,19 @@ export class AgentRuntime {
   /* ---------------------------------------------------------------- */
 
   /** 落库一条用户消息并返回实体。排队与开跑共用，让 UI 在提交瞬间就能看到这条消息。 */
-  private persistUserMessage(payload: AgentSendRequest): Message {
+  private persistUserMessage(payload: AgentSendRequest, deferAnchor = false): Message {
     const conversation = repo.getConversation(payload.conversationId)
     if (!conversation) throw new Error('会话不存在或已被删除')
 
-    const parentId = payload.parentMessageId ?? repo.getActiveLeaf(conversation.id)
+    let parentId = payload.parentMessageId ?? repo.getActiveLeaf(conversation.id)
+    let status: MessageStatus = 'done'
+    if (deferAnchor && !payload.parentMessageId) {
+      // 排队落库：挂在树上最新一条消息下（A 跑中时是 A_assistant、连排时是上一条排队消息），
+      // 而不是当前叶子——B 与 A_assistant 是父子而非兄弟，前端不会多出分支；
+      // status 标记为 queued，开跑时恢复，崩溃重启时由启动收敛统一标记为已取消。
+      parentId = repo.getLatestMessageId(conversation.id) ?? parentId
+      status = 'queued'
+    }
     // 图片在文字之前入块：多数模型对"先图后文"的注意力更友好，也与截图提问的直觉一致。
     // 只存 file 路径，base64 不落库。
     const text = payload.content.trim()
@@ -440,9 +467,12 @@ export class AgentRuntime {
       conversationId: conversation.id,
       parentId,
       role: 'user',
-      blocks
+      blocks,
+      status
     })
-    repo.setActiveLeaf(conversation.id, userMessage.id)
+    // 忙时延迟抢叶子：A 跑中连发 B 时，B 落库不再立即抢 activeLeaf，
+    // 否则 A 后续读历史会把还没回答的 B 读进来。真正的挂载在开跑时修正。
+    if (!deferAnchor) repo.setActiveLeaf(conversation.id, userMessage.id)
 
     if (conversation.title === '新对话') {
       // 纯图片消息没有可用标题，退回一句可读占位，避免标题栏空白
@@ -454,6 +484,29 @@ export class AgentRuntime {
     repo.touchConversation(conversation.id)
 
     return userMessage
+  }
+
+  /**
+   * 排队项开跑时的历史挂载修正：把该用户消息挂到开跑时刻的叶子下，
+   * 再把叶子推到自己。保证 B 开跑时能看到 A_assistant，
+   * 且 A 跑中不会读到还没回答的 B（B 在 A 收尾前不在 activeLeaf 链上）。
+   * 显式指定 parent 的发送（编辑重发、分支起点）不修正：调用方明确要挂哪。
+   */
+  private anchorQueuedItem(self: QueuedRun): void {
+    // 显式 parent 是调用方的明确意图（编辑重发 parentMessageId、分支起点），不碰
+    if (self.payload.parentMessageId) return
+    const current = repo.getMessage(self.userMessageId)
+    if (!current) return
+    // 排队标记恢复：开跑即视为正常消息
+    if (current.status === 'queued') repo.updateMessage(self.userMessageId, { status: 'done' })
+    const leafId = repo.getActiveLeaf(self.conversationId)
+    if (!leafId || leafId === current.id) {
+      if (leafId !== current.id) repo.setActiveLeaf(self.conversationId, current.id)
+      return
+    }
+    // 叶子已是别人（通常是上一轮的 assistant）：挂过去再认领
+    if (current.parentId !== leafId) repo.reparentMessage(current.id, leafId)
+    repo.setActiveLeaf(self.conversationId, current.id)
   }
 
   private async executeSend(
@@ -522,6 +575,8 @@ export class AgentRuntime {
     let lastUsage: Usage | null = null
     let turnPromptTokens = 0
     let turnCompletionTokens = 0
+    let turnCacheReadTokens = 0
+    let turnCacheWriteTokens = 0
     let requestCount = 0
     // 跨供应商降级后，实际服务的可能不是首选；最终落库以实际值为准。
     let servedProviderId = resolved.providerId
@@ -578,6 +633,11 @@ export class AgentRuntime {
     // 保险丝灵敏度：连续几次打转就停，默认 3。
     const stuckCfg = getSetting<number>('agent.stuckLimit', 3)
     const effectiveStuckLimit = typeof stuckCfg === 'number' && stuckCfg > 0 ? stuckCfg : 3
+    // 步数上限：防止模型换参试错无限烧 Token，默认 50 轮请求后暂停。loopGuard 只拦"打转"，
+    // 正常干活 50 步也会触发——这是成本熔断，不是行为判断。到顶复用 guardNotice 提示用户。
+    const maxStepsCfg = getSetting<number>('agent.maxSteps', 50)
+    const effectiveMaxSteps = typeof maxStepsCfg === 'number' && maxStepsCfg > 0 ? Math.floor(maxStepsCfg) : 50
+    let stepCount = 0
     // 本轮已执行的工具序列，只用于打转检测，不回传模型。
     const toolHistory: ToolRecord[] = []
     const noteToolBatch = (
@@ -613,17 +673,44 @@ export class AgentRuntime {
       })
     }
 
+    // 工具 schema 常年 8000-15000 tokens，不计入预算等于预算虚高：这里一次估值（续写复用）
+    const toolSchemaTokens = estimateTokens(JSON.stringify(offeredSchemas))
+    const toolResultMaxCharsRaw = getSetting<number>('agent.toolResultMaxChars', 4000)
+    const effectiveToolResultMaxChars =
+      typeof toolResultMaxCharsRaw === 'number' && toolResultMaxCharsRaw > 0 ? toolResultMaxCharsRaw : 4000
+
     try {
-      // 无步数上限：循环到模型不再调工具为止；防打转只靠行为保险丝（loopGuard），
-      // 不靠数步数。想停随时点「停止」。
+      // 主循环：跑到模型不再调工具为止。防打转靠 loopGuard 行为保险丝，
+      // 防无限烧 Token 靠 maxSteps 成本熔断。想停随时点「停止」。
       for (;;) {
         if (controller.signal.aborted) {
           status = 'aborted'
           break
         }
+        // 成本熔断：超过 maxSteps 轮请求即暂停，提示用户回复"继续"接力
+        if (stepCount >= effectiveMaxSteps) {
+          stoppedByGuard = true
+          const guardNotice = `\n\n_（已达到单轮步数上限（${effectiveMaxSteps} 步），先停下来请人看一眼，不要继续烧 Token。排除问题后回复「继续」。）_`
+          appendBlock(blocks, { type: 'text', text: guardNotice })
+          emit({
+            type: 'text_delta',
+            runId,
+            conversationId: conversation.id,
+            messageId: assistantMessage.id,
+            text: guardNotice
+          })
+          break
+        }
+        stepCount++
 
-        const persisted = repo.getActivePath(conversation.id)
-        const context = buildContext(persisted, { system, budgetTokens: budget })
+        const persisted = repo.getPathTo(userMessage.id)
+        // 工具 schema 常年 8000-15000 tokens，不计入预算等于预算虚高：这里复用 try 外一次估值
+        const context = buildContext(persisted, {
+          system,
+          budgetTokens: budget,
+          extraTokens: toolSchemaTokens,
+          toolResultMaxChars: effectiveToolResultMaxChars
+        })
         // 裁剪完成后才读图片：被裁掉的历史轮次里的图永远不进内存
         await hydrateContextImages(context)
         // 裁剪发生时告诉模型，避免它以为看到了全部历史而编造。
@@ -639,6 +726,8 @@ export class AgentRuntime {
         const toolUses: { id: string; name: string; input: unknown }[] = []
 
         let stopReason = 'stop'
+        const firstByteTimeoutRaw = getSetting<number>('providers.firstByteTimeoutMs', 180_000)
+        const firstByteTimeoutMs = resolveFirstByteTimeoutMs(firstByteTimeoutRaw)
         for await (const chunk of streamWithFallback(
           {
             model: resolved.model,
@@ -649,7 +738,8 @@ export class AgentRuntime {
             reasoningEffort: resolvedEffort.reasoningEffort
           },
           controller.signal,
-          resolved.providerId
+          resolved.providerId,
+          { firstByteTimeoutMs }
         )) {
           if (chunk.type === 'text') {
             appendBlock(blocks, { type: 'text', text: chunk.text })
@@ -700,6 +790,8 @@ export class AgentRuntime {
             lastUsage = chunk.usage
             turnPromptTokens += chunk.usage.promptTokens
             turnCompletionTokens += chunk.usage.completionTokens
+            turnCacheReadTokens += chunk.usage.cacheReadTokens ?? 0
+            turnCacheWriteTokens += chunk.usage.cacheWriteTokens ?? 0
             requestCount++
             // 渲染端靠这个事件实时刷新 token 用量；只落库不发事件，UI 上的用量就永远是空的
             emit({
@@ -751,7 +843,12 @@ export class AgentRuntime {
             conversation.workingDir,
             emit,
             controller,
-            onNotify
+            onNotify,
+            (promptTokens, completionTokens, requests) => {
+              turnPromptTokens += promptTokens
+              turnCompletionTokens += completionTokens
+              requestCount += requests
+            }
           ).then((result) => ({ call, result }))
         }
 
@@ -798,7 +895,7 @@ export class AgentRuntime {
           })
           repo.updateMessage(assistantMessage.id, {
             blocks: [...blocks],
-            usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, stopReason)
+            usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, stopReason, turnCacheReadTokens, turnCacheWriteTokens)
           })
           break
         }
@@ -806,7 +903,7 @@ export class AgentRuntime {
         // 阶段性落库，进程意外退出时仍能看到已完成的部分
         repo.updateMessage(assistantMessage.id, {
           blocks: [...blocks],
-          usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, stopReason)
+          usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, stopReason, turnCacheReadTokens, turnCacheWriteTokens)
         })
       }
 
@@ -820,8 +917,13 @@ export class AgentRuntime {
         hasReasoning
       if (truncatedByThinking && !controller.signal.aborted) {
         for (let attempt = 0; attempt < 2 && truncatedByThinking; attempt++) {
-          const persistedNow = repo.getActivePath(conversation.id)
-          const contextNow = buildContext(persistedNow, { system, budgetTokens: budget })
+          const persistedNow = repo.getPathTo(userMessage.id)
+          const contextNow = buildContext(persistedNow, {
+            system,
+            budgetTokens: budget,
+            extraTokens: toolSchemaTokens,
+            toolResultMaxChars: effectiveToolResultMaxChars
+          })
           await hydrateContextImages(contextNow)
           const inMemoryNow: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
           const continued: { id: string; name: string; input: unknown }[] = []
@@ -854,6 +956,8 @@ export class AgentRuntime {
               lastUsage = chunk.usage
               turnPromptTokens += chunk.usage.promptTokens
               turnCompletionTokens += chunk.usage.completionTokens
+              turnCacheReadTokens += chunk.usage.cacheReadTokens ?? 0
+              turnCacheWriteTokens += chunk.usage.cacheWriteTokens ?? 0
               requestCount++
               emit({ type: 'usage', runId, conversationId: conversation.id, messageId: assistantMessage.id, usage: chunk.usage })
             }
@@ -864,7 +968,12 @@ export class AgentRuntime {
           }
           const contPairs: { call: { id: string; name: string; input: unknown }; result: ToolOutcome }[] = []
           for (const call of continued) {
-            const result = await this.invokeTool(runId, assistantMessage.id, call, conversation.id, conversation.workingDir, emit, controller, onNotify)
+            const result = await this.invokeTool(runId, assistantMessage.id, call, conversation.id, conversation.workingDir, emit, controller, onNotify,
+              (promptTokens, completionTokens, requests) => {
+                turnPromptTokens += promptTokens
+                turnCompletionTokens += completionTokens
+                requestCount += requests
+              })
             blocks.push({ type: 'tool_result', toolUseId: call.id, content: result.content, isError: result.isError, ...(result.image ? { image: result.image } : {}) })
             emit({ type: 'tool_result', runId, conversationId: conversation.id, messageId: assistantMessage.id, toolUseId: call.id, content: result.content, isError: result.isError })
             contPairs.push({ call, result })
@@ -878,7 +987,7 @@ export class AgentRuntime {
             finalStopReason = contStop
             repo.updateMessage(assistantMessage.id, {
               blocks: [...blocks],
-              usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, contStop)
+              usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, contStop, turnCacheReadTokens, turnCacheWriteTokens)
             })
             break
           }
@@ -887,7 +996,7 @@ export class AgentRuntime {
           truncatedByThinking = (contStop === 'length' || contStop === 'max_tokens') && !gotText
           repo.updateMessage(assistantMessage.id, {
             blocks: [...blocks],
-            usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, contStop)
+            usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, contStop, turnCacheReadTokens, turnCacheWriteTokens)
           })
         }
       }
@@ -935,7 +1044,7 @@ export class AgentRuntime {
       blocks,
       status,
       error: errorText,
-      usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, finalStopReason),
+      usage: this.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, finalStopReason, turnCacheReadTokens, turnCacheWriteTokens),
       model: servedModel,
       providerId: servedProviderId
     })
@@ -961,13 +1070,21 @@ export class AgentRuntime {
     turnPromptTokens: number,
     turnCompletionTokens: number,
     requestCount: number,
-    finishReason?: string
+    finishReason?: string,
+    turnCacheReadTokens = 0,
+    turnCacheWriteTokens = 0
   ): Usage | null {
     if (!lastUsage) {
       return finishReason ? { promptTokens: 0, completionTokens: 0, finishReason } : null
     }
+    const totalTokens = turnPromptTokens + turnCompletionTokens
     return {
       ...lastUsage,
+      // totalTokens 整轮累计：聚合统计不再用末次规模估算整轮
+      totalTokens,
+      ...(turnCacheReadTokens > 0 || turnCacheWriteTokens > 0
+        ? { cacheReadTokens: turnCacheReadTokens, cacheWriteTokens: turnCacheWriteTokens }
+        : {}),
       ...(requestCount > 1
         ? {
             totalPromptTokens: turnPromptTokens,
@@ -987,11 +1104,12 @@ export class AgentRuntime {
     workingDirectory: string | null,
     emit: Emitter,
     controller: AbortController,
-    onNotify?: (text: string) => void
+    onNotify?: (text: string) => void,
+    onUsage?: (promptTokens: number, completionTokens: number, requests: number) => void
   ): Promise<ToolOutcome> {
     // 子智能体派发：不走静态注册表，直接进父回合的有界子循环。
     if (call.name === SPAWN_TOOL_NAME) {
-      return this.runSubagentCall(runId, messageId, call, conversationId, workingDirectory, emit, controller, onNotify)
+      return this.runSubagentCall(runId, messageId, call, conversationId, workingDirectory, emit, controller, onNotify, onUsage)
     }
     // MCP 远端工具：mcp__服务__工具，走服务进程转发。
     if (call.name.startsWith('mcp__')) {
@@ -1002,23 +1120,38 @@ export class AgentRuntime {
       return { content: `未知工具：${call.name}。可用工具：${toolRegistry.all().map((t) => t.name).join('、')}`, isError: true }
     }
 
+    // Computer Use 总闸：设置里关了就当不存在（清单过滤 + 这里兜底）。
+    // 检查放审批之前：关掉后不再弹确认框，直接告知未启用
+    if (call.name.startsWith('computer_') && !getSetting<boolean>('agent.computerUse', true)) {
+      // 工具没有执行，必须报错，否则模型会以为操作成功而继续往下走
+      return { content: '电脑控制未启用，请到设置里打开后再试。', isError: true }
+    }
+
     // 只读复查兜底：即使模型私自拼出写工具名，也不执行。
     if (getSetting<boolean>('agent.readOnly', false) && tool.requiresApproval) {
       return { content: '当前是只读复查模式，不执行写入与命令操作。如需修改请先关闭只读模式。', isError: true }
     }
 
-    // Freebuff 安全护栏审计：针对命令执行和高危操作进行深度规则扫描
-    let isSecurityCritical = false
-    let securityAuditReason = ''
+    // Freebuff 安全护栏审计，按严重程度分级：
+    // - CRITICAL（擦盘/格式化）直接拒绝、不弹窗——工具层自保同样硬拦，
+    //   用户批准了也执行不了，先问再拒只会自相矛盾；
+    // - HIGH（删库/注册表等）弹窗征求确认，批准后放行（工具层不拦）。
+    let securityConfirmReason = ''
     if (call.name === 'run_command' && typeof (call.input as Record<string, unknown>)?.command === 'string') {
       const audit = auditCommandSecurity(String((call.input as Record<string, unknown>).command))
       if (audit.isDangerous) {
-        isSecurityCritical = true
-        securityAuditReason = audit.reason || '【Freebuff 安全护栏拦截】检测到高危系统级操作！'
+        if (audit.severity === 'CRITICAL') {
+          return {
+            content: `已拦截未执行：${audit.reason ?? '检测到毁灭性系统操作。'}`,
+            isError: true
+          }
+        }
+        securityConfirmReason = audit.reason || '【Freebuff 安全护栏】检测到高危系统级操作！'
       }
     }
 
-    const needsApproval = (tool.requiresApproval && !this.isAutoApproved(call.name)) || isSecurityCritical
+    const needsApproval =
+      (tool.requiresApproval && !this.isAutoApproved(call.name)) || Boolean(securityConfirmReason)
     if (needsApproval) {
       const decision = await this.requestApproval(
         runId,
@@ -1027,7 +1160,7 @@ export class AgentRuntime {
         call,
         {
           name: tool.name,
-          approvalReason: isSecurityCritical ? securityAuditReason : tool.approvalReason
+          approvalReason: securityConfirmReason || tool.approvalReason
         },
         emit,
         controller
@@ -1038,11 +1171,6 @@ export class AgentRuntime {
           isError: true
         }
       }
-    }
-
-    // Computer Use 总闸：设置里关了就当不存在（清单过滤 + 这里兜底）。
-    if (call.name.startsWith('computer_') && !getSetting<boolean>('agent.computerUse', true)) {
-      return { content: '电脑控制未启用，请到设置里打开后再试。', isError: true }
     }
 
     try {
@@ -1146,7 +1274,8 @@ export class AgentRuntime {
     parentWorkingDir: string | null,
     emit: Emitter,
     controller: AbortController,
-    onNotify?: (text: string) => void
+    onNotify?: (text: string) => void,
+    onUsage?: (promptTokens: number, completionTokens: number, requests: number) => void
   ): Promise<{ content: string; isError: boolean }> {
     const rawTask = (call.input as { task?: unknown } | null)?.task
     const task = typeof rawTask === 'string' ? rawTask.slice(0, 200) : ''
@@ -1179,6 +1308,10 @@ export class AgentRuntime {
         }
       )
       // 子循环若进了 worktree，后续同回合工具仍跑在原目录：隔离只属于那一个子任务。
+      // 子任务用量合并进父轮：否则 spawn 的消耗账面永远免费
+      if (result.usage) {
+        onUsage?.(result.usage.promptTokens, result.usage.completionTokens, result.usage.requests)
+      }
       emit({ type: 'subagent_done', runId, conversationId, messageId, toolUseId: call.id, task, isError: result.isError })
       return result
     } catch (error) {

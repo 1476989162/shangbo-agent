@@ -311,7 +311,7 @@ describe('streamWithFallback', () => {
     expect(waitedMs).toBe(15_000 * 5)
   })
 
-  it('跨供应商降级：模型名在 B 不存在时重映射为 B 的首个模型，并下发切换通知', async () => {
+  it('跨供应商降级：模型名在 B 不存在时跳过 B，不再静默重映射', async () => {
     const providerB: Provider = { ...makeProvider('b', '供应商B'), models: ['b-native-model'] }
     storeMocks.routingOrder.mockReturnValue([providerA, providerB])
 
@@ -333,28 +333,26 @@ describe('streamWithFallback', () => {
     const events = await (async () => {
       const gen = streamWithFallback(request, new AbortController().signal)
       const out: StreamChunk[] = []
-      const done = (async () => {
+      // 创建后立刻挂上 rejection 处理器：推进虚拟时间期间就会 reject，
+      // 等 await done 再处理会被记为未处理的 Promise 拒绝
+      const done: Promise<unknown> = (async () => {
         for await (const chunk of gen) out.push(chunk)
-      })()
+      })().then(
+        () => null,
+        (error: unknown) => error
+      )
       // A 限流重试 6 次（5 次 10s 等待）后才轮到 B
       for (let i = 0; i < 6; i++) {
         await vi.advanceTimersByTimeAsync(10_500)
       }
-      await done
-      return out
+      return { out, result: await done }
     })()
 
-    // 发给 A 的是首选模型，发给 B 的被重映射为 b-native-model
+    // A 用首选模型；B 因缺模型被跳过，发给 B 的请求恒为 0
     expect(seenRequests).toContainEqual({ provider: 'a', model: 'test-model' })
-    expect(seenRequests).toContainEqual({ provider: 'b', model: 'b-native-model' })
-    // 前 5 个块是限流重试状态；切换通知在内容之前且只发一次
-    const switches = events.filter((e) => e.type === 'provider_switch')
-    expect(switches).toHaveLength(1)
-    expect(switches[0]).toMatchObject({
-      providerName: '供应商B',
-      model: 'b-native-model'
-    })
-    expect(events).toContainEqual({ type: 'text', text: '来自B' })
+    expect(seenRequests.some((r) => r.provider === 'b')).toBe(false)
+    // 没有可服务的供应商时最终抛错（带失败链），而不是静默换模型
+    expect(events.result).toBeInstanceOf(Error)
   })
 
   it('跨供应商降级后仍失败：错误信息包含完整尝试链而非只有最后一家', async () => {
