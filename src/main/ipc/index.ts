@@ -4,6 +4,8 @@ import { IPC } from '../../shared/ipc'
 import * as repo from '../db/repo'
 import { getDbPath } from '../db'
 import { getAllSettings, setSetting } from '../settings'
+import { parseSettingValue } from '../settingsSchema'
+import { toolRegistry } from '../tools'
 import { agentRuntime } from '../agent/runtime'
 import {
   adapterForKind,
@@ -245,8 +247,13 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.settingsGet, () => getAllSettings())
 
-  ipcMain.handle(IPC.settingsSet, (_event, key: string, value: unknown) => {
-    setSetting(key, value)
+  ipcMain.handle(IPC.settingsSet, (_event, key: unknown, value: unknown) => {
+    const name = z.string().min(1).parse(key)
+    // 白名单 + 类型校验：渲染层不可信，未知键/越界值/篡改自动批准名单都在这里挡下
+    const parsed = parseSettingValue(name, value, {
+      knownToolNames: toolRegistry.all().map((tool) => tool.name)
+    })
+    setSetting(name, parsed)
     return true
   })
 
@@ -261,9 +268,9 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.mcpStatus, () => mcpManager.status())
 
-  ipcMain.handle(IPC.appInfo, (): AppInfo => {
-
   ipcMain.handle(IPC.appContextStatics, async () => agentRuntime.contextStatics())
+
+  ipcMain.handle(IPC.appInfo, (): AppInfo => {
     return {
       name: '尚搏 Agent',
       version: app.getVersion(),
@@ -277,14 +284,15 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('git:branch', async (_event, dir: string | null) => {
-    if (!dir) return 'main'
+  ipcMain.handle(IPC.appGitBranch, async (_event, dir: unknown) => {
+    const parsed = z.string().nullable().safeParse(dir)
+    if (!parsed.success || !parsed.data) return 'main'
     try {
       const { execFile } = await import('node:child_process')
       const { promisify } = await import('node:util')
       const exec = promisify(execFile)
       const { stdout } = await exec('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        cwd: dir,
+        cwd: parsed.data,
         timeout: 2000
       })
       return stdout.trim() || 'main'

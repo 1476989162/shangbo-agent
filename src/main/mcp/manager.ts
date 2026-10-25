@@ -142,9 +142,24 @@ export class McpManager {
   private live = new Map<string, LiveServer>()
   private starting = new Map<string, Promise<LiveServer | null>>()
   private lastError = new Map<string, string>()
+  /** status() 查询缓存：设置页每次打开都全量拉进程会卡顿，TTL 内直接返回快照。 */
+  private statusCache: { at: number; data: Awaited<ReturnType<McpManager['statusUncached']>> } | null = null
+  private static readonly STATUS_TTL_MS = 30_000
 
   /** 设置页用的实时状态：开关、进程死活、工具清单，全部实测。 */
   async status(): Promise<
+    { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
+  > {
+    const now = Date.now()
+    if (this.statusCache && now - this.statusCache.at < McpManager.STATUS_TTL_MS) {
+      return this.statusCache.data
+    }
+    const data = await this.statusUncached()
+    this.statusCache = { at: now, data }
+    return data
+  }
+
+  private async statusUncached(): Promise<
     { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
   > {
     const out: {

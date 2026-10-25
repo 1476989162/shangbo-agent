@@ -30,6 +30,7 @@ export const IPC = {
 
   appInfo: 'app:info',
   appContextStatics: 'app:contextStatics',
+  appGitBranch: 'git:branch',
   windowHide: 'window:hide',
   windowQuit: 'window:quit',
 

@@ -128,4 +128,20 @@ describe('子智能体 (runSubagent)', () => {
     expect(SPAWN_TOOL_NAME).toBe('spawn_subagent')
     expect(SPAWN_SUBAGENT_SCHEMA.parameters.required).toContain('task')
   })
+
+  it('用量会回传给父回合合并', async () => {
+    const res = await runSubagent(
+      { task: '查一下' },
+      baseCtx({
+        stream: async function* () {
+          yield { type: 'usage', usage: { promptTokens: 100, completionTokens: 50 } }
+          yield { type: 'text', text: 'ok' }
+          yield { type: 'stop', reason: 'stop' }
+        }
+      })
+    )
+    expect(res.usage?.promptTokens).toBe(100)
+    expect(res.usage?.completionTokens).toBe(50)
+    expect(res.usage?.requests).toBe(1)
+  })
 })

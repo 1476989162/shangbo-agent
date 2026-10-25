@@ -20,6 +20,12 @@ import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 
 export const SPAWN_TOOL_NAME = 'spawn_subagent'
 
+export interface SubagentResult {
+  content: string
+  isError: boolean
+  usage?: { promptTokens: number; completionTokens: number; requests: number }
+}
+
 export const SPAWN_SUBAGENT_SCHEMA: ToolSchema = {
   name: SPAWN_TOOL_NAME,
   description:
@@ -88,7 +94,7 @@ function resolveScope(base: string | null, scopeDir?: string): string | null {
   return base ? resolve(base, scopeDir) : resolve(scopeDir)
 }
 
-export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promise<{ content: string; isError: boolean }> {
+export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promise<SubagentResult> {
   const parsed = z
     .object({
       task: z.string().min(1, '请给出子任务描述 task'),
@@ -115,6 +121,10 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
   let stuckNote = ''
   const history: ToolRecord[] = []
   const limit = ctx.stuckLimit && ctx.stuckLimit > 0 ? ctx.stuckLimit : 3
+  // 子任务用量：父回合合并用，否则 spawn 的消耗账面永远免费
+  let subPromptTokens = 0
+  let subCompletionTokens = 0
+  let subRequests = 0
 
   // 无步数上限：跑到模型不再调工具为止；只在打转（连续失败/重复调用）时停。
   for (;;) {
@@ -130,6 +140,11 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
       if (chunk.type === 'text') finalText += chunk.text
       else if (chunk.type === 'tool_use') toolUses.push({ id: chunk.id, name: chunk.name, input: chunk.input })
       else if (chunk.type === 'stop') stopReason = chunk.reason
+      else if (chunk.type === 'usage') {
+        subPromptTokens += chunk.usage.promptTokens
+        subCompletionTokens += chunk.usage.completionTokens
+        subRequests++
+      }
     }
     lastStop = stopReason
     if (toolUses.length === 0) break
@@ -164,5 +179,9 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
   const body = finalText.trim() ? truncate(finalText.trim()) : '（子任务没有留下文字结论，请看工具执行情况或换个问法重派。）'
   const isolationReport = isolation ? `\n\n${await isolation.finalize()}` : ''
   ctx.notify?.(`✅ 子任务完成：${parsed.data.task}`)
-  return { content: `【子任务结论】${parsed.data.task}\n\n${body}${tail}${isolationReport}`, isError: false }
+  return {
+    content: `【子任务结论】${parsed.data.task}\n\n${body}${tail}${isolationReport}`,
+    isError: false,
+    usage: { promptTokens: subPromptTokens, completionTokens: subCompletionTokens, requests: subRequests }
+  }
 }
