@@ -1,6 +1,6 @@
 {
   "name": "shangbo-relay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "尚搏 Agent 手机远程中转服务：只转发密文，不解析、不存储消息内容",
   "type": "module",
