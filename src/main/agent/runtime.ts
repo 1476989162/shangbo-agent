@@ -128,7 +128,18 @@ export interface PendingApprovalSnapshot {
 interface ActiveRun {
   controller: AbortController
   conversationId: string
+  /** 看门狗：abort 后若执行体 hang 住不返回，超时强制收尾发 run_end，界面不再永久"正在跑"。 */
+  watchdog: ReturnType<typeof setTimeout> | null
+  emit: Emitter
+  runId: string
 }
+
+/**
+ * 停止看门狗时长：abort 后执行体最长等待时间。
+ * run_command 默认 60s 超时、MCP 10s 超时、网关重试退避最长约 60s，
+ * 取 90s 覆盖"正常收尾"的全部路径；真 hang（如子进程无视 signal）才触发强制收尾。
+ */
+export const ABORT_WATCHDOG_MS = 90_000
 
 /** 队列里待跑的一轮。emit 必须与当初提交时的那份一致，才能把事件广播到正确窗口。 */
 interface QueuedRun {
@@ -148,6 +159,8 @@ export class AgentRuntime {
   private approvals = new Map<string, PendingApproval>()
   /** 会话 id → 该会话的等待队列。同一会话严格串行，不同会话互不阻塞。 */
   private queues = new Map<string, QueuedRun[]>()
+  /** 会话 id → 中途指导（steer）：排队消息转指导后暂存，主循环每轮开跑前取走拼进系统提示。 */
+  private steeringNotes = new Map<string, string[]>()
 
   /**
    * 事件总线订阅（阶段1/阶段3共用）。
@@ -188,12 +201,23 @@ export class AgentRuntime {
       log.error('[agent] 回合失败', error)
       emit({ type: 'run_error', runId, conversationId, messageId: '', error: describeError(error) })
     } finally {
-      this.runs.delete(runId)
-      // 推进队列前先记下还剩几项，这样 run_end 里的 queued 是「不含本轮」的准确值
-      const queued = this.queueLength(conversationId)
-      this.advanceQueue(conversationId)
-      emit({ type: 'run_end', runId, conversationId, queued })
+      this.finishRun(runId, conversationId, emit)
     }
+  }
+
+  /**
+   * 收尾一轮：清看门狗、从 runs 摘掉、推进队列、发 run_end。
+   * 看门狗触发的强制收尾与正常收尾共用，保证只发一次 run_end。
+   */
+  private finishRun(runId: string, conversationId: string, emit: Emitter): void {
+    const active = this.runs.get(runId)
+    if (active?.watchdog) clearTimeout(active.watchdog)
+    if (!this.runs.has(runId)) return
+    this.runs.delete(runId)
+    // 推进队列前先记下还剩几项，这样 run_end 里的 queued 是「不含本轮」的准确值
+    const queued = this.queueLength(conversationId)
+    this.advanceQueue(conversationId)
+    emit({ type: 'run_end', runId, conversationId, queued })
   }
 
   /**
@@ -234,7 +258,10 @@ export class AgentRuntime {
   private startRun(item: QueuedRun): void {
     this.runs.set(item.runId, {
       controller: new AbortController(),
-      conversationId: item.conversationId
+      conversationId: item.conversationId,
+      watchdog: null,
+      emit: item.emit,
+      runId: item.runId
     })
     // 放到微任务里，确保调用方先拿到 runId 再收到事件
     queueMicrotask(() => {
@@ -372,9 +399,111 @@ export class AgentRuntime {
     )
   }
 
-  /** 停止：只中断正在跑的那一轮，队列里排着的保留（用户没说要丢弃）。 */
+  /**
+   * 停止一轮：中断执行 + 启动看门狗。
+   * 以往只 abort controller，执行体 hang 住（如子进程无视 signal、流式卡住）
+   * 时界面永久"正在跑"，只能退软件。看门狗 90s 后强制收尾发 run_end。
+   */
   abort(runId: string): void {
-    this.runs.get(runId)?.controller.abort()
+    const active = this.runs.get(runId)
+    if (!active) return
+    active.controller.abort()
+    this.armWatchdog(active)
+  }
+
+  /**
+   * 停止整个会话：中断正在跑的那一轮 + 清空该会话全部排队项。
+   * 用户点"停止"时期望的是"彻底停下"，而不是停完本轮自动接力下一条——
+   * 后者看起来就像"卡死且停不掉"。被清掉的排队消息保留在库中（标记为 aborted），
+   * 用户可重新发送；如需撤回用 cancelQueuedMessage。
+   */
+  abortConversationRuns(conversationId: string): { abortedRun: string | null; clearedQueued: number } {
+    let abortedRun: string | null = null
+    for (const [runId, run] of [...this.runs]) {
+      if (run.conversationId === conversationId) {
+        abortedRun = runId
+        run.controller.abort()
+        this.armWatchdog(run)
+      }
+    }
+    const queue = this.queues.get(conversationId)
+    const clearedQueued = queue?.length ?? 0
+    if (queue) {
+      // 排队项按 aborted 标记落库，界面显示"已取消"而非凭空消失
+      for (const item of queue) {
+        try {
+          repo.updateMessage(item.userMessageId, { status: 'aborted' })
+        } catch {}
+      }
+      this.queues.delete(conversationId)
+    }
+    // 挂起的审批按拒绝处理，避免弹窗残留
+    for (const [key, pending] of [...this.approvals]) {
+      if (pending.conversationId === conversationId) {
+        try {
+          pending.settle(false)
+        } catch {}
+        this.approvals.delete(key)
+      }
+    }
+    return { abortedRun, clearedQueued }
+  }
+
+  /** 启动某轮的看门狗：超时仍未收尾则强制 finishRun，界面恢复可操作。 */
+  private armWatchdog(active: ActiveRun): void {
+    if (active.watchdog) return
+    active.watchdog = setTimeout(() => {
+      if (!this.runs.has(active.runId)) return
+      log.warn(`[agent] 停止看门狗触发：${active.runId} 仍未收尾，强制结束`)
+      try {
+        active.emit({ type: 'run_error', runId: active.runId, conversationId: active.conversationId, messageId: '', error: '任务停止超时，已强制结束（执行体未响应中断信号）。' })
+      } finally {
+        this.finishRun(active.runId, active.conversationId, active.emit)
+      }
+    }, ABORT_WATCHDOG_MS)
+  }
+
+  /**
+   * 指导当前轮：把一条排队消息的内容注入正在跑回合的"指导区"，
+   * 该回合下一轮工具循环的系统提示里会带上它，模型能立刻看到。
+   * 与"等前面的跑完再问"不同：指导不新开回合、不排队、不打断工具执行，
+   * 适合"先别删那个文件""用 pnpm 别用 npm"这类中途纠偏。
+   * 返回 false 表示该会话当前没有在跑的回合（此时请走正常发送）。
+   */
+  steerRunningRound(conversationId: string, userMessageId: string): boolean {
+    const running = [...this.runs.values()].find((r) => r.conversationId === conversationId)
+    if (!running) return false
+    const queue = this.queues.get(conversationId)
+    const item = queue?.find((q) => q.userMessageId === userMessageId)
+    const message = item ? repo.getMessage(item.userMessageId) : repo.getMessage(userMessageId)
+    const text = message?.blocks.find((b) => b.type === 'text')?.text?.trim()
+    if (!text) return false
+    const guidance = this.steeringNotes.get(conversationId) ?? []
+    guidance.push(text)
+    this.steeringNotes.set(conversationId, guidance)
+    // 排队项已转为指导，从队列摘掉并标记，界面显示"已作为指导送达"
+    if (item && queue) {
+      queue.splice(queue.indexOf(item), 1)
+      if (queue.length === 0) this.queues.delete(conversationId)
+      try {
+        repo.updateMessage(item.userMessageId, { status: 'done' })
+      } catch {}
+    }
+    running.emit({
+      type: 'text_delta',
+      runId: running.runId,
+      conversationId,
+      messageId: '',
+      text: `\n\n_（已收到你的中途指导：${text.slice(0, 200)}）_`
+    })
+    return true
+  }
+
+  /** 取出并清空某会话累积的中途指导（主循环每轮开跑前调用）。 */
+  takeSteeringNotes(conversationId: string): string[] {
+    const notes = this.steeringNotes.get(conversationId) ?? []
+    this.steeringNotes.delete(conversationId)
+    return notes
   }
 
   /** 放弃某个会话的全部排队项——会话被删除时调用，避免孤儿任务复活。 */
@@ -809,9 +938,19 @@ export class AgentRuntime {
         // 裁剪完成后才读图片：被裁掉的历史轮次里的图永远不进内存
         await hydrateContextImages(context)
         // 裁剪发生时告诉模型，避免它以为看到了全部历史而编造。
+        // 中途指导：用户在排队消息上点"指导当前轮"，下一轮请求即带上，不等前面的跑完
+        const steering = this.takeSteeringNotes(conversation.id)
         const effectiveSystem =
-          context.omittedTurns > 0
-            ? `${system}\n\n（最早 ${context.omittedTurns} 轮历史已省略，如需请向用户确认。）`
+          context.omittedTurns > 0 || steering.length > 0
+            ? `${system}${
+                context.omittedTurns > 0
+                  ? `\n\n（最早 ${context.omittedTurns} 轮历史已省略，如需请向用户确认。）`
+                  : ''
+              }${
+                steering.length > 0
+                  ? `\n\n【用户中途指导（必须优先遵守，后续动作按此调整）】\n${steering.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+                  : ''
+              }`
             : system
 
         // 持久化路径 + 本轮尚未落库的累积块，拼出这次请求的完整消息序列

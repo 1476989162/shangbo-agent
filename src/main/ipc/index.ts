@@ -185,6 +185,20 @@ export function registerIpcHandlers(): void {
     return true
   })
 
+  // 停止整个会话：中断正在跑的 + 清空排队。渲染层"停止"按钮走这里，
+  // 而不是只 abort 单轮——否则下一条自动接力，看起来像"停不掉"。
+  ipcMain.handle(IPC.chatStopConversation, (_event, conversationId: string) => {
+    const id = z.string().min(1).parse(conversationId)
+    return agentRuntime.abortConversationRuns(id)
+  })
+
+  // 排队消息转"指导当前轮"：注入正在跑回合的上下文，不新开回合
+  ipcMain.handle(IPC.chatSteerQueued, (_event, conversationId: unknown, userMessageId: unknown) => {
+    const conv = z.string().min(1).parse(conversationId)
+    const id = z.string().min(1).parse(userMessageId)
+    return agentRuntime.steerRunningRound(conv, id)
+  })
+
   ipcMain.handle(IPC.chatApprove, (_event, decision: unknown) => {
     agentRuntime.decide(ApprovalSchema.parse(decision))
     return true

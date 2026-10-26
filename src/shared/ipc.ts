@@ -11,6 +11,8 @@ export const IPC = {
 
   chatSend: 'chat:send',
   chatAbort: 'chat:abort',
+  chatStopConversation: 'chat:stopConversation',
+  chatSteerQueued: 'chat:steerQueued',
   chatApprove: 'chat:approve',
   chatRegenerate: 'chat:regenerate',
 

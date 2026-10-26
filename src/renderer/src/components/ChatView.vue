@@ -827,6 +827,7 @@ const suggestions = [
             @auto-continue="onAutoContinue"
             @edit-queued="store.editQueued"
             @cancel-queued="store.cancelQueued"
+            @steer-queued="store.steerQueued"
           />
   <!-- 图片放大遮罩：Esc 或点击空白关闭 -->
   <div

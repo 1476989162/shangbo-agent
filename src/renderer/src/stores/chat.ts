@@ -806,9 +806,52 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
+  /**
+   * 停止：中断正在跑的 + 清空该会话排队（彻底停下）。
+   * 以往只 abort 单轮，队列里排着的会自动接力，看起来像"停不掉"。
+   */
   async function stop(): Promise<void> {
-    if (!activeRunId.value) return
-    await window.shangbo.chat.abort(activeRunId.value)
+    const conversationId = activeConversationId.value
+    if (!conversationId) return
+    try {
+      const result = await window.shangbo.chat.stopConversation(conversationId)
+      // 本地运行态立即清理，不等 run_end（看门狗兜底时 run_end 可能延迟 90s）
+      setRun(conversationId, null)
+      if (result.clearedQueued > 0) {
+        // 被清掉的排队消息本地标记为已取消，刷新视图
+        const payload = await window.shangbo.conversation.messages(conversationId)
+        messages.value = payload.messages
+        activeLeafId.value = payload.activeLeafId
+      }
+    } catch {
+      // 退回单轮 abort（兼容旧主进程）
+      if (!activeRunId.value) return
+      await window.shangbo.chat.abort(activeRunId.value)
+    }
+  }
+
+  /**
+   * 排队消息转"指导当前轮"：内容注入正在跑回合的上下文，下一轮工具循环即生效。
+   * 成功后本地移除该排队消息（主进程已摘队列并标记）。
+   */
+  async function steerQueued(userMessageId: string): Promise<boolean> {
+    const conversationId = activeConversationId.value
+    if (!conversationId) return false
+    try {
+      const ok = await window.shangbo.chat.steerQueued(conversationId, userMessageId)
+      if (!ok) {
+        lastError.value = '当前没有正在执行的任务，指导无处投递（消息仍在排队）'
+        return false
+      }
+      const index = messages.value.findIndex((m) => m.id === userMessageId)
+      if (index >= 0) messages.value.splice(index, 1)
+      const run = getRun(conversationId)
+      if (run && run.queued > 0) setRun(conversationId, { ...run, queued: run.queued - 1 })
+      return true
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : String(error)
+      return false
+    }
   }
 
   /** 重新生成：同样走队列，不打断正在跑的回合。 */
@@ -965,6 +1008,7 @@ export const useChatStore = defineStore('chat', () => {
     queuedUserMessageIds,
     editQueued,
     cancelQueued,
+    steerQueued,
     regenerate,
     switchBranch,
     setWorkingDir,

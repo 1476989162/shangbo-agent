@@ -19,6 +19,7 @@ const emit = defineEmits<{
   autoContinue: [messageId: string]
   editQueued: [messageId: string, content: string]
   cancelQueued: [messageId: string]
+  steerQueued: [messageId: string]
 }>()
 const copied = ref(false)
 
@@ -281,6 +282,13 @@ async function copy(): Promise<void> {
         <div class="queued-actions">
           <button class="btn btn-ghost tiny" title="编辑这条排队消息的内容" @click="startEdit">
             编辑
+          </button>
+          <button
+            class="btn btn-ghost tiny"
+            title="不等排队，直接把这条内容作为指导送给正在执行的任务"
+            @click="emit('steerQueued', message.id)"
+          >
+            指导当前任务
           </button>
           <button
             class="btn btn-ghost tiny btn-danger"

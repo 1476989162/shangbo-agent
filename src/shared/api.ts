@@ -37,6 +37,10 @@ export interface ShangboApi {
   chat: {
     send(payload: SendPayload): Promise<{ runId: string }>
     abort(runId: string): Promise<boolean>
+    /** 停止整个会话：中断正在跑的 + 清空排队。渲染层"停止"按钮走这里。 */
+    stopConversation(conversationId: string): Promise<{ abortedRun: string | null; clearedQueued: number }>
+    /** 排队消息转"指导当前轮"，注入正在跑回合的上下文。 */
+    steerQueued(conversationId: string, userMessageId: string): Promise<boolean>
     approve(decision: ApprovalDecision): Promise<boolean>
     regenerate(assistantMessageId: string): Promise<{ runId: string }>
     /** 编辑一条排队中（尚未开跑）的消息文本。 */

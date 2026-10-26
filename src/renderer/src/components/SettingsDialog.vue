@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AppInfo, UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
+import { drawQr } from '../lib/qrcode'
 import ProviderSettings from './ProviderSettings.vue'
 
 const props = withDefaults(
@@ -130,6 +131,9 @@ const remoteStatusText = ref('未开启')
 const remotePairing = ref<{ qrText: string; code: string; expiresAt: number; fingerprint: string } | null>(null)
 const remoteDevices = ref<RemoteDevice[]>([])
 const remoteBusy = ref(false)
+/** 配对二维码画布：生成配对码后绘制 qrText，手机扫码直达配对页。 */
+const qrCanvas = ref<HTMLCanvasElement | null>(null)
+const qrFailed = ref(false)
 
 async function loadRemote(): Promise<void> {
   try {
@@ -174,6 +178,15 @@ async function issueRemotePairing(): Promise<void> {
   try {
     remotePairing.value = await window.shangbo.remote.pair()
     feedback.value = { ok: true, message: '配对码已生成：用手机扫码或手动输入配对码' }
+    // 配对区 canvas 可能刚挂载，下一帧再画
+    qrFailed.value = false
+    await nextTick()
+    const canvas = qrCanvas.value
+    if (canvas && remotePairing.value) {
+      qrFailed.value = !drawQr(canvas, remotePairing.value.qrText, 5)
+    } else {
+      qrFailed.value = true
+    }
   } catch (error) {
     feedback.value = { ok: false, message: error instanceof Error ? error.message : '配对失败' }
   } finally {
@@ -1518,11 +1531,16 @@ async function toggleAutoScreenshot(): Promise<void> {
                 {{ remoteBusy ? '生成中…' : '生成配对码' }}
               </button>
             </div>
-            <div v-if="remotePairing" class="info-grid">
-              <div class="info-item"><span class="info-k">配对码:</span> <span class="info-v mono">{{ remotePairing.code }}</span></div>
-              <div class="info-item"><span class="info-k">桌面公钥指纹:</span> <span class="info-v mono">{{ remotePairing.fingerprint }}</span></div>
-              <div class="info-item"><span class="info-k">有效期至:</span> <span class="info-v">{{ new Date(remotePairing.expiresAt).toLocaleString() }}</span></div>
-              <div class="info-item"><span class="info-k">扫码内容:</span> <span class="info-v mono text-truncate" :title="remotePairing.qrText">{{ remotePairing.qrText.slice(0, 80) }}…</span></div>
+            <div v-if="remotePairing" class="remote-pair-box">
+              <div class="remote-qr">
+                <canvas ref="qrCanvas" class="remote-qr-canvas" />
+                <p v-if="qrFailed" class="row-sub">二维码绘制失败，请手动输入配对码。</p>
+              </div>
+              <div class="info-grid">
+                <div class="info-item"><span class="info-k">配对码:</span> <span class="info-v mono remote-code">{{ remotePairing.code }}</span></div>
+                <div class="info-item"><span class="info-k">桌面公钥指纹:</span> <span class="info-v mono">{{ remotePairing.fingerprint }}</span></div>
+                <div class="info-item"><span class="info-k">有效期至:</span> <span class="info-v">{{ new Date(remotePairing.expiresAt).toLocaleString() }}</span></div>
+              </div>
             </div>
           </div>
 

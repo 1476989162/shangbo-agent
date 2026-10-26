@@ -28,6 +28,10 @@ const api: ShangboApi = {
   chat: {
     send: (payload: SendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
     abort: (runId) => ipcRenderer.invoke(IPC.chatAbort, runId),
+    stopConversation: (conversationId: string) =>
+      ipcRenderer.invoke(IPC.chatStopConversation, conversationId),
+    steerQueued: (conversationId: string, userMessageId: string) =>
+      ipcRenderer.invoke(IPC.chatSteerQueued, conversationId, userMessageId),
     approve: (decision: ApprovalDecision) => ipcRenderer.invoke(IPC.chatApprove, decision),
     regenerate: (assistantMessageId) => ipcRenderer.invoke(IPC.chatRegenerate, assistantMessageId),
     editQueued: (conversationId, userMessageId, content) =>
