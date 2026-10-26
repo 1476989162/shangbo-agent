@@ -21,18 +21,13 @@
 
 ## 发布与自动更新
 
-发版流程（以 0.2.2 为例）：
+发版流程（一键，版本号以 package.json 为准）：
 
 ```bash
-npm run typecheck && npm test      # 1. 发布前校验
-npm run dist                       # 2. 打包，产出 setup.exe / latest.yml / .blockmap
-git tag -a v0.2.2 -m "..." && git push origin v0.2.2   # 3. 打标签
-gh release create v0.2.2 --title "尚搏 Agent v0.2.2" \
-  --notes-file <发布说明> \
-  "release/尚搏 Agent-0.2.2-setup.exe" \
-  "release/尚搏 Agent-0.2.2-setup.exe.blockmap" \
-  release/latest.yml               # 4. 三个资产一起上传
+npm run release -- 0.3.1   # 校验→打包到Temp→验sha→拷回release→打tag→gh传三件套
 ```
+
+产物名为 ASCII `shangbo-agent-setup-<版本>.exe`（与 latest.yml 的 path 一致，缺 latest.yml 自动更新 404）：
 
 `latest.yml` 是自动更新的索引，**必须与安装包一起上传**，缺了它客户端检查更新会一直 404；`.blockmap` 决定能否走差分下载，也一并上传。
 
