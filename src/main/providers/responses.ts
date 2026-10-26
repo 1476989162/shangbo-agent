@@ -41,6 +41,36 @@ function parseArgs(raw: string): unknown {
 }
 
 /**
+ * 同时兼容“真增量”和“累计快照”两种流式语义。
+ *
+ * - `delta` 是已输出内容的后缀：返回新增部分；
+ * - `delta` 是累计全文：返回新增后缀；
+ * - 不相关的新片段：按增量返回并重置快照。
+ */
+export function normalizeSnapshotDelta(
+  incoming: string,
+  previous: string
+): { delta: string; snapshot: string } {
+  if (!incoming) return { delta: '', snapshot: previous }
+  if (!previous) return { delta: incoming, snapshot: incoming }
+  if (incoming === previous) return { delta: '', snapshot: previous }
+  if (incoming.startsWith(previous)) {
+    return { delta: incoming.slice(previous.length), snapshot: incoming }
+  }
+  // 真增量流：incoming 通常很短，previous 是累计全文。
+  return { delta: incoming, snapshot: previous + incoming }
+}
+
+function isTextDeltaEvent(eventType: string): boolean {
+  return (
+    eventType === 'response.output_text.delta' ||
+    eventType === 'response.text.delta' ||
+    eventType === 'output_text.delta' ||
+    eventType === 'text.delta'
+  )
+}
+
+/**
  * 判断某个模型是否应该走 Responses API：
  * 1. muse-spark 系列（OpenCode Go 上游仅挂载在 /responses）
  * 2. grok-4.6/4.7, luna, omen 等 Responses 专属模型
@@ -251,6 +281,20 @@ export const openAiResponsesAdapter: ProviderAdapter = {
     const toolCalls = new Map<string | number, ToolCallState>()
     let usage: Usage | null = null
     let stopReason = 'stop'
+    /**
+     * 部分兼容网关会在每个 SSE 帧里重发“截至目前的完整文本”，而不是真正的增量。
+     * 若直接追加，会得到 `你好你好世界你好世界` 这类重复。这里对同通道连续快照
+     * 做前缀归一化：新值以已输出内容开头时，只取新增后缀；其余仍按增量处理。
+     */
+    let textSnapshot = ''
+    let reasoningSnapshot = ''
+    /** 已经产出的完整正文，用于最终兜底。 */
+    let emittedText = ''
+    /** 已处理的事件序号：重连/代理重发时同一 sequence_number 不再追加。 */
+    const seenSequenceNumbers = new Set<number>()
+    let lastSequenceNumber: number | null = null
+    /** 同一 sequence_number 的文本通道只能处理一次（防 payload.type 与 event.event 双写）。 */
+    const emittedTextForSequence = new Set<number>()
 
     for await (const event of readSse(response.body)) {
       if (event.data === '[DONE]') break
@@ -269,30 +313,64 @@ export const openAiResponsesAdapter: ProviderAdapter = {
         throw new Error(errorMsg)
       }
 
-      const eventType = event.event || payload.type || ''
+      // 事件类型优先取 data 里的 payload.type。部分网关会在 `event:` 行重发
+      // 一个泛化类型（如 `message`），只看 event.event 会把增量漏掉或误分类。
+      const eventType = payload.type || event.event || ''
+      const sequenceNumber =
+        typeof payload.sequence_number === 'number' ? payload.sequence_number : null
+      if (sequenceNumber !== null) {
+        if (seenSequenceNumbers.has(sequenceNumber)) continue
+        seenSequenceNumbers.add(sequenceNumber)
+        // 防止长连接无限增长；序号单调递增时只保留最近窗口。
+        if (
+          lastSequenceNumber !== null &&
+          sequenceNumber < lastSequenceNumber &&
+          seenSequenceNumbers.size > 256
+        ) {
+          seenSequenceNumbers.clear()
+          seenSequenceNumbers.add(sequenceNumber)
+        }
+        lastSequenceNumber = sequenceNumber
+      }
+      if (
+        sequenceNumber !== null &&
+        isTextDeltaEvent(eventType) &&
+        emittedTextForSequence.has(sequenceNumber)
+      ) {
+        continue
+      }
 
       // 1. 文本内容增量
-      if (
-        eventType === 'response.output_text.delta' ||
-        eventType === 'response.text.delta' ||
-        eventType === 'output_text.delta' ||
-        eventType === 'text.delta'
-      ) {
+      const isTextDelta = isTextDeltaEvent(eventType)
+      if (isTextDelta) {
+        if (sequenceNumber !== null) emittedTextForSequence.add(sequenceNumber)
         const delta = typeof payload.delta === 'string' ? payload.delta : payload.text
         if (delta) {
-          yield { type: 'text', text: delta }
+          const next = normalizeSnapshotDelta(delta, textSnapshot)
+          textSnapshot = next.snapshot
+          if (next.delta) {
+            emittedText += next.delta
+            yield { type: 'text', text: next.delta }
+          }
         }
       }
 
       // 2. 思考/推理增量
-      if (
-        eventType.includes('reasoning') ||
-        eventType.includes('thinking') ||
-        payload.type?.includes('reasoning')
-      ) {
+      // 必须显式排除文本事件：`response.output_text.delta` 也包含 "output"，
+      // 早先的 includes('reasoning') 过宽判断会把同一段正文同时当推理追加，
+      // 最终表现为“结巴”式的交错重复。
+      const isReasoningDelta =
+        !isTextDelta &&
+        (eventType.includes('reasoning') ||
+          eventType.includes('thinking') ||
+          eventType === 'response.reasoning_text.delta' ||
+          eventType === 'reasoning_text.delta')
+      if (isReasoningDelta) {
         const reasoningDelta = typeof payload.delta === 'string' ? payload.delta : payload.text
         if (reasoningDelta) {
-          yield { type: 'reasoning', text: reasoningDelta }
+          const next = normalizeSnapshotDelta(reasoningDelta, reasoningSnapshot)
+          reasoningSnapshot = next.snapshot
+          if (next.delta) yield { type: 'reasoning', text: next.delta }
         }
       }
 
@@ -343,12 +421,30 @@ export const openAiResponsesAdapter: ProviderAdapter = {
         }
       }
 
+      // 某些网关只在 output_item.done 里给最终文本，而没有可识别的 delta 事件。
+      // 若此前已经流过正文，则只补发增量后缀，绝不把完整文本再追加一遍。
+      if (
+        (eventType === 'response.output_item.done' || eventType === 'output_item.done') &&
+        payload.item?.type === 'message' &&
+        Array.isArray(payload.item.content)
+      ) {
+        const finalText = payload.item.content
+          .filter((part: any) => part?.type === 'output_text' && typeof part.text === 'string')
+          .map((part: any) => part.text as string)
+          .join('')
+        if (finalText) {
+          const next = normalizeSnapshotDelta(finalText, emittedText)
+          emittedText = next.snapshot
+          if (next.delta) yield { type: 'text', text: next.delta }
+        }
+      }
+
       // 4. Token 使用与结束事件
+      const hasUsage = payload.response?.usage || payload.usage
       if (
         eventType === 'response.completed' ||
         eventType === 'response.done' ||
-        payload.response?.usage ||
-        payload.usage
+        hasUsage
       ) {
         const u = payload.response?.usage || payload.usage
         if (u) {

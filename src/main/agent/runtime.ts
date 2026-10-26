@@ -85,6 +85,23 @@ function appendBlock(blocks: ContentBlock[], block: ContentBlock): void {
   blocks.push(block)
 }
 
+/**
+ * 流式增量归一化。
+ *
+ * 除了标准“真增量”网关，还有一些兼容网关会把累计全文当 delta 重发；
+ * 如果直接 append，就会出现“结论：是结论：是我的问题…”这种结巴。
+ * 该函数把累计快照转成真实新增后缀，并保留正常重复字词。
+ */
+function normalizeIncomingDelta(incoming: string, previous: string): { delta: string; snapshot: string } {
+  if (!incoming) return { delta: '', snapshot: previous }
+  if (!previous) return { delta: incoming, snapshot: incoming }
+  if (incoming === previous) return { delta: '', snapshot: previous }
+  if (incoming.startsWith(previous)) {
+    return { delta: incoming.slice(previous.length), snapshot: incoming }
+  }
+  return { delta: incoming, snapshot: previous + incoming }
+}
+
 function resolveTarget(
   preferredProviderId: string | null | undefined,
   preferredModel: string | null | undefined
@@ -804,6 +821,9 @@ export class AgentRuntime {
     let turnCacheReadTokens = 0
     let turnCacheWriteTokens = 0
     let requestCount = 0
+    // 流式通道快照：跨供应商/跨步共享同一份，确保累计全文不会被二次追加。
+    let textStreamSnapshot = ''
+    let reasoningStreamSnapshot = ''
     // 跨供应商降级后，实际服务的可能不是首选；最终落库以实际值为准。
     let servedProviderId = resolved.providerId
     let servedModel = resolved.model
@@ -1025,22 +1045,28 @@ export class AgentRuntime {
           { firstByteTimeoutMs }
         )) {
           if (chunk.type === 'text') {
-            appendBlock(blocks, { type: 'text', text: chunk.text })
+            const normalized = normalizeIncomingDelta(chunk.text, textStreamSnapshot)
+            textStreamSnapshot = normalized.snapshot
+            if (!normalized.delta) continue
+            appendBlock(blocks, { type: 'text', text: normalized.delta })
             emit({
               type: 'text_delta',
               runId,
               conversationId: conversation.id,
               messageId: assistantMessage.id,
-              text: chunk.text
+              text: normalized.delta
             })
           } else if (chunk.type === 'reasoning') {
-            appendBlock(blocks, { type: 'reasoning', text: chunk.text })
+            const normalized = normalizeIncomingDelta(chunk.text, reasoningStreamSnapshot)
+            reasoningStreamSnapshot = normalized.snapshot
+            if (!normalized.delta) continue
+            appendBlock(blocks, { type: 'reasoning', text: normalized.delta })
             emit({
               type: 'reasoning_delta',
               runId,
               conversationId: conversation.id,
               messageId: assistantMessage.id,
-              text: chunk.text
+              text: normalized.delta
             })
           } else if (chunk.type === 'tool_use') {
             toolUses.push({ id: chunk.id, name: chunk.name, input: chunk.input })
@@ -1226,11 +1252,17 @@ export class AgentRuntime {
             servedProviderId
           )) {
             if (chunk.type === 'text') {
-              appendBlock(blocks, { type: 'text', text: chunk.text })
-              emit({ type: 'text_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: chunk.text })
+              const normalized = normalizeIncomingDelta(chunk.text, textStreamSnapshot)
+              textStreamSnapshot = normalized.snapshot
+              if (!normalized.delta) continue
+              appendBlock(blocks, { type: 'text', text: normalized.delta })
+              emit({ type: 'text_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: normalized.delta })
             } else if (chunk.type === 'reasoning') {
-              appendBlock(blocks, { type: 'reasoning', text: chunk.text })
-              emit({ type: 'reasoning_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: chunk.text })
+              const normalized = normalizeIncomingDelta(chunk.text, reasoningStreamSnapshot)
+              reasoningStreamSnapshot = normalized.snapshot
+              if (!normalized.delta) continue
+              appendBlock(blocks, { type: 'reasoning', text: normalized.delta })
+              emit({ type: 'reasoning_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: normalized.delta })
             } else if (chunk.type === 'tool_use') {
               continued.push({ id: chunk.id, name: chunk.name, input: chunk.input })
             } else if (chunk.type === 'stop') {
