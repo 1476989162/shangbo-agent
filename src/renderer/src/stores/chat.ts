@@ -195,6 +195,31 @@ export const useChatStore = defineStore('chat', () => {
     await window.shangbo.settings.set('chat.hiddenModels', [])
   }
 
+  /**
+   * 批量设置某供应商下多个模型的显隐（P1供应商增强）。
+   * 原来全选/全不选/只选免费是逐个 await setModelHidden，37个模型就是37次写；
+   * 这里一次算好集合只写一次 settings，界面一次刷新。
+   */
+  async function setModelsHiddenBatch(
+    providerId: string,
+    models: string[],
+    hidden: boolean
+  ): Promise<void> {
+    const keys = new Set(hiddenModels.value)
+    for (const m of models) {
+      const key = getModelKey(providerId, m)
+      if (hidden) {
+        keys.delete(m)
+        keys.add(key)
+      } else {
+        keys.delete(key)
+        keys.delete(m)
+      }
+    }
+    hiddenModels.value = [...keys]
+    await window.shangbo.settings.set('chat.hiddenModels', [...hiddenModels.value])
+  }
+
   // 历史导航栈 (← / →)
   const historyStack = ref<string[]>([])
   const historyIndex = ref(-1)
@@ -893,6 +918,7 @@ export const useChatStore = defineStore('chat', () => {
     toggleModelHidden,
     setModelHidden,
     showAllModels,
+    setModelsHiddenBatch,
     availableModels,
     usableProviders,
     activeRunId,

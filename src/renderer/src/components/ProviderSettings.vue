@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import type { Provider, ProviderKind } from '@shared/types'
 import { useChatStore } from '../stores/chat'
+import { isFreeModel, parseHeaders, parseModels, providerHost, providerInitial } from '../lib/providers'
 
 const store = useChatStore()
 
@@ -43,24 +44,6 @@ function blankForm(): ProviderForm {
   }
 }
 
-function parseModels(text: string): string[] {
-  return text.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean)
-}
-
-function parseHeaders(text: string): Record<string, string> {
-  const r: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const t = line.trim()
-    if (!t || t.startsWith('#')) continue
-    const i = t.indexOf(':')
-    if (i < 0) continue
-    const k = t.slice(0, i).trim()
-    const v = t.slice(i + 1).trim()
-    if (k) r[k] = v
-  }
-  return r
-}
-
 async function load(): Promise<void> {
   providers.value = await window.shangbo.provider.list()
 }
@@ -87,19 +70,6 @@ const selectedProvider = computed(() =>
 )
 
 const isNew = computed(() => selectedId.value === '__new')
-
-function providerHost(url: string): string {
-  try {
-    const u = new URL(url)
-    return u.host || url
-  } catch {
-    return url
-  }
-}
-
-function providerInitial(name: string): string {
-  return (name || '?').trim().slice(0, 2).toUpperCase()
-}
 
 function startEdit(p: Provider): void {
   feedback.value = null
@@ -185,19 +155,20 @@ async function toggleEnabled(p: Provider): Promise<void> {
 }
 
 async function showAll(p: Provider): Promise<void> {
-  for (const m of p.models) await store.setModelHidden(p.id, m, false)
+  await store.setModelsHiddenBatch(p.id, p.models, false)
 }
 
 async function hideAll(p: Provider): Promise<void> {
-  for (const m of p.models) await store.setModelHidden(p.id, m, true)
+  await store.setModelsHiddenBatch(p.id, p.models, true)
 }
 
 async function selectFreeOnly(): Promise<void> {
   const p = selectedProvider.value
   if (!p) return
-  for (const m of p.models) {
-    await store.setModelHidden(p.id, m, !m.toLowerCase().includes('free'))
-  }
+  const free = p.models.filter((m) => isFreeModel(m))
+  const hidden = p.models.filter((m) => !isFreeModel(m))
+  await store.setModelsHiddenBatch(p.id, free, false)
+  await store.setModelsHiddenBatch(p.id, hidden, true)
 }
 
 function toggleModel(pid: string, m: string): void {
@@ -346,7 +317,7 @@ async function fetchModels(): Promise<void> {
         >
           <div class="prov-icon">{{ providerInitial(p.name) }}</div>
           <div class="prov-main">
-            <div class="prov-name">{{ p.name }}</div>
+            <div class="prov-name">{{ p.name }}<span v-if="p.kind === 'openai-responses'" class="prov-badge">Responses</span><span v-else-if="p.kind === 'anthropic'" class="prov-badge">Anthropic</span></div>
             <div class="prov-sub">{{ providerHost(p.baseUrl) }} · {{ p.models.length }} 个模型</div>
           </div>
           <span class="prov-dot" :class="{ on: p.enabled && p.hasApiKey, off: !(p.enabled && p.hasApiKey) }" />
@@ -490,6 +461,7 @@ async function fetchModels(): Promise<void> {
 .prov-icon { width: 32px; height: 32px; border-radius: 8px; background: var(--bg-elevated); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
 .prov-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .prov-name { font-size: 13.5px; font-weight: 600; }
+.prov-badge { margin-left: 6px; padding: 1px 6px; font-size: 10px; font-weight: 500; border-radius: 999px; background: rgba(84,104,255,0.14); color: #5468ff; border: 1px solid rgba(84,104,255,0.35); vertical-align: 1px; }
 .prov-sub { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prov-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .prov-dot.on { background: #2ea043; }
