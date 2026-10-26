@@ -1,4 +1,8 @@
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { join, normalize, extname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dirname } from 'node:path'
 import { WebSocketServer } from 'ws'
 import { RelayState, RateLimiter, MAX_FRAME_BYTES, HEARTBEAT_MS } from './state.mjs'
 
@@ -16,15 +20,57 @@ import { RelayState, RateLimiter, MAX_FRAME_BYTES, HEARTBEAT_MS } from './state.
 const PORT = Number(process.env.RELAY_PORT ?? 8787)
 const HOST = process.env.RELAY_HOST ?? '127.0.0.1'
 
+// PWA 静态托管：relay 同目录 public/（`npm run mobile:build` 产物拷过来）。
+// Caddy 只需一条反代，无需 file_server 挂载。反代剥掉 /sb-remote 前缀后这里按 / 提供。
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PUBLIC_DIR = join(HERE, 'public')
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+}
+
 const state = new RelayState()
-const server = createServer((req, res) => {
-  if (req.url === '/healthz') {
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  if (url.pathname === '/healthz') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, ...state.stats }))
     return
   }
-  res.writeHead(404)
-  res.end('not found')
+  // 静态：/ -> index.html；其余按路径取文件，防目录穿越
+  try {
+    const rel = url.pathname === '/' || url.pathname === '' ? 'index.html' : url.pathname.replace(/^\/+/, '')
+    const file = normalize(join(PUBLIC_DIR, rel))
+    if (!file.startsWith(PUBLIC_DIR)) {
+      res.writeHead(403)
+      res.end('forbidden')
+      return
+    }
+    const data = await readFile(file)
+    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' })
+    res.end(data)
+  } catch {
+    // SPA 回退：未知路径返回 index.html（manifest/sw 精确文件缺失则 404）
+    if (url.pathname.startsWith('/assets/') || url.pathname.endsWith('.webmanifest') || url.pathname.endsWith('.js')) {
+      res.writeHead(404)
+      res.end('not found')
+      return
+    }
+    try {
+      const data = await readFile(join(PUBLIC_DIR, 'index.html'))
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(data)
+    } catch {
+      res.writeHead(404)
+      res.end('not found')
+    }
+  }
 })
 
 const wss = new WebSocketServer({
