@@ -469,13 +469,15 @@ export class AgentRuntime {
     return false
   }
 
-  /** 渲染进程回传的权限确认结果。 */
+  /** 渲染进程回传的权限确认结果（桌面本地，允许 alwaysAllow）。 */
   decide(decision: ApprovalDecision): void {
+    const key = `${decision.runId}:${decision.toolUseId}`
+    const pending = this.approvals.get(key)
+    const toolName = pending?.toolName
     this.decideWithHash(decision.runId, decision.toolUseId, decision.approved, undefined)
-    if (decision.approved && decision.alwaysAllow) {
-      const pending = this.approvals.get(`${decision.runId}:${decision.toolUseId}`)
-      // decideWithHash 已 settle 并删除，此处仅补记自动放行（若记录仍在）
-      if (pending) this.grantAutoApprove(pending.toolName)
+    // 5.3：只有桌面本地审批的 alwaysAllow 才记自动放行；远程审批永不记入
+    if (decision.approved && decision.alwaysAllow && toolName) {
+      this.grantAutoApprove(toolName)
     }
   }
 

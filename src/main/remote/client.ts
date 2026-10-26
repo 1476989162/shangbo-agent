@@ -34,6 +34,11 @@ const MAX_BACKOFF_MS = 60_000
 /** 连续失败 N 次解密/鉴权，临时封禁该设备并通知桌面（阶段5.4，client 侧计数）。 */
 export const MAX_DECRYPT_FAILURES = 5
 const BAN_MS = 10 * 60 * 1000
+/**
+ * 5.5：手机离线超时——中转侧手机连接断开超过此阈值，桌面视为离线。
+ * 审批超时仍按原 APPROVAL_TIMEOUT_MS 拒绝；手机重连后需重新 listApprovals 拉取清单。
+ */
+export const PHONE_OFFLINE_MS = 10 * 60 * 1000
 
 interface PendingRequest {
   resolve: (data: unknown) => void
