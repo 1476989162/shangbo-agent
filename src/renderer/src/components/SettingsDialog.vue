@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import type { AppInfo, Provider, ProviderKind } from '@shared/types'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { AppInfo, Provider, ProviderKind, UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
 
 const props = withDefaults(
@@ -125,6 +125,99 @@ const editing = ref<ProviderForm | null>(null)
 const busy = ref(false)
 const feedback = ref<{ ok: boolean; message: string } | null>(null)
 const appInfo = ref<AppInfo | null>(null)
+
+/* ------------------------------------------------------------------ */
+/* 应用自更新：状态由主进程状态机广播，这里只做展示与"请求"            */
+/* ------------------------------------------------------------------ */
+const updateState = ref<UpdateState | null>(null)
+const autoCheck = ref(true)
+const autoDownload = ref(true)
+/** 本地按钮的忙碌标记：主进程事件到达前后各有一段空窗，不给用户重复点击的机会。 */
+const updateBusy = ref(false)
+
+const updateStatusText = computed(() => {
+  const s = updateState.value
+  if (!s) return '正在读取更新状态…'
+  switch (s.status) {
+    case 'unsupported':
+      return s.reason || '当前环境不支持自动更新'
+    case 'idle':
+      return '尚未检查更新'
+    case 'checking':
+      return '正在检查更新…'
+    case 'notAvailable':
+      return `已是最新版本（${s.currentVersion}）`
+    case 'available':
+      return `发现新版本 ${s.newVersion}，等待下载`
+    case 'downloading':
+      return `正在下载 ${s.newVersion}… ${s.percent ?? 0}%`
+    case 'ready':
+      return `新版本 ${s.newVersion} 已下载完成，重启后生效`
+    case 'installing':
+      return '正在安装更新，应用即将自动重启…'
+    case 'error':
+      return `更新失败：${s.error || '未知错误'}`
+    default:
+      return '未知状态'
+  }
+})
+
+const updateCheckedAtText = computed(() => {
+  const at = updateState.value?.checkedAt
+  return at ? `上次检查：${new Date(at).toLocaleString()}` : ''
+})
+
+const isUpdating = computed(() => {
+  const st = updateState.value?.status
+  return updateBusy.value || st === 'checking' || st === 'downloading' || st === 'installing'
+})
+
+const canStartDownload = computed(() => {
+  const s = updateState.value
+  return !!s?.newVersion && (s.status === 'available' || s.status === 'error')
+})
+
+const canInstallNow = computed(() => updateState.value?.status === 'ready')
+
+async function manualCheckUpdate(): Promise<void> {
+  updateBusy.value = true
+  try {
+    updateState.value = await window.shangbo.update.check()
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+async function manualDownloadUpdate(): Promise<void> {
+  updateBusy.value = true
+  try {
+    updateState.value = await window.shangbo.update.download()
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+async function installUpdateNow(): Promise<void> {
+  if (!canInstallNow.value) return
+  if (!confirm(`将退出并安装 ${updateState.value?.newVersion}，安装完成后自动重启。`)) return
+  updateState.value = await window.shangbo.update.install()
+}
+
+async function toggleAutoCheck(): Promise<void> {
+  await window.shangbo.settings.set('app.update.check', autoCheck.value)
+  feedback.value = {
+    ok: true,
+    message: autoCheck.value ? '已开启每日自动检查更新' : '已关闭自动检查更新'
+  }
+}
+
+async function toggleAutoDownload(): Promise<void> {
+  await window.shangbo.settings.set('app.update.autoDownload', autoDownload.value)
+  feedback.value = {
+    ok: true,
+    message: autoDownload.value ? '发现新版本后将自动下载' : '发现新版本后需要你手动点下载'
+  }
+}
 const budgetTokens = ref(32000)
 const autoApprove = ref<string[]>([])
 
@@ -177,6 +270,9 @@ async function load(): Promise<void> {
     memoryItems.value = settings['cowork.memories'] as MemoryRecord[]
   }
   appInfo.value = await window.shangbo.app.info()
+  autoCheck.value = (settings['app.update.check'] as boolean) ?? true
+  autoDownload.value = (settings['app.update.autoDownload'] as boolean) ?? true
+  updateState.value = await window.shangbo.update.status()
   await loadPlugins()
   await loadRealUsage()
 }
@@ -249,6 +345,15 @@ async function addMemoryItem(): Promise<void> {
 
 onMounted(() => {
   void load()
+  // 下载进度与"已就绪"由主进程推送，避免这里做轮询
+  window.shangbo.update.onEvent((state) => {
+    updateState.value = state
+    updateBusy.value = false
+  })
+})
+
+onBeforeUnmount(() => {
+  window.shangbo.update.offEvent()
 })
 
 watch(
@@ -1448,6 +1553,73 @@ async function toggleAutoScreenshot(): Promise<void> {
               <div class="info-item"><span class="info-k">Electron 版本:</span> <span class="info-v mono">{{ appInfo.electron }}</span></div>
               <div class="info-item"><span class="info-k">Node 运行时:</span> <span class="info-v mono">{{ appInfo.node }}</span></div>
               <div class="info-item"><span class="info-k">本地数据库:</span> <span class="info-v mono text-truncate" :title="appInfo.dbPath">{{ appInfo.dbPath }}</span></div>
+            </div>
+          </div>
+
+          <div class="divider" />
+
+          <div class="section-block">
+            <h3 class="pane-title">应用更新</h3>
+
+            <div class="update-head">
+              <div class="row-text">
+                <span class="setting-label">当前版本 {{ appInfo?.version || '—' }}</span>
+                <span class="row-sub">{{ updateStatusText }}</span>
+                <span v-if="updateCheckedAtText" class="row-sub update-time">{{ updateCheckedAtText }}</span>
+              </div>
+              <div class="update-actions">
+                <button
+                  class="btn btn-ghost tiny"
+                  :disabled="isUpdating"
+                  @click="manualCheckUpdate"
+                >
+                  {{ updateState?.status === 'checking' ? '检查中…' : '检查更新' }}
+                </button>
+                <button
+                  v-if="canStartDownload"
+                  class="btn btn-ghost tiny"
+                  @click="manualDownloadUpdate"
+                >
+                  下载更新
+                </button>
+                <button v-if="canInstallNow" class="btn btn-primary tiny" @click="installUpdateNow">
+                  重启安装
+                </button>
+              </div>
+            </div>
+
+            <div v-if="updateState?.status === 'downloading'" class="update-progress">
+              <div class="update-progress-fill" :style="{ width: `${updateState.percent ?? 0}%` }" />
+            </div>
+
+            <p v-if="updateState?.releaseNotes" class="update-notes">
+              {{ updateState.releaseNotes }}
+            </p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">自动检查更新</span>
+                <span class="row-sub">
+                  启动 20 秒后检查一次，之后每 24 小时一次。关掉后仍可随时手动检查。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input v-model="autoCheck" type="checkbox" @change="toggleAutoCheck" />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">自动下载更新</span>
+                <span class="row-sub">
+                  发现新版本时在后台下载安装包。安装动作仍需确认，应用不会自己重启或打断你。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input v-model="autoDownload" type="checkbox" @change="toggleAutoDownload" />
+                <span class="switch-slider" />
+              </label>
             </div>
           </div>
 
@@ -4152,5 +4324,55 @@ async function toggleAutoScreenshot(): Promise<void> {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---------------- 应用更新 ---------------- */
+.update-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.update-time {
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.update-progress {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--border);
+  overflow: hidden;
+  margin: 4px 0 10px;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width 0.25s ease;
+}
+
+.update-notes {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
 }
 </style>

@@ -2,7 +2,7 @@
 
 运行在本机的个人 Agent 桌面应用：多模型接入、工具调用、会话以树形存储（支持分支与重新生成）。
 
-当前版本：**0.2.0**
+当前版本：**0.2.2**
 
 - [功能说明](./docs/功能说明.md) —— 这个版本能做什么（面向使用者）
 - [更新日志](./CHANGELOG.md) —— 每个版本改了什么（面向开发者）
@@ -18,6 +18,27 @@
 版本号的唯一来源是 `package.json` 的 `version` 字段。应用内「设置 → 通用 → 系统信息」显示的版本、打包产物名（`尚搏 Agent-<版本>-setup.exe`）都从它派生，不需要手动同步。
 
 变更记录维护在 [CHANGELOG.md](./CHANGELOG.md)，按能力分组、面向使用者描述（写「能做什么」，不写「改了哪个文件」）。
+
+## 发布与自动更新
+
+发版流程（以 0.2.2 为例）：
+
+```bash
+npm run typecheck && npm test      # 1. 发布前校验
+npm run dist                       # 2. 打包，产出 setup.exe / latest.yml / .blockmap
+git tag -a v0.2.2 -m "..." && git push origin v0.2.2   # 3. 打标签
+gh release create v0.2.2 --title "尚搏 Agent v0.2.2" \
+  --notes-file <发布说明> \
+  "release/尚搏 Agent-0.2.2-setup.exe" \
+  "release/尚搏 Agent-0.2.2-setup.exe.blockmap" \
+  release/latest.yml               # 4. 三个资产一起上传
+```
+
+`latest.yml` 是自动更新的索引，**必须与安装包一起上传**，缺了它客户端检查更新会一直 404；`.blockmap` 决定能否走差分下载，也一并上传。
+
+已装应用的更新链路：`electron-builder.yml` 的 `publish` 指向本仓库 Releases → 打包时生成 `resources/app-update.yml` → 应用内 electron-updater 读 `latest.yml` 比对版本 → 下载校验 SHA-512 → 用户确认后 `quitAndInstall`。签名校验目前跳过（无证书），见 CHANGELOG「安装包未做代码签名」。
+
+0.2.1 及更早版本没有 `app-update.yml`，不会自动更新，需要手动装一次新安装包。
 
 ## 环境要求
 

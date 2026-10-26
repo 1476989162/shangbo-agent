@@ -5,6 +5,7 @@ import { settleOrphanStreamingMessages } from './db/repo'
 import { ensureDefaultProviders } from './providers/store'
 import { registerIpcHandlers } from './ipc'
 import { createTray, destroyTray } from './tray'
+import { updateService } from './update'
 import { createMainWindow, getMainWindow, markQuitting } from './windows/mainWindow'
 import { pythonBridge } from './py/bridge'
 import { handleImageProtocol, registerImageProtocol } from './storage/images'
@@ -46,6 +47,8 @@ if (!gotLock) {
     handleImageProtocol()
     createMainWindow()
     createTray()
+    // 自动更新放在最后：它要读设置里的开关，且不参与首屏渲染，慢一点无妨
+    updateService.init()
   })
 
   app.on('activate', () => {

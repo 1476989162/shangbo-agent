@@ -358,3 +358,48 @@ export interface AppInfo {
   dbPath: string
   username?: string
 }
+
+/* ------------------------------------------------------------------ */
+/* 应用自更新                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 更新状态机。只允许以下迁移：
+ * unsupported | idle → checking → available | notAvailable | error
+ * available → downloading → ready → installing
+ * 任意中间态出错都回到 error，手动重试可从 error 重新进入 checking。
+ */
+export type UpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'notAvailable'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'installing'
+  | 'error'
+
+export interface UpdateState {
+  status: UpdateStatus
+  /** 当前已安装版本，来自主进程 app.getVersion()。 */
+  currentVersion: string
+  /** 远端版本，仅在 available/downloading/ready 时有意义。 */
+  newVersion?: string
+  releaseNotes?: string
+  releaseDate?: string
+  /** 下载进度百分比 0–100。 */
+  percent?: number
+  /** 已下载字节数。 */
+  transferred?: number
+  /** 总字节数。 */
+  total?: number
+  /** error 状态下的可读原因。 */
+  error?: string
+  /** unsupported 状态下的说明（开发态没有 app-update.yml）。 */
+  reason?: string
+  /** 最近一次成功发起检查的时间戳。 */
+  checkedAt?: number
+  /** 本次状态生成时间戳，渲染层用它丢弃乱序到达的旧事件。 */
+  updatedAt: number
+}

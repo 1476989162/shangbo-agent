@@ -37,7 +37,13 @@ export const IPC = {
   dialogPickFolder: 'dialog:pickFolder',
   usageGetStats: 'usage:getStats',
 
-  mcpStatus: 'mcp:status'
+  mcpStatus: 'mcp:status',
+
+  updateStatus: 'update:status',
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  updateInstall: 'update:install',
+  updateEvent: 'update:event'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

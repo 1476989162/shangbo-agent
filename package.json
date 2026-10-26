@@ -1,6 +1,6 @@
 {
   "name": "shangbo-agent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "尚搏 Agent —— 个人 Agent 桌面应用",
   "main": "./out/main/index.js",
@@ -22,6 +22,7 @@
     "@nut-tree-fork/nut-js": "^4.2.6",
     "better-sqlite3": "^13.0.3",
     "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.11",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -17,6 +17,7 @@ import {
 } from '../providers/store'
 import { probeProvider } from '../providers/gateway'
 import { mcpManager } from '../mcp/manager'
+import { updateService } from '../update'
 import { exportConversation } from '../exporter'
 import { markQuitting } from '../windows/mainWindow'
 import {
@@ -254,6 +255,8 @@ export function registerIpcHandlers(): void {
       knownToolNames: toolRegistry.all().map((tool) => tool.name)
     })
     setSetting(name, parsed)
+    // 更新开关改完立即生效，不必等重启
+    if (name.startsWith('app.update.')) updateService.syncSettings()
     return true
   })
 
@@ -321,4 +324,16 @@ export function registerIpcHandlers(): void {
     app.quit()
     return true
   })
+
+  /* 应用自更新 ----------------------------------------------------------
+     渲染层只能"请求"，能不能下载、能不能安装由主进程的状态机裁决，
+     避免伪造一次 IPC 就触发退出安装。 */
+
+  ipcMain.handle(IPC.updateStatus, () => updateService.getState())
+
+  ipcMain.handle(IPC.updateCheck, () => updateService.check())
+
+  ipcMain.handle(IPC.updateDownload, () => updateService.download())
+
+  ipcMain.handle(IPC.updateInstall, () => updateService.install())
 }

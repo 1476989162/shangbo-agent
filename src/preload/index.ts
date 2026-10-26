@@ -1,7 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ShangboApi } from '../shared/api'
-import type { AgentEvent, ApprovalDecision, ProviderInput, SendPayload } from '../shared/types'
+import type {
+  AgentEvent,
+  ApprovalDecision,
+  ProviderInput,
+  SendPayload,
+  UpdateState
+} from '../shared/types'
 
 const api: ShangboApi = {
   conversation: {
@@ -69,6 +75,21 @@ const api: ShangboApi = {
 
   mcp: {
     status: () => ipcRenderer.invoke(IPC.mcpStatus)
+  },
+
+  update: {
+    status: () => ipcRenderer.invoke(IPC.updateStatus),
+    check: () => ipcRenderer.invoke(IPC.updateCheck),
+    download: () => ipcRenderer.invoke(IPC.updateDownload),
+    install: () => ipcRenderer.invoke(IPC.updateInstall),
+    // 与 agent:event 同样的单例约定：不做按 handler 精确解绑，避免跨 contextBridge 传函数引用
+    onEvent: (handler: (state: UpdateState) => void) => {
+      ipcRenderer.removeAllListeners(IPC.updateEvent)
+      ipcRenderer.on(IPC.updateEvent, (_event, payload: UpdateState) => handler(payload))
+    },
+    offEvent: () => {
+      ipcRenderer.removeAllListeners(IPC.updateEvent)
+    }
   }
 }
 

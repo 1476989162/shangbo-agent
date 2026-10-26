@@ -42,6 +42,9 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.browser.builtin': z.boolean(),
   'agent.browser.external': z.boolean(),
   'agent.browser.autoScreenshot': z.boolean(),
+  // 自更新：是否自动检查、发现后是否自动下载。安装永远需要用户确认。
+  'app.update.check': z.boolean(),
+  'app.update.autoDownload': z.boolean(),
   // 文本
   'agent.instructions': z.string().max(20_000, '通用指导过长'),
   'agent.effort': z.string().max(50),

@@ -38,4 +38,13 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: 尚搏 Agent
 
-publish: null
+# 更新源：electron-builder 据此在 release/ 生成 latest.yml，并把 resources/app-update.yml
+# 打进安装包——app-update.yml 是 electron-updater 能工作的前提（缺它就直接抛
+# ERR_UPDATER_INVALID_UPDATE_CONFIGURATION）。GitHub provider 读的是仓库 Releases 里的资产。
+# 注意：`electron-builder` 本地跑只生成元数据，不会自动发布（默认 publish=onTag），
+# 上传仍由 `gh release create` 完成，latest.yml / .blockmap 必须与 exe 一起作为资产上传。
+publish:
+  provider: github
+  owner: 1476989162
+  repo: shangbo-agent
+  releaseType: release

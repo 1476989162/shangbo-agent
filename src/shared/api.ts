@@ -81,4 +81,17 @@ export interface ShangboApi {
     /** 各 MCP 服务实时状态（是否启用、进程是否活着、工具清单）。 */
     status(): Promise<import('./types').McpServerStatus[]>
   }
+
+  update: {
+    /** 当前更新状态机快照，渲染层打开设置页时先拉一次。 */
+    status(): Promise<import('./types').UpdateState>
+    /** 主动检查更新。manual 由 preload 固定为 true，渲染层无法伪装成自动检查。 */
+    check(): Promise<import('./types').UpdateState>
+    /** 下载已发现的更新（未处于 available 状态时主进程会拒绝）。 */
+    download(): Promise<import('./types').UpdateState>
+    /** 退出并安装已下载完成的更新；未 ready 时不执行。 */
+    install(): Promise<import('./types').UpdateState>
+    onEvent(handler: (state: import('./types').UpdateState) => void): void
+    offEvent(): void
+  }
 }

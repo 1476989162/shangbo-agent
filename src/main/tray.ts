@@ -1,6 +1,7 @@
 import { Menu, Tray, app, nativeImage } from 'electron'
 import log from 'electron-log/main'
 import { markQuitting, showMainWindow, toggleMainWindow } from './windows/mainWindow'
+import { checkFromTray } from './update'
 
 let tray: Tray | null = null
 
@@ -44,6 +45,7 @@ export function createTray(): void {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '打开尚搏 Agent', click: () => showMainWindow() },
+      { label: '检查更新…', click: () => checkFromTray() },
       { type: 'separator' },
       {
         label: '退出',
