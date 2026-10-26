@@ -6,7 +6,7 @@ import { remoteService } from '../remote/service'
 import { listRemoteAudit } from '../remote/audit'
 import * as repo from '../db/repo'
 import { getDbPath } from '../db'
-import { getAllSettings, setSetting } from '../settings'
+import { getAllSettings, getSetting, setSetting } from '../settings'
 import { parseSettingValue } from '../settingsSchema'
 import { toolRegistry } from '../tools'
 import { agentRuntime } from '../agent/runtime'
@@ -24,6 +24,8 @@ import { updateService } from '../update'
 import { getInstallInfo } from '../installInfo'
 import { exportConversation } from '../exporter'
 import { markQuitting } from '../windows/mainWindow'
+import { autonomousScheduler } from '../autonomous/scheduler'
+import * as autonomousStore from '../autonomous/store'
 import {
   deleteConversationImages,
   MAX_IMAGE_BYTES,
@@ -112,7 +114,15 @@ export function registerIpcHandlers(): void {
     IPC.conversationCreate,
     (
       _event,
-      input: string | { title?: string; workingDir?: string | null; projectId?: string | null } | undefined
+      input:
+        | string
+        | {
+            title?: string
+            workingDir?: string | null
+            projectId?: string | null
+            mode?: 'chat' | 'builder' | 'wish' | null
+          }
+        | undefined
     ) => {
       if (typeof input === 'string') {
         return repo.createConversation({ title: input })
@@ -120,7 +130,8 @@ export function registerIpcHandlers(): void {
       return repo.createConversation({
         title: input?.title ?? '新对话',
         workingDir: input?.workingDir ?? null,
-        projectId: input?.projectId ?? null
+        projectId: input?.projectId ?? null,
+        mode: input?.mode ?? null
       })
     }
   )
@@ -152,6 +163,13 @@ export function registerIpcHandlers(): void {
     if (dir !== null && typeof dir !== 'string') throw new Error('目录必须是字符串或 null')
     repo.updateConversation(conversationId, { workingDir: dir })
     return repo.getConversation(conversationId)
+  })
+
+  ipcMain.handle(IPC.conversationSetMode, (_event, conversationId: unknown, mode: unknown) => {
+    const id = z.string().min(1).parse(conversationId)
+    const parsed = z.enum(['chat', 'builder', 'wish']).nullable().parse(mode)
+    repo.updateConversation(id, { mode: parsed })
+    return repo.getConversation(id)
   })
 
   ipcMain.handle(IPC.conversationExport, (_event, conversationId: string) =>
@@ -297,6 +315,7 @@ export function registerIpcHandlers(): void {
     if (name === 'remote.enabled' || name === 'remote.relayUrl' || name === 'remote.approvalPolicy') {
       remoteService.sync()
     }
+    if (name === 'agent.autonomous.enabled') autonomousScheduler.kick()
     return true
   })
 
@@ -394,6 +413,96 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.remoteDisconnect, () => {
     remoteService.disconnectAll()
+    return true
+  })
+
+  /* 许愿式自主任务与经验 ------------------------------------------ */
+
+  const AutonomousTaskSchema = z.object({
+    id: z.string().optional(),
+    name: z.string().min(1).max(200),
+    prompt: z.string().min(1).max(50_000),
+    acceptance: z.string().max(20_000).optional(),
+    workingDir: z.string().min(1).max(2000),
+    schedule: z.enum(['manual', 'interval']).optional(),
+    intervalMinutes: z.number().int().min(1).max(43_200).nullable().optional(),
+    verifyCommand: z.string().max(2000).optional(),
+    maxVerifyAttempts: z.number().int().min(0).max(10).optional(),
+    enabled: z.boolean().optional(),
+    maxSteps: z.number().int().min(1).max(500).optional(),
+    maxRunsPerDay: z.number().int().min(1).max(100).optional()
+  })
+
+  const LessonInputSchema = z.object({
+    id: z.string().optional(),
+    scope: z.enum(['global', 'project']).optional(),
+    projectPath: z.string().max(2000).nullable().optional(),
+    title: z.string().min(1).max(300),
+    content: z.string().min(1).max(20_000),
+    confidence: z.number().min(0).max(1).optional()
+  })
+
+  ipcMain.handle(IPC.autonomousList, () => autonomousScheduler.list())
+
+  ipcMain.handle(IPC.autonomousSave, (_event, input: unknown) =>
+    {
+      const task = autonomousScheduler.save(AutonomousTaskSchema.parse(input))
+      autonomousScheduler.kick()
+      return task
+    }
+  )
+
+  ipcMain.handle(IPC.autonomousDelete, (_event, id: unknown) => {
+    autonomousScheduler.remove(z.string().min(1).parse(id))
+    return true
+  })
+
+  ipcMain.handle(IPC.autonomousSetEnabled, (_event, id: unknown, enabled: unknown) =>
+    {
+      const task = autonomousScheduler.setEnabled(
+        z.string().min(1).parse(id),
+        z.boolean().parse(enabled)
+      )
+      autonomousScheduler.kick()
+      return task
+    }
+  )
+
+  ipcMain.handle(IPC.autonomousRunNow, (_event, id: unknown) =>
+    autonomousScheduler.runNow(z.string().min(1).parse(id))
+  )
+
+  ipcMain.handle(IPC.autonomousRuns, (_event, taskId: unknown) => {
+    const parsed = z.string().min(1).nullable().optional().parse(taskId)
+    return autonomousStore.listRuns(parsed ?? undefined)
+  })
+
+  ipcMain.handle(IPC.autonomousPause, () => {
+    autonomousScheduler.pause()
+    return true
+  })
+
+  ipcMain.handle(IPC.autonomousResume, () => {
+    autonomousScheduler.resume()
+    return true
+  })
+
+  ipcMain.handle(IPC.autonomousStatus, () => ({
+    paused: autonomousScheduler.isPaused(),
+    enabled: getSetting<boolean>('agent.autonomous.enabled', false)
+  }))
+
+  ipcMain.handle(IPC.lessonsList, (_event, projectPath: unknown) => {
+    const parsed = z.string().max(2000).nullable().optional().parse(projectPath)
+    return autonomousStore.listLessons({ projectPath: parsed ?? null })
+  })
+
+  ipcMain.handle(IPC.lessonsSave, (_event, input: unknown) =>
+    autonomousStore.upsertLesson(LessonInputSchema.parse(input))
+  )
+
+  ipcMain.handle(IPC.lessonsDelete, (_event, id: unknown) => {
+    autonomousStore.deleteLesson(z.string().min(1).parse(id))
     return true
   })
 

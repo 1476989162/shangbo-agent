@@ -10,6 +10,8 @@ import { updateService } from './update'
 import { createMainWindow, getMainWindow, markQuitting } from './windows/mainWindow'
 import { pythonBridge } from './py/bridge'
 import { handleImageProtocol, registerImageProtocol } from './storage/images'
+import { autonomousScheduler } from './autonomous/scheduler'
+import { settleOrphanAutonomousRuns } from './autonomous/store'
 
 // 固定应用名，让开发态与打包态落在同一个 userData 目录。
 // 否则打包后 productName「尚搏 Agent」会另建一个目录，用户会以为数据丢了。
@@ -42,6 +44,7 @@ if (!gotLock) {
     // 数据库必须在任何 IPC 之前就绪
     getDb()
     settleOrphanStreamingMessages()
+    settleOrphanAutonomousRuns()
     ensureDefaultProviders()
 
     registerIpcHandlers()
@@ -56,6 +59,8 @@ if (!gotLock) {
     }
     // 自动更新放在最后：它要读设置里的开关，且不参与首屏渲染，慢一点无妨
     updateService.init()
+    // 许愿式自主任务：默认关闭；用户开启后由主进程常驻调度。
+    autonomousScheduler.start()
   })
 
   app.on('activate', () => {
@@ -69,6 +74,7 @@ if (!gotLock) {
 
   app.on('before-quit', () => {
     markQuitting()
+    autonomousScheduler.stop()
     pythonBridge.dispose()
     destroyTray()
     closeDatabase()

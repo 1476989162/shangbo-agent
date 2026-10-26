@@ -22,6 +22,12 @@ export default defineConfig({
   },
   renderer: {
     root: 'src/renderer',
+    server: {
+      // Windows 上 ::1:5173 可能被系统保留；显式用 IPv4 本机地址并允许换端口。
+      host: '127.0.0.1',
+      port: 5034,
+      strictPort: false
+    },
     resolve: {
       alias: {
         '@renderer': resolve('src/renderer/src'),

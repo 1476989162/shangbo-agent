@@ -126,6 +126,69 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_remote_audit_time ON remote_audit(created_at);
     `
+  },
+  {
+    // v5：许愿模式 / 自主任务 / 经验库
+    version: 5,
+    sql: `
+      ALTER TABLE conversations ADD COLUMN mode TEXT;
+
+      CREATE TABLE IF NOT EXISTS autonomous_tasks (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        prompt          TEXT NOT NULL,
+        acceptance      TEXT NOT NULL DEFAULT '',
+        working_dir     TEXT NOT NULL,
+        schedule        TEXT NOT NULL DEFAULT 'manual',
+        interval_minutes INTEGER,
+        verify_command  TEXT NOT NULL DEFAULT '',
+        max_verify_attempts INTEGER NOT NULL DEFAULT 2,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        conversation_id TEXT,
+        next_run_at     INTEGER,
+        last_run_at     INTEGER,
+        last_status     TEXT,
+        last_error      TEXT,
+        failure_count   INTEGER NOT NULL DEFAULT 0,
+        max_steps       INTEGER NOT NULL DEFAULT 80,
+        max_runs_per_day INTEGER NOT NULL DEFAULT 12,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_autonomous_due
+        ON autonomous_tasks(enabled, next_run_at);
+
+      CREATE TABLE IF NOT EXISTS autonomous_runs (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES autonomous_tasks(id) ON DELETE CASCADE,
+        conversation_id TEXT,
+        run_id          TEXT,
+        status          TEXT NOT NULL,
+        summary         TEXT NOT NULL DEFAULT '',
+        error           TEXT,
+        started_at      INTEGER NOT NULL,
+        finished_at     INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_autonomous_runs_task
+        ON autonomous_runs(task_id, started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS lessons (
+        id              TEXT PRIMARY KEY,
+        scope           TEXT NOT NULL DEFAULT 'global',
+        project_path    TEXT,
+        title           TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        source_task_id  TEXT,
+        source_run_id   TEXT,
+        confidence      REAL NOT NULL DEFAULT 0.5,
+        use_count       INTEGER NOT NULL DEFAULT 0,
+        last_used_at    INTEGER,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_lessons_scope
+        ON lessons(scope, project_path, updated_at DESC);
+    `
   }
 ]
 

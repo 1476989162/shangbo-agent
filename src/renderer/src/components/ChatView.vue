@@ -682,6 +682,16 @@ const hiddenModelsCount = computed(() => {
 })
 
 // 思考强度选项 (图片 1)
+const modeTitle = computed(() => {
+  if (store.agentMode === 'wish') {
+    return '【许愿模式】只描述目标与验收，Agent 在工作区内自动改、跑、修、验。点击切换到问答模式'
+  }
+  if (store.agentMode === 'builder') {
+    return '【建造者模式】常规工程构建，敏感操作逐次确认。点击切换到许愿模式'
+  }
+  return '【问答模式】只讨论方案，不主动落盘。点击切换到建造者模式'
+})
+
 const effortOptions = [
   { value: 'minimal', name: '极速', short: '极速', percent: 8, desc: '快速生成，跳过深度推导' },
   { value: 'low', name: '快速', short: '快速', percent: 28, desc: '响应敏捷，适合常规对话' },
@@ -969,15 +979,15 @@ const suggestions = [
                 隔离分支
               </label>
 
-              <!-- TRAE 工作流：双模式切换 (问答 Chat vs 建造者 Builder) -->
+              <!-- 工作模式：问答 / 建造者 / 许愿 -->
               <button
                 class="context-tag mode-tag"
-                :class="{ 'mode-builder': store.agentMode === 'builder', 'mode-chat': store.agentMode === 'chat' }"
-                :title="store.agentMode === 'builder' ? '【TRAE 建造者模式已激活】自主全栈工程构建，优先使用工具逐个文件落盘自测。点击切换至问答模式' : '【TRAE 问答咨询模式已激活】专注于知识解答、方案设计与代码讨论。点击切换至建造者模式'"
-                @click="store.setAgentMode(store.agentMode === 'builder' ? 'chat' : 'builder')"
+                :class="`mode-${store.agentMode}`"
+                :title="modeTitle"
+                @click="store.cycleAgentMode()"
               >
-                <span class="mode-icon">{{ store.agentMode === 'builder' ? '🏗️' : '💬' }}</span>
-                <span class="mode-name">{{ store.agentMode === 'builder' ? '建造者模式' : '问答模式' }}</span>
+                <span class="mode-icon">{{ store.agentMode === 'builder' ? '🏗️' : store.agentMode === 'wish' ? '✨' : '💬' }}</span>
+                <span class="mode-name">{{ store.agentMode === 'builder' ? '建造者模式' : store.agentMode === 'wish' ? '许愿模式' : '问答模式' }}</span>
               </button>
             </div>
 
@@ -1026,7 +1036,7 @@ const suggestions = [
               v-model="draft"
               class="composer-textarea"
               rows="1"
-              placeholder="输入任务或提出问题，按 / 可使用常用命令… 也可直接 Ctrl+V 粘贴截图"
+              :placeholder="store.agentMode === 'wish' ? '许下愿望：说清目标、验收标准与项目目录；Agent 会自己改、跑、修、验…' : '输入任务或提出问题，按 / 可使用常用命令… 也可直接 Ctrl+V 粘贴截图'"
               @input="autoGrow"
               @keydown="onKeydown"
               @paste="onPaste"
@@ -1041,11 +1051,11 @@ const suggestions = [
                 <button
                   class="perm-btn"
                   :class="{ active: store.bypassPermissions }"
-                  @click="store.bypassPermissions = !store.bypassPermissions"
-                  :title="store.bypassPermissions ? '已开启直接放行模式（不弹出安全确认）' : '已开启手动审批模式（敏感操作前提示确认）'"
+                  @click="store.agentMode === 'wish' ? store.cycleAgentMode() : (store.bypassPermissions = !store.bypassPermissions)"
+                  :title="store.agentMode === 'wish' ? '许愿模式自动放行工作区内操作；不可逆系统操作仍会被拒绝。点击切换模式' : store.bypassPermissions ? '已开启直接放行模式（不弹出安全确认）' : '已开启手动审批模式（敏感操作前提示确认）'"
                 >
                   <span class="perm-label">
-                    {{ store.bypassPermissions ? '直接放行模式' : '安全确认模式' }}
+                    {{ store.agentMode === 'wish' ? '许愿自动执行' : store.bypassPermissions ? '直接放行模式' : '安全确认模式' }}
                   </span>
                   <span class="perm-plus">+</span>
                 </button>
@@ -2731,6 +2741,14 @@ const suggestions = [
   border-color: #10b981;
   color: #10b981;
   font-weight: 600;
+}
+
+.mode-tag.mode-wish {
+  background: linear-gradient(135deg, rgba(217, 119, 87, 0.14), rgba(245, 158, 11, 0.12));
+  border-color: #d97757;
+  color: #b45309;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(217, 119, 87, 0.12);
 }
 
 .retry-banner,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import log from 'electron-log/main'
@@ -32,6 +32,7 @@ import type {
 } from '../../shared/types'
 import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
+import { listLessons, markLessonsUsed } from '../autonomous/store'
 
 export type Emitter = (event: AgentEvent) => void
 
@@ -53,6 +54,7 @@ const MAX_REASONING_CHARS = 8_000
 const SKIP_THINKING_SUFFIX = '\n\n（上轮思考过长被截断：本轮不要再思考，直接输出正文或工具调用。）'
 const BUDGET_KEY = 'agent.contextBudgetTokens'
 const AUTO_APPROVE_KEY = 'tools.autoApprove'
+const WISH_AUTO_APPROVE_KEY = 'agent.wish.autoApproveWorkspace'
 
 const DEFAULT_SYSTEM_PROMPT = `你是「尚搏 Agent」，运行在用户本机的个人助理，用中文回答，先给结论。
 
@@ -761,7 +763,7 @@ export class AgentRuntime {
    */
   private async runModel(
     runId: string,
-    conversation: Pick<Conversation, 'id' | 'systemPrompt' | 'workingDir'>,
+    conversation: Pick<Conversation, 'id' | 'systemPrompt' | 'workingDir' | 'mode'>,
     userMessage: Message,
     target: { providerId?: string | null; model?: string | null },
     emit: Emitter,
@@ -836,11 +838,48 @@ export class AgentRuntime {
     if (plugins.includes('security-guidance')) pluginDirectives.push('注意密钥/SQL注入/命令拼接风险。')
     if (plugins.includes('github')) pluginDirectives.push('GitHub 操作优先用本机 gh。')
 
-    const agentMode = getSetting<string>('agent.mode', 'builder')
+    const agentMode =
+      conversation.mode === 'wish' && !getSetting<boolean>('agent.wish.enabled', true)
+        ? 'builder'
+        : (conversation.mode ?? getSetting<string>('agent.mode', 'builder'))
+
+    // 许愿闭环：把当前分支的真实 diff 作为“改动证据”注入，避免模型只凭记忆总结。
+    if (
+      agentMode === 'wish' &&
+      conversation.workingDir &&
+      getSetting<boolean>('agent.wish.enabled', true)
+    ) {
+      const diff = await this.git(['diff', '--stat'], conversation.workingDir)
+      if (diff) {
+        system += `\n\n【当前工作区改动】\n${diff.slice(0, 6000)}`
+      }
+    }
     if (agentMode === 'builder') {
       system += '\n\n【建造者】改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。'
-    } else {
+    } else if (agentMode === 'chat') {
       system += '\n\n【问答】给思路和核心片段即可。'
+    } else if (agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)) {
+      const acceptance = getSetting<string>('agent.wish.acceptance', '').trim()
+      const verifyCommand = getSetting<string>('agent.wish.verifyCommand', '').trim()
+      system += [
+        '',
+        '【许愿模式】你是自动交付者，不是咨询顾问。',
+        '工作区内读写与命令无需等待用户确认；你必须自己规划、修改、运行验证、读取报错、修复并重跑，直到满足验收。',
+        '不得声称“应该可以”或把验证留给用户。没有真实验证证据就不能宣布完成。',
+        acceptance ? `默认验收标准：${acceptance}` : '',
+        verifyCommand ? `默认验收命令：${verifyCommand}` : '',
+        '最终必须输出：改动摘要、实际执行的验证命令与结果、剩余风险、回滚方式。',
+        '硬边界：只改当前工作区；不读取密钥库/会话数据库；不执行擦盘、格式化、删系统目录等不可逆操作。'
+      ]
+        .filter(Boolean)
+        .join('\n')
+      const lessons = listLessons({ projectPath: conversation.workingDir, limit: 12 })
+      if (lessons.length > 0) {
+        system += `\n\n【已验证的项目经验（优先复用）】\n${lessons
+          .map((lesson, index) => `${index + 1}. ${lesson.title}\n${lesson.content}`)
+          .join('\n')}`
+        markLessonsUsed(lessons.map((lesson) => lesson.id))
+      }
     }
     if (pluginDirectives.length > 0) system += `\n已启用技能：${pluginDirectives.join(' ')}`
 
@@ -850,16 +889,26 @@ export class AgentRuntime {
       system += REVIEW_PLAYBOOK
     }
 
-    const budget = getSetting<number>(BUDGET_KEY, DEFAULT_BUDGET_TOKENS)
+    // 许愿任务要留出“改—跑—读错—再改”的空间；32k 预算常在长测试日志后把任务目标裁掉。
+    const configuredBudget = getSetting<number>(BUDGET_KEY, DEFAULT_BUDGET_TOKENS)
+    const budget =
+      agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)
+        ? Math.max(configuredBudget, 64_000)
+        : configuredBudget
     // Codex 式沙箱档：只读复查时模型根本看不到写工具，比逐个审批更彻底。
-    const readOnly = getSetting<boolean>('agent.readOnly', false)
+    // 许愿模式本身是“自动交付”模式，不应被通用只读复查开关静默降级；
+    // 用户若切到许愿模式，就明确表示要落盘和验证。
+    const readOnly = agentMode !== 'wish' && getSetting<boolean>('agent.readOnly', false)
     if (readOnly) system += '\n\n【只读复查】只允许读取与搜索文件，禁止写入、修改与执行命令；输出问题清单即可，不要尝试改动。'
     // 保险丝灵敏度：连续几次打转就停，默认 3。
     const stuckCfg = getSetting<number>('agent.stuckLimit', 3)
     const effectiveStuckLimit = typeof stuckCfg === 'number' && stuckCfg > 0 ? stuckCfg : 3
     // 步数上限：防止模型换参试错无限烧 Token，默认 50 轮请求后暂停。loopGuard 只拦"打转"，
     // 正常干活 50 步也会触发——这是成本熔断，不是行为判断。到顶复用 guardNotice 提示用户。
-    const maxStepsCfg = getSetting<number>('agent.maxSteps', 50)
+    const maxStepsCfg =
+      agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)
+        ? getSetting<number>('agent.wishMaxSteps', 120)
+        : getSetting<number>('agent.maxSteps', 50)
     const effectiveMaxSteps = typeof maxStepsCfg === 'number' && maxStepsCfg > 0 ? Math.floor(maxStepsCfg) : 50
     let stepCount = 0
     // 本轮已执行的工具序列，只用于打转检测，不回传模型。
@@ -1347,6 +1396,12 @@ export class AgentRuntime {
     }
     // MCP 远端工具：mcp__服务__工具，走服务进程转发。
     if (call.name.startsWith('mcp__')) {
+      if (this.isWishMode(conversationId)) {
+        return {
+          content: '许愿模式只使用本地工作区工具，不调用外部 MCP 服务。',
+          isError: true
+        }
+      }
       return this.invokeMcpTool(runId, messageId, call, conversationId, emit, controller)
     }
     const tool = toolRegistry.get(call.name)
@@ -1362,7 +1417,11 @@ export class AgentRuntime {
     }
 
     // 只读复查兜底：即使模型私自拼出写工具名，也不执行。
-    if (getSetting<boolean>('agent.readOnly', false) && tool.requiresApproval) {
+    if (
+      getSetting<boolean>('agent.readOnly', false) &&
+      tool.requiresApproval &&
+      !this.isWishMode(conversationId)
+    ) {
       return { content: '当前是只读复查模式，不执行写入与命令操作。如需修改请先关闭只读模式。', isError: true }
     }
 
@@ -1386,7 +1445,23 @@ export class AgentRuntime {
 
     const needsApproval =
       (tool.requiresApproval && !this.isAutoApproved(call.name)) || Boolean(securityConfirmReason)
-    if (needsApproval) {
+    const wishAutoApproved = this.isWishAutoApproved(
+      call.name,
+      call.input,
+      conversationId,
+      workingDirectory
+    )
+    if (needsApproval && !wishAutoApproved) {
+      // 无人值守时许愿模式不弹窗：高危系统操作与未知外部能力直接拒绝，
+      // 避免任务在审批超时里空转 5 分钟，也避免把审批误当成“默认同意”。
+      if (this.isWishMode(conversationId)) {
+        return {
+          content: securityConfirmReason
+            ? `许愿模式拒绝未执行：${securityConfirmReason}`
+            : `许愿模式不允许调用未授权的工具 ${call.name}。请改用工作区内的本地读写、补丁或命令工具。`,
+          isError: true
+        }
+      }
       const decision = await this.requestApproval(
         runId,
         conversationId,
@@ -1613,12 +1688,97 @@ export class AgentRuntime {
     return getSetting<string[]>(AUTO_APPROVE_KEY, []).includes(toolName)
   }
 
+  private isWishMode(conversationId: string): boolean {
+    const conversation = repo.getConversation(conversationId)
+    return (
+      getSetting<boolean>('agent.wish.enabled', true) &&
+      (conversation?.mode ?? getSetting<string>('agent.mode', 'builder')) === 'wish'
+    )
+  }
+
+  /**
+   * 许愿模式的“工作区内免审批”。
+   *
+   * 这不是无限制放行：只对读写类工具与工作区内的命令生效；密钥库、数据库、
+   * 工作区外绝对路径、目录穿越与环境变量逃逸仍会落回审批或直接被工具层拒绝。
+   */
+  private isWishAutoApproved(
+    toolName: string,
+    input: unknown,
+    conversationId: string,
+    workingDirectory: string | null
+  ): boolean {
+    if (!getSetting<boolean>('agent.wish.autoApproveWorkspace', true)) return false
+    if (!this.isWishMode(conversationId)) return false
+    if (!workingDirectory) return false
+
+    if (toolName === 'write_file' || toolName === 'patch_file' || toolName === 'read_file') {
+      const rawPath = (input as { path?: unknown } | null)?.path
+      if (typeof rawPath !== 'string' || !rawPath.trim()) return false
+      const target = isAbsolute(rawPath) ? rawPath : resolve(workingDirectory, rawPath)
+      return isPathInside(workingDirectory, target) && !touchesPrivateData(target)
+    }
+
+    if (toolName === 'run_command') {
+      const record = (input ?? {}) as { command?: unknown; cwd?: unknown }
+      if (typeof record.command !== 'string' || !record.command.trim()) return false
+      const cwd = typeof record.cwd === 'string' && record.cwd.trim() ? record.cwd : workingDirectory
+      const resolvedCwd = isAbsolute(cwd) ? resolve(cwd) : resolve(workingDirectory, cwd)
+      if (!isPathInside(workingDirectory, resolvedCwd)) return false
+      return (
+        commandStaysInsideWorkspace(record.command, resolvedCwd) &&
+        !touchesPrivateData(record.command)
+      )
+    }
+
+    return false
+  }
+
   private grantAutoApprove(toolName: string): void {
     const current = getSetting<string[]>(AUTO_APPROVE_KEY, [])
     if (current.includes(toolName)) return
     setSetting(AUTO_APPROVE_KEY, [...current, toolName])
     log.info(`[agent] 已永久放行工具：${toolName}`)
   }
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  try {
+    const base = resolve(root)
+    const target = isAbsolute(candidate) ? resolve(candidate) : resolve(base, candidate)
+    const rel = relative(base, target)
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  } catch {
+    return false
+  }
+}
+
+function touchesPrivateData(value: string): boolean {
+  const normalized = value.replace(/\//g, '\\').toLowerCase()
+  return (
+    normalized.includes('secrets.json') ||
+    normalized.includes('shangbo-agent.db') ||
+    normalized.includes('%appdata%') ||
+    normalized.includes('$env:appdata')
+  )
+}
+
+/**
+ * 粗粒度命令边界检查：拦掉显式工作区外绝对路径、父目录穿越和环境变量路径逃逸。
+ * 它不是操作系统沙箱，但能挡住模型最常写的 `cd .. && ...`、`C:\Users\...`、
+ * `%USERPROFILE%\...` 这类绕过；真正的文件级密钥保护仍由 tools 层兜底。
+ */
+export function commandStaysInsideWorkspace(command: string, workspace: string): boolean {
+  const cmd = command.trim()
+  if (!cmd) return false
+  if (/(^|[\s;&|"'`])(?:\.\.|~)(?=[\\/\s;&|"'`]|$)/m.test(cmd)) return false
+  if (/%[a-z_]+%|\$env:|\$\{?home\}?|\$\{?userprofile\}?/i.test(cmd)) return false
+
+  const absolutePaths = cmd.match(/(?:[a-zA-Z]:[\\/][^\s"';&|]*|\\\\[^\s"';&|]+)/g) ?? []
+  for (const path of absolutePaths) {
+    if (!isPathInside(workspace, path)) return false
+  }
+  return true
 }
 
 export const agentRuntime = new AgentRuntime()

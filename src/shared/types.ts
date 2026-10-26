@@ -8,6 +8,14 @@ export type Role = 'system' | 'user' | 'assistant' | 'tool'
 /** queued：排队中的用户消息（已落库但尚未开跑），崩溃重启时收敛为 aborted。 */
 export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'aborted' | 'queued'
 
+/**
+ * Agent 工作模式：
+ * - chat：只讨论，不主动落盘；
+ * - builder：常规建造者，危险操作逐次审批；
+ * - wish：许愿模式，在工作区内自动执行、自动验证，系统级不可逆操作仍然硬拒绝。
+ */
+export type AgentMode = 'chat' | 'builder' | 'wish'
+
 /** 助手的回复不是纯字符串，而是有序内容块序列（文本 / 思考 / 工具调用 / 工具结果 / 图片）。 */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -75,9 +83,87 @@ export interface Conversation {
   providerId: string | null
   model: string | null
   systemPrompt: string | null
+  /** 会话级工作模式；null 表示跟随全局 agent.mode。自主任务会固定为 wish。 */
+  mode: AgentMode | null
   createdAt: number
   updatedAt: number
   archivedAt: number | null
+}
+
+/* ------------------------------------------------------------------ */
+/* 许愿式自主任务与经验进化                                             */
+/* ------------------------------------------------------------------ */
+
+export type AutonomousSchedule = 'manual' | 'interval'
+export type AutonomousRunStatus = 'running' | 'verifying' | 'success' | 'failed' | 'skipped'
+
+export interface AutonomousTask {
+  id: string
+  name: string
+  /** 用户愿望：目标、约束与期望产物。 */
+  prompt: string
+  /** 可验证的验收标准。 */
+  acceptance: string
+  workingDir: string
+  schedule: AutonomousSchedule
+  intervalMinutes: number | null
+  /** 模型完成后由主进程执行的真实验收命令；为空时只依赖模型自检。 */
+  verifyCommand: string
+  maxVerifyAttempts: number
+  enabled: boolean
+  conversationId: string | null
+  nextRunAt: number | null
+  lastRunAt: number | null
+  lastStatus: string | null
+  lastError: string | null
+  failureCount: number
+  maxSteps: number
+  maxRunsPerDay: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AutonomousTaskInput {
+  id?: string
+  name: string
+  prompt: string
+  acceptance?: string
+  workingDir: string
+  schedule?: AutonomousSchedule
+  intervalMinutes?: number | null
+  verifyCommand?: string
+  maxVerifyAttempts?: number
+  enabled?: boolean
+  maxSteps?: number
+  maxRunsPerDay?: number
+}
+
+export interface AutonomousRun {
+  id: string
+  taskId: string
+  conversationId: string | null
+  runId: string | null
+  status: AutonomousRunStatus
+  summary: string
+  error: string | null
+  startedAt: number
+  finishedAt: number | null
+}
+
+/** 成功任务沉淀出的可复用经验，按项目路径或全局范围注入后续任务。 */
+export interface Lesson {
+  id: string
+  scope: 'global' | 'project'
+  projectPath: string | null
+  title: string
+  content: string
+  sourceTaskId: string | null
+  sourceRunId: string | null
+  confidence: number
+  useCount: number
+  lastUsedAt: number | null
+  createdAt: number
+  updatedAt: number
 }
 
 /**

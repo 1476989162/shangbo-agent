@@ -7,6 +7,7 @@ export const IPC = {
   conversationMessages: 'conversation:messages',
   conversationSetLeaf: 'conversation:setLeaf',
   conversationSetWorkingDir: 'conversation:setWorkingDir',
+  conversationSetMode: 'conversation:setMode',
   conversationExport: 'conversation:export',
 
   chatSend: 'chat:send',
@@ -52,7 +53,20 @@ export const IPC = {
   remoteDevices: 'remote:devices',
   remoteRevoke: 'remote:revoke',
   remoteDisconnect: 'remote:disconnect',
-  remoteEvent: 'remote:event'
+  remoteEvent: 'remote:event',
+
+  autonomousList: 'autonomous:list',
+  autonomousSave: 'autonomous:save',
+  autonomousDelete: 'autonomous:delete',
+  autonomousSetEnabled: 'autonomous:setEnabled',
+  autonomousRunNow: 'autonomous:runNow',
+  autonomousRuns: 'autonomous:runs',
+  autonomousPause: 'autonomous:pause',
+  autonomousResume: 'autonomous:resume',
+  autonomousStatus: 'autonomous:status',
+  lessonsList: 'lessons:list',
+  lessonsSave: 'lessons:save',
+  lessonsDelete: 'lessons:delete'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

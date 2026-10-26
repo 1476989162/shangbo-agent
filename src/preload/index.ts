@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type { ShangboApi } from '../shared/api'
 import type {
+  AgentMode,
   AgentEvent,
   ApprovalDecision,
   ProviderInput,
@@ -22,6 +23,7 @@ const api: ShangboApi = {
     setLeaf: (conversationId, leafId) =>
       ipcRenderer.invoke(IPC.conversationSetLeaf, conversationId, leafId),
     setWorkingDir: (id, dir) => ipcRenderer.invoke(IPC.conversationSetWorkingDir, id, dir),
+    setMode: (id, mode: AgentMode | null) => ipcRenderer.invoke(IPC.conversationSetMode, id, mode),
     export: (id) => ipcRenderer.invoke(IPC.conversationExport, id)
   },
 
@@ -109,6 +111,24 @@ const api: ShangboApi = {
     offEvent: () => {
       ipcRenderer.removeAllListeners(IPC.updateEvent)
     }
+  },
+
+  autonomous: {
+    list: () => ipcRenderer.invoke(IPC.autonomousList),
+    save: (input) => ipcRenderer.invoke(IPC.autonomousSave, input),
+    remove: (id) => ipcRenderer.invoke(IPC.autonomousDelete, id),
+    setEnabled: (id, enabled) => ipcRenderer.invoke(IPC.autonomousSetEnabled, id, enabled),
+    runNow: (id) => ipcRenderer.invoke(IPC.autonomousRunNow, id),
+    runs: (taskId) => ipcRenderer.invoke(IPC.autonomousRuns, taskId),
+    pause: () => ipcRenderer.invoke(IPC.autonomousPause),
+    resume: () => ipcRenderer.invoke(IPC.autonomousResume),
+    status: () => ipcRenderer.invoke(IPC.autonomousStatus)
+  },
+
+  lessons: {
+    list: (projectPath) => ipcRenderer.invoke(IPC.lessonsList, projectPath),
+    save: (input) => ipcRenderer.invoke(IPC.lessonsSave, input),
+    remove: (id) => ipcRenderer.invoke(IPC.lessonsDelete, id)
   }
 }
 

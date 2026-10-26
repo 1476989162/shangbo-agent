@@ -1,9 +1,14 @@
 import type {
+  AgentMode,
   AgentEvent,
   AppInfo,
   ApprovalDecision,
+  AutonomousRun,
+  AutonomousTask,
+  AutonomousTaskInput,
   ContextStatics,
   Conversation,
+  Lesson,
   Message,
   Provider,
   ProviderInput,
@@ -24,13 +29,21 @@ export interface ShangboApi {
   conversation: {
     list(): Promise<Conversation[]>
     create(
-      input?: string | { title?: string; workingDir?: string | null; projectId?: string | null }
+      input?:
+        | string
+        | {
+            title?: string
+            workingDir?: string | null
+            projectId?: string | null
+            mode?: AgentMode | null
+          }
     ): Promise<Conversation>
     rename(id: string, title: string): Promise<Conversation | null>
     remove(id: string): Promise<boolean>
     messages(id: string): Promise<{ messages: Message[]; activeLeafId: string | null }>
     setLeaf(conversationId: string, leafId: string): Promise<boolean>
     setWorkingDir(id: string, dir: string | null): Promise<Conversation | null>
+    setMode(id: string, mode: AgentMode | null): Promise<Conversation | null>
     export(id: string): Promise<ExportResult>
   }
 
@@ -112,5 +125,30 @@ export interface ShangboApi {
     disconnect(): Promise<boolean>
     onEvent(handler: (status: string, detail: string) => void): void
     offEvent(): void
+  }
+
+  autonomous: {
+    list(): Promise<AutonomousTask[]>
+    save(input: AutonomousTaskInput): Promise<AutonomousTask>
+    remove(id: string): Promise<boolean>
+    setEnabled(id: string, enabled: boolean): Promise<AutonomousTask | null>
+    runNow(id: string): Promise<{ runRecordId: string; conversationId: string }>
+    runs(taskId?: string): Promise<AutonomousRun[]>
+    pause(): Promise<boolean>
+    resume(): Promise<boolean>
+    status(): Promise<{ paused: boolean; enabled: boolean }>
+  }
+
+  lessons: {
+    list(projectPath?: string | null): Promise<Lesson[]>
+    save(input: {
+      id?: string
+      scope?: 'global' | 'project'
+      projectPath?: string | null
+      title: string
+      content: string
+      confidence?: number
+    }): Promise<Lesson>
+    remove(id: string): Promise<boolean>
   }
 }

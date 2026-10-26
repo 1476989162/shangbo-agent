@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type {
+  AgentMode,
   AgentEvent,
   ContentBlock,
   Conversation,
@@ -124,7 +125,8 @@ export const useChatStore = defineStore('chat', () => {
   const userName = ref('Administrator')
   const currentBranch = ref('main')
   const worktreeEnabled = ref(false)
-  const bypassPermissions = ref(false)
+  /** 许愿模式的免审批开关；与主进程 agent.wish.autoApproveWorkspace 同源。 */
+  const bypassPermissions = ref(true)
   const collapsedProjects = ref<Record<string, boolean>>({})
 
   // 思考强度 (Effort)
@@ -136,11 +138,25 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // TRAE 工作流：双模式 (问答 Chat vs 建造者 Builder)
-  const agentMode = ref<'builder' | 'chat'>('builder')
+  const agentMode = ref<AgentMode>('builder')
 
-  async function setAgentMode(mode: 'builder' | 'chat'): Promise<void> {
+  async function setAgentMode(mode: AgentMode): Promise<void> {
     agentMode.value = mode
+    const conversationId = activeConversationId.value
+    if (conversationId) {
+      const updated = await window.shangbo.conversation.setMode(conversationId, mode)
+      if (updated) {
+        const index = conversations.value.findIndex((item) => item.id === updated.id)
+        if (index >= 0) conversations.value[index] = updated
+      }
+    }
     await window.shangbo.settings.set('agent.mode', mode)
+  }
+
+  function cycleAgentMode(): void {
+    const order: AgentMode[] = ['builder', 'wish', 'chat']
+    const next = order[(order.indexOf(agentMode.value) + 1) % order.length]
+    void setAgentMode(next)
   }
 
   /**
@@ -636,6 +652,8 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     activeConversationId.value = id
+    const conversation = conversations.value.find((c) => c.id === id)
+    if (conversation?.mode) agentMode.value = conversation.mode
     const payload = await window.shangbo.conversation.messages(id)
     messages.value = payload.messages
     activeLeafId.value = payload.activeLeafId
@@ -661,11 +679,13 @@ export const useChatStore = defineStore('chat', () => {
     title?: string
     workingDir?: string | null
     projectId?: string | null
+    mode?: AgentMode | null
   }): Promise<Conversation> {
     const conversation = await window.shangbo.conversation.create({
       title: options?.title ?? '新对话',
       workingDir: options?.workingDir ?? null,
-      projectId: options?.projectId ?? null
+      projectId: options?.projectId ?? null,
+      mode: options?.mode ?? null
     })
     conversations.value.unshift(conversation)
     await openConversation(conversation.id)
@@ -936,7 +956,7 @@ export const useChatStore = defineStore('chat', () => {
       const settings = await window.shangbo.settings.getAll()
       const effort = settings['agent.effort'] as EffortLevel | undefined
       if (effort) effortLevel.value = effort
-      const mode = settings['agent.mode'] as 'builder' | 'chat' | undefined
+      const mode = settings['agent.mode'] as AgentMode | undefined
       if (mode) agentMode.value = mode
       const savedHidden = settings['chat.hiddenModels'] as string[] | undefined
       if (Array.isArray(savedHidden)) hiddenModels.value = savedHidden
@@ -985,6 +1005,7 @@ export const useChatStore = defineStore('chat', () => {
     effortLevel,
     agentMode,
     setAgentMode,
+    cycleAgentMode,
     autoContinue,
     canGoBack,
     canGoForward,

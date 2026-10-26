@@ -18,6 +18,11 @@ export const SettingSchemas: Record<string, z.ZodType> = {
     .int()
     .min(1, '单轮步数上限需为 1–500 之间的整数')
     .max(500, '单轮步数上限需为 1–500 之间的整数'),
+  'agent.wishMaxSteps': z
+    .number()
+    .int()
+    .min(1, '许愿模式步数上限需为 1–500 之间的整数')
+    .max(500, '许愿模式步数上限需为 1–500 之间的整数'),
   'agent.toolResultMaxChars': z
     .number()
     .int()
@@ -36,6 +41,13 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 布尔开关
   'agent.computerUse': z.boolean(),
   'agent.readOnly': z.boolean(),
+  'agent.wish.enabled': z.boolean(),
+  'agent.wish.autoApproveWorkspace': z.boolean(),
+  'agent.wish.autoVerify': z.boolean(),
+  'agent.wish.evolve': z.boolean(),
+  'agent.wish.verifyRetries': z.number().int().min(0).max(10),
+  'agent.wish.dailyRunLimit': z.number().int().min(1).max(100),
+  'agent.autonomous.enabled': z.boolean(),
   'agent.notifyCompletion': z.boolean(),
   'agent.reduceMotion': z.boolean(),
   'cowork.useMemory': z.boolean(),
@@ -72,7 +84,9 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'tools.autoApprove': z.array(z.string().max(200)).max(200),
   // 结构化数组：元素必须是对象，具体字段由各自读取方容错
   'agent.mcp.servers': z.array(z.record(z.string(), z.unknown())).max(100),
-  'cowork.memories': z.array(z.record(z.string(), z.unknown())).max(500)
+  'cowork.memories': z.array(z.record(z.string(), z.unknown())).max(500),
+  'agent.wish.verifyCommand': z.string().max(2000),
+  'agent.wish.acceptance': z.string().max(10_000)
 }
 
 /**

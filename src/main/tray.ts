@@ -4,6 +4,7 @@ import { markQuitting, showMainWindow, toggleMainWindow } from './windows/mainWi
 import { checkFromTray } from './update'
 import { remoteService, type PairingInfo } from './remote/service'
 import type { RemoteStatus } from './remote/client'
+import { autonomousScheduler } from './autonomous/scheduler'
 
 let tray: Tray | null = null
 /** 当前远程状态（托盘菜单与图标用，remoteService 回调更新）。 */
@@ -51,6 +52,14 @@ function refreshTrayMenu(): void {
   const template: Electron.MenuItemConstructorOptions[] = [
     { label: '打开尚搏 Agent', click: () => showMainWindow() },
     { label: '检查更新…', click: () => checkFromTray() },
+    {
+      label: autonomousScheduler.isPaused() ? '继续许愿式自主运行' : '暂停许愿式自主运行',
+      click: () => {
+        if (autonomousScheduler.isPaused()) autonomousScheduler.resume()
+        else autonomousScheduler.pause()
+        refreshTrayMenu()
+      }
+    },
     { type: 'separator' },
     remoteOn
       ? {

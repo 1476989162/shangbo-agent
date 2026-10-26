@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import log from 'electron-log/main'
 import { getDb } from './index'
 import type {
+  AgentMode,
   ContentBlock,
   Conversation,
   Message,
@@ -22,6 +23,7 @@ interface ConversationRow {
   provider_id: string | null
   model: string | null
   system_prompt: string | null
+  mode: string | null
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -51,6 +53,7 @@ function toConversation(row: ConversationRow): Conversation {
     providerId: row.provider_id,
     model: row.model,
     systemPrompt: row.system_prompt,
+    mode: (row.mode as AgentMode | null) ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     archivedAt: row.archived_at
@@ -102,8 +105,8 @@ export function createConversation(input?: Partial<Conversation>): Conversation 
   getDb()
     .prepare(
       `INSERT INTO conversations
-         (id, title, project_id, working_dir, provider_id, model, system_prompt, created_at, updated_at)
-       VALUES (@id, @title, @projectId, @workingDir, @providerId, @model, @systemPrompt, @createdAt, @updatedAt)`
+         (id, title, project_id, working_dir, provider_id, model, system_prompt, mode, created_at, updated_at)
+       VALUES (@id, @title, @projectId, @workingDir, @providerId, @model, @systemPrompt, @mode, @createdAt, @updatedAt)`
     )
     .run({
       id,
@@ -113,6 +116,7 @@ export function createConversation(input?: Partial<Conversation>): Conversation 
       providerId: input?.providerId ?? null,
       model: input?.model ?? null,
       systemPrompt: input?.systemPrompt ?? null,
+      mode: input?.mode ?? null,
       createdAt: now,
       updatedAt: now
     })
@@ -125,7 +129,7 @@ export function createConversation(input?: Partial<Conversation>): Conversation 
 export function updateConversation(
   id: string,
   patch: Partial<
-    Pick<Conversation, 'title' | 'providerId' | 'model' | 'systemPrompt' | 'workingDir'>
+    Pick<Conversation, 'title' | 'providerId' | 'model' | 'systemPrompt' | 'workingDir' | 'mode'>
   >
 ): void {
   const current = getConversation(id)
@@ -134,7 +138,8 @@ export function updateConversation(
     .prepare(
       `UPDATE conversations
        SET title = @title, provider_id = @providerId, model = @model,
-           system_prompt = @systemPrompt, working_dir = @workingDir, updated_at = @updatedAt
+           system_prompt = @systemPrompt, working_dir = @workingDir, mode = @mode,
+           updated_at = @updatedAt
        WHERE id = @id`
     )
     .run({
@@ -145,6 +150,7 @@ export function updateConversation(
       model: patch.model !== undefined ? patch.model : current.model,
       systemPrompt: patch.systemPrompt !== undefined ? patch.systemPrompt : current.systemPrompt,
       workingDir: patch.workingDir !== undefined ? patch.workingDir : current.workingDir,
+      mode: patch.mode !== undefined ? patch.mode : current.mode,
       updatedAt: Date.now()
     })
 }
