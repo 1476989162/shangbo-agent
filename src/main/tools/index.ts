@@ -196,6 +196,111 @@ const codexStatus: ToolDefinition = {
   }
 }
 
+/**
+ * Claude Code CLI 桥接（外部 Agent 调用 Claude 干活的正统通道）。
+ * 已验证：claude -p --output-format json < NUL 可回结果，result 字段即答案。
+ * 坑：Windows 下 stdin 不关会等 3 秒（Warning: no stdin data），管道喂中文 GBK 无碍但多等；
+ * 用 execFile 直调默认 stdin ignore 即等价 < NUL。输出 text 干净、json 带用量。
+ * 当前本机走 magpie 网关 trae-cn/deepseek-v4.1-flash-max，0.053 美元/次量级。
+ * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
+ */
+async function runClaudeCli(
+  prompt: string,
+  cwd: string | undefined,
+  model: string | undefined,
+  signal: AbortSignal
+): Promise<string> {
+  const { execFile } = await import('node:child_process')
+  const execFileAsync = promisify(execFile)
+  const args = ['-p', prompt, '--output-format', 'json']
+  if (model) args.push('--model', model)
+  try {
+    const { stdout } = await execFileAsync('claude', args, {
+      cwd,
+      timeout: 300_000,
+      maxBuffer: 8 * 1024 * 1024,
+      signal,
+      windowsHide: true
+    })
+    try {
+      const parsed = JSON.parse(stdout) as { result?: string }
+      if (typeof parsed.result === 'string' && parsed.result.trim()) {
+        return truncate(parsed.result.trim())
+      }
+    } catch {
+      // 非 JSON 直接回原文
+    }
+    return truncate(stdout.trim() || '（Claude 无输出）')
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; message?: string }
+    // claude 失败时 stdout 里可能已有 JSON 结果，先捞
+    if (failure.stdout?.trim()) {
+      try {
+        const parsed = JSON.parse(failure.stdout) as { result?: string }
+        if (typeof parsed.result === 'string' && parsed.result.trim()) {
+          return truncate(`${parsed.result.trim()}\n\n--- Claude 退出异常 ---\n${describeError(error)}`)
+        }
+      } catch {
+        // 不是 JSON 则走常规错误通道
+      }
+    }
+    const parts = ['--- Claude 调用失败 ---']
+    if (failure.stdout?.trim()) parts.push(failure.stdout.trim())
+    if (failure.stderr?.trim()) parts.push(failure.stderr.trim())
+    if (parts.length === 1) parts.push(failure.message ?? String(error))
+    return truncate(parts.join('\n'))
+  }
+}
+
+const claudeAsk: ToolDefinition = {
+  name: 'claude_ask',
+  description:
+    '调用本机 Claude Code CLI（claude -p）让 Claude 干活并回结果。适合代码问答、改写、审查等一次任务；要在指定工程目录下问就传 cwd。需要本机已装 CLI 且已登录。',
+  parameters: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: '要发给 Claude 的问题/任务' },
+      cwd: { type: 'string', description: '工作目录，缺省为当前项目目录' },
+      model: { type: 'string', description: '模型名，缺省用 Claude 默认' }
+    },
+    required: ['prompt']
+  },
+  requiresApproval: true,
+  approvalReason: '将调用本机 Claude CLI 并消耗你的 Claude 额度，结果会回传给尚搏。',
+  async execute(input, context) {
+    const { prompt, cwd, model } = z
+      .object({
+        prompt: z.string().min(1).max(8000),
+        cwd: z.string().optional(),
+        model: z.string().optional()
+      })
+      .parse(input)
+    const dir = cwd ? resolveUserPath(context, cwd) : (context.workingDirectory ?? undefined)
+    if (dir) guardPrivatePath(dir)
+    return runClaudeCli(prompt, dir, model, context.signal)
+  }
+}
+
+const claudeStatus: ToolDefinition = {
+  name: 'claude_status',
+  description: '查看本机 Claude CLI 的版本（claude --version）。不消耗额度，接线前先查这个。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute(_input, context) {
+    const { execFile } = await import('node:child_process')
+    const execFileAsync = promisify(execFile)
+    try {
+      const { stdout } = await execFileAsync('claude', ['--version'], {
+        windowsHide: true,
+        signal: context.signal
+      })
+      return truncate(stdout.trim() || '（Claude 无输出）')
+    } catch (error) {
+      return truncate(`--- Claude 调用失败 ---\n${describeError(error)}`)
+    }
+  }
+}
+
 export interface ToolContext {
   conversationId: string
   /**
@@ -942,6 +1047,8 @@ const definitions: ToolDefinition[] = [
   qoderStatus,
   codexAsk,
   codexStatus,
+  claudeAsk,
+  claudeStatus,
   computerScreenshot,
   computerClick,
   computerType,
