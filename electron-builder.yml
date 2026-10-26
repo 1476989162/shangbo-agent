@@ -28,7 +28,11 @@ win:
     - target: nsis
       arch:
         - x64
-  artifactName: ${productName}-${version}-setup.${ext}
+  # 名字必须是纯 ASCII 且与 latest.yml 的 path 完全一致：electron-builder 生成更新
+  # 元数据时会把含非 ASCII 的 ${productName} 回退成 `${name}-setup-${version}.${ext}`，
+  # 客户端是按 latest.yml 里的文件名去 Releases 下载的，对不上就 404（页面显示名由
+  # Release 资产的 label 还原中文，不必靠文件名）。
+  artifactName: shangbo-agent-setup-${version}.${ext}
 
 nsis:
   oneClick: false
