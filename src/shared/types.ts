@@ -357,6 +357,14 @@ export interface AppInfo {
   userDataPath: string
   dbPath: string
   username?: string
+  /** 安装目录（app.getAppPath 上级）。E盘Program Files场景靠它定位。 */
+  installPath?: string
+  /** 安装目录是否可写。false=Program Files类目录，自动更新会静默失败。 */
+  installWritable?: boolean
+  /** 更新日志路径（electron-log文件），设置页“导出更新日志”用。 */
+  logPath?: string
+  /** 更新通道：github=走Releases，generic=被SHANGBO_UPDATE_FEED_URL覆盖，none=开发态。 */
+  updateChannel?: 'github' | 'generic' | 'none'
 }
 
 /* ------------------------------------------------------------------ */

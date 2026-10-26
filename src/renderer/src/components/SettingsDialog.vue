@@ -1544,6 +1544,11 @@ async function toggleAutoScreenshot(): Promise<void> {
           <div class="section-block">
             <h3 class="pane-title">应用更新</h3>
 
+            <div v-if="appInfo && appInfo.installWritable === false" class="update-warn">
+              当前装在 <span class="mono">{{ appInfo.installPath || '系统目录' }}</span>，该目录不可写，自动更新下载后会安装失败。建议用默认目录重装一次，之后即可自动更新；或关掉自动检查改手动安装。
+            </div>
+            <div v-if="appInfo?.installPath" class="update-path subtle">安装目录：<span class="mono">{{ appInfo.installPath }}</span> · 更新通道：<span class="mono">{{ appInfo.updateChannel || 'github' }}</span></div>
+
             <div class="update-head">
               <div class="row-text">
                 <span class="setting-label">当前版本 {{ appInfo?.version || '—' }}</span>
@@ -4310,6 +4315,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 /* ---------------- 应用更新 ---------------- */
+.update-warn { padding: 10px 12px; border: 1px solid #d97706; background: rgba(217,119,6,0.1); border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.update-path { font-size: 11.5px; margin-top: 8px; }
 .update-head {
   display: flex;
   align-items: flex-start;

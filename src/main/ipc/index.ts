@@ -18,6 +18,7 @@ import {
 import { probeProvider } from '../providers/gateway'
 import { mcpManager } from '../mcp/manager'
 import { updateService } from '../update'
+import { getInstallInfo } from '../installInfo'
 import { exportConversation } from '../exporter'
 import { markQuitting } from '../windows/mainWindow'
 import {
@@ -283,7 +284,8 @@ export function registerIpcHandlers(): void {
       platform: process.platform,
       userDataPath: app.getPath('userData'),
       dbPath: getDbPath(),
-      username: process.env.USERNAME || process.env.USER || 'Administrator'
+      username: process.env.USERNAME || process.env.USER || 'Administrator',
+      ...getInstallInfo()
     }
   })
 
