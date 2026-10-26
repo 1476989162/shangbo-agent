@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AppInfo, Provider, ProviderKind, UpdateState } from '@shared/types'
+import type { AppInfo, UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
 import ProviderSettings from './ProviderSettings.vue'
 
@@ -109,125 +109,10 @@ const readOnlyReview = ref(false)
 // Token 用量统计周期
 const usageDays = ref<7 | 30 | 90>(30)
 
-// 供应商管理表单
-interface ProviderForm {
-  id?: string
-  name: string
-  kind: ProviderKind
-  baseUrl: string
-  apiKey: string
-  modelsText: string
-  headersText: string
-  enabled: boolean
-  priority: number
-}
-
-const providers = ref<Provider[]>([])
-const editing = ref<ProviderForm | null>(null)
-const busy = ref(false)
+// 供应商页已拆至 ProviderSettings.vue（旧逻辑已清理）
 const feedback = ref<{ ok: boolean; message: string } | null>(null)
 const appInfo = ref<AppInfo | null>(null)
-const providerSearch = ref('')
-const selectedProviderId = ref<string | null>(null)
-const detailModelTab = ref<'all' | 'selected'>('all')
-const detailModelQuery = ref('')
-const detailModelExpanded = ref(false)
-const detailShowKey = ref(false)
 
-const filteredProviders = computed(() => {
-  const q = providerSearch.value.trim().toLowerCase()
-  if (!q) return providers.value
-  return providers.value.filter(
-    (p) =>
-      p.name.toLowerCase().includes(q) ||
-      p.baseUrl.toLowerCase().includes(q) ||
-      p.models.some((m) => m.toLowerCase().includes(q))
-  )
-})
-const selectedProvider = computed(
-  () => providers.value.find((p) => p.id === selectedProviderId.value) ?? null
-)
-function providerHost(url: string): string {
-  try {
-    return new URL(url).host || url
-  } catch {
-    return url
-  }
-}
-function providerInitial(name: string): string {
-  const t = (name || '?').trim()
-  return t.slice(0, 2).toUpperCase()
-}
-function openProviderDetail(p: Provider): void {
-  selectedProviderId.value = p.id
-  detailModelTab.value = 'all'
-  detailModelQuery.value = ''
-  detailModelExpanded.value = false
-  detailShowKey.value = false
-  startEdit(p)
-}
-function closeProviderDetail(): void {
-  selectedProviderId.value = null
-  editing.value = null
-}
-const detailVisibleModels = computed(() => {
-  const p = selectedProvider.value
-  if (!p) return []
-  const q = detailModelQuery.value.trim().toLowerCase()
-  let list = [...p.models]
-  if (q) list = list.filter((m) => m.toLowerCase().includes(q))
-  if (detailModelTab.value === 'selected') {
-    list = list.filter((m) => !store.isModelHidden(p.id, m))
-  }
-  return list
-})
-async function toggleProviderEnabled(p: Provider): Promise<void> {
-  busy.value = true
-  try {
-    await window.shangbo.provider.upsert({
-      id: p.id,
-      name: p.name,
-      kind: p.kind,
-      baseUrl: p.baseUrl,
-      models: p.models,
-      enabled: !p.enabled,
-      priority: p.priority,
-      headers: p.headers
-    })
-    await store.loadProviders()
-    providers.value = await window.shangbo.provider.list()
-  } finally {
-    busy.value = false
-  }
-}
-const detailNewModel = ref('')
-function startCreateNew(): void {
-  startCreate()
-  selectedProviderId.value = '__new'
-  detailModelTab.value = 'all'
-  detailModelQuery.value = ''
-  detailModelExpanded.value = false
-  detailShowKey.value = false
-}
-async function selectFreeOnly(): Promise<void> {
-  const p = selectedProvider.value
-  if (!p) return
-  for (const m of p.models) {
-    const free = m.toLowerCase().includes('free')
-    await store.setModelHidden(p.id, m, !free)
-  }
-}
-function addDetailModel(): void {
-  if (!editing.value) return
-  const v = detailNewModel.value.trim()
-  if (!v) return
-  const cur = parseModels(editing.value.modelsText)
-  if (!cur.includes(v)) {
-    cur.push(v)
-    editing.value.modelsText = cur.join('\n')
-  }
-  detailNewModel.value = ''
-}
 
 /* ------------------------------------------------------------------ */
 /* 手机远程：开关 / 中转地址 / 审批策略 / 配对 / 设备管理               */
@@ -403,23 +288,9 @@ async function toggleAutoDownload(): Promise<void> {
 const budgetTokens = ref(32000)
 const autoApprove = ref<string[]>([])
 
-const isEditingExisting = computed(() => Boolean(editing.value?.id))
 
-function blankForm(): ProviderForm {
-  return {
-    name: '',
-    kind: 'openai-compatible',
-    baseUrl: 'https://api.deepseek.com/v1',
-    apiKey: '',
-    modelsText: '',
-    headersText: '',
-    enabled: true,
-    priority: 50
-  }
-}
 
 async function load(): Promise<void> {
-  providers.value = await window.shangbo.provider.list()
   const settings = await window.shangbo.settings.getAll()
   budgetTokens.value = (settings['agent.contextBudgetTokens'] as number) ?? 32000
   autoApprove.value = (settings['tools.autoApprove'] as string[]) ?? []
@@ -548,7 +419,6 @@ watch(
   (open) => {
     if (!open) return
     feedback.value = null
-    editing.value = null
     if (props.initialTab) {
       activeTab.value = props.initialTab as SettingsTab
     }
@@ -593,141 +463,13 @@ async function toggleReadOnly(val: boolean): Promise<void> {
 }
 
 // 供应商管理逻辑
-function startCreate(): void {
-  feedback.value = null
-  editing.value = blankForm()
-}
 
-function startEdit(provider: Provider): void {
-  feedback.value = null
-  editing.value = {
-    id: provider.id,
-    name: provider.name,
-    kind: provider.kind,
-    baseUrl: provider.baseUrl,
-    apiKey: '',
-    modelsText: provider.models.join('\n'),
-    headersText: Object.entries(provider.headers)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join('\n'),
-    enabled: provider.enabled,
-    priority: provider.priority
-  }
-}
 
-function parseModels(text: string): string[] {
-  return text
-    .split(/[\n,，]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
 
-function parseHeaders(text: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const colon = trimmed.indexOf(':')
-    if (colon < 0) continue
-    const key = trimmed.slice(0, colon).trim()
-    const value = trimmed.slice(colon + 1).trim()
-    if (key) result[key] = value
-  }
-  return result
-}
 
-async function saveProvider(): Promise<void> {
-  if (!editing.value) return
-  const form = editing.value
-  const models = parseModels(form.modelsText)
-  if (models.length === 0) {
-    feedback.value = { ok: false, message: '请至少指定一个模型名' }
-    return
-  }
 
-  busy.value = true
-  feedback.value = null
-  try {
-    await window.shangbo.provider.upsert({
-      id: form.id,
-      name: form.name.trim(),
-      kind: form.kind,
-      baseUrl: form.baseUrl.trim(),
-      apiKey: form.apiKey.trim() || undefined,
-      models,
-      enabled: form.enabled,
-      priority: Number(form.priority) || 50,
-      headers: parseHeaders(form.headersText)
-    })
-    await store.loadProviders()
-    providers.value = await window.shangbo.provider.list()
-    editing.value = null
-    feedback.value = { ok: true, message: '供应商配置保存成功' }
-  } catch (error) {
-    feedback.value = { ok: false, message: error instanceof Error ? error.message : String(error) }
-  } finally {
-    busy.value = false
-  }
-}
 
-async function testProvider(provider: Provider): Promise<void> {
-  busy.value = true
-  feedback.value = null
-  try {
-    const result = await window.shangbo.provider.test(provider.id)
-    feedback.value = {
-      ok: result.ok,
-      message: result.ok
-        ? `测试成功（响应延迟 ${result.latencyMs}ms）：${result.message}`
-        : `测试失败：${result.message}`
-    }
-  } catch (error) {
-    feedback.value = { ok: false, message: error instanceof Error ? error.message : String(error) }
-  } finally {
-    busy.value = false
-  }
-}
 
-async function removeProvider(provider: Provider): Promise<void> {
-  if (!confirm(`确定要移除供应商「${provider.name}」吗？`)) return
-  busy.value = true
-  try {
-    await window.shangbo.provider.remove(provider.id)
-    await store.loadProviders()
-    providers.value = await window.shangbo.provider.list()
-    feedback.value = { ok: true, message: '已移除供应商' }
-  } catch (error) {
-    feedback.value = { ok: false, message: error instanceof Error ? error.message : String(error) }
-  } finally {
-    busy.value = false
-  }
-}
-
-async function fetchModels(): Promise<void> {
-  if (!editing.value) return
-  const form = editing.value
-  busy.value = true
-  feedback.value = null
-  try {
-    const models = await window.shangbo.provider.fetchModels({
-      id: form.id,
-      name: form.name.trim() || '临时测试',
-      kind: form.kind,
-      baseUrl: form.baseUrl.trim(),
-      apiKey: form.apiKey.trim() || undefined,
-      models: [],
-      enabled: true,
-      priority: 50,
-      headers: parseHeaders(form.headersText)
-    })
-    form.modelsText = models.join('\n')
-    feedback.value = { ok: true, message: `成功拉取到 ${models.length} 个模型` }
-  } catch (error) {
-    feedback.value = { ok: false, message: `拉取失败：${error instanceof Error ? error.message : String(error)}` }
-  } finally {
-    busy.value = false
-  }
-}
 
 async function clearAutoApprove(): Promise<void> {
   autoApprove.value = []
@@ -780,21 +522,8 @@ async function saveBudgetTokens(): Promise<void> {
 // ========================================================
 // 模型显隐管理快捷方法 (需求 2)
 // ========================================================
-function getVisibleModelsCount(provider: Provider): number {
-  return provider.models.filter((m) => !store.isModelHidden(provider.id, m)).length
-}
 
-async function showAllProviderModels(provider: Provider): Promise<void> {
-  for (const m of provider.models) {
-    await store.setModelHidden(provider.id, m, false)
-  }
-}
 
-async function hideAllProviderModels(provider: Provider): Promise<void> {
-  for (const m of provider.models) {
-    await store.setModelHidden(provider.id, m, true)
-  }
-}
 
 // ========================================================
 // 插件中心 (Plugins) 与技能 (Skills) 数据与状态 (对标图片 2)

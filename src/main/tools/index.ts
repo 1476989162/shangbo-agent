@@ -449,7 +449,14 @@ const listDirectory: ToolDefinition = {
     const { path } = z.object({ path: z.string().min(1) }).parse(input)
     const target = resolveUserPath(context, path)
     guardPrivatePath(target)
-    const entries = await readdir(target, { withFileTypes: true })
+    let entries;
+    try {
+      entries = await readdir(target, { withFileTypes: true })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/ENOTDIR|not a directory/i.test(msg)) throw new Error(`路径 ${target} 是文件不是目录：要读内容请用 read_file，要列目录请传其父目录。`);
+      throw e;
+    }
 
     const lines = await Promise.all(
       entries.slice(0, 500).map(async (entry) => {
@@ -492,6 +499,12 @@ const readFileTool: ToolDefinition = {
 
     const target = resolveUserPath(context, path)
     guardPrivatePath(target)
+    try {
+      const st = await stat(target);
+      if (st.isDirectory()) throw new Error(`路径 ${target} 是目录不是文件：要列内容请用 list_directory，要读文件请传具体文件路径。`);
+    } catch (e) {
+      if (e instanceof Error && /是目录不是文件/.test(e.message)) throw e;
+    }
     const limit = maxBytes ?? 262_144
     const offset = offsetBytes ?? 0
     const info = await stat(target)
@@ -593,14 +606,29 @@ const patchFileTool: ToolDefinition = {
     const target = resolveUserPath(context, path)
     guardPrivatePath(target)
     const raw = await readFile(target, 'utf8')
-    if (!raw.includes(targetContent)) {
+    // CRLF/LF归一：调用方按LF传锚点、文件是CRLF时同样命中
+    const normRaw = raw.replace(/\r\n/g, '\n');
+    const normTarget = targetContent.replace(/\r\n/g, '\n');
+    const hitExact = raw.includes(targetContent);
+    const hitNorm = normRaw.includes(normTarget);
+    if (!hitExact && !hitNorm) {
       throw new Error(`在文件 ${target} 中未找到指定的 targetContent。请先调用 read_file 确认目标文件的精确代码块后再重试。`)
     }
-    const count = raw.split(targetContent).length - 1
+    const count = hitExact ? raw.split(targetContent).length - 1 : normRaw.split(normTarget).length - 1
     if (count > 1) {
       throw new Error(`在文件 ${target} 中匹配到 ${count} 处完全相同的内容，无法唯一定位。请在 targetContent 中包含更多上下文行以保证唯一性。`)
     }
-    const updated = raw.replace(targetContent, () => replacementContent)
+    const updated = hitExact ? raw.replace(targetContent, () => replacementContent) : (() => {
+      // 按行映射回原文位置替换，避免换行符差异导致替换后文件混入LF
+      const idx = normRaw.indexOf(normTarget);
+      const beforeNorm = normRaw.slice(0, idx);
+      const lineNo = beforeNorm.split('\n').length - 1;
+      const lines = raw.split('\n');
+      const startLine = lines.slice(0, lineNo).join('\n').length + (lineNo > 0 ? 1 : 0);
+      const targetLines = normTarget.split('\n').length;
+      const endLine = lines.slice(0, lineNo + targetLines).join('\n').length + (lineNo + targetLines > 0 ? 1 : 0);
+      return raw.slice(0, startLine) + replacementContent + raw.slice(endLine);
+    })()
     await writeFile(target, updated, 'utf8')
     return `已成功对 ${target} 进行局部精确补丁更新。`
   }

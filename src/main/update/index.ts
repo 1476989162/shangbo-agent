@@ -5,6 +5,7 @@ import type { UpdateInfo } from 'electron-updater'
 import { IPC } from '../../shared/ipc'
 import type { UpdateState } from '../../shared/types'
 import { getSetting } from '../settings'
+import { FEED_URL_ENV } from '../installInfo'
 import { showMainWindow } from '../windows/mainWindow'
 import {
   canDownload as canDownloadState,
@@ -19,12 +20,6 @@ import {
 const FIRST_CHECK_DELAY_MS = 20_000
 /** 之后每 24 小时检查一次。 */
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
-/**
- * 测试用的更新源覆盖：设置 SHANGBO_UPDATE_FEED_URL 后改走 generic provider（本地
- * 静态服务器或自建镜像），不设置时走打包进 app-update.yml 的 GitHub Releases。
- * 只影响"去哪儿找"，不放宽任何校验：latest.yml 的 sha512 仍会逐字节校验。
- */
-const FEED_URL_ENV = 'SHANGBO_UPDATE_FEED_URL'
 
 /**
  * GitHub Release 的 releaseNotes 形态不稳定：单条时是字符串，多条时是

@@ -248,6 +248,57 @@ describe('Cursor / Cline 级代码补丁工具 (patch_file)', () => {
   })
 })
 
+describe('文件工具容错（CRLF归一/目录误传）', () => {
+  it('patch_file LF锚点可命中CRLF文件', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-crlf-'));
+    const f = join(dir, 'a.txt');
+    try {
+      await (await import('node:fs/promises')).writeFile(f, 'line1\r\nline2 old\r\nline3', 'utf8');
+      const tool = toolRegistry.get('patch_file')!;
+      const res = (await tool.execute(
+        { path: f, targetContent: 'line2 old', replacementContent: 'line2 new' },
+        { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal }
+      )) as string;
+      expect(res).toContain('局部精确补丁更新');
+      const updated = await (await import('node:fs/promises')).readFile(f, 'utf8');
+      expect(updated).toContain('line2 new');
+    } finally {
+      await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('list_directory传文件给友好提示', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-enotdir-'));
+    const f = join(dir, 'a.txt');
+    try {
+      await (await import('node:fs/promises')).writeFile(f, 'x', 'utf8');
+      const tool = toolRegistry.get('list_directory')!;
+      await expect(tool.execute({ path: f }, { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是文件不是目录');
+    } finally {
+      await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('read_file传目录给友好提示', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-isdir-'));
+    try {
+      const tool = toolRegistry.get('read_file')!;
+      await expect(tool.execute({ path: dir }, { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是目录不是文件');
+    } finally {
+      await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('search_files 行号与截断标记', () => {
   it('内容命中返回 file:line: snippet', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'shangbo-search-test-'))
