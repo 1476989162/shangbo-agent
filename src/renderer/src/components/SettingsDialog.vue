@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AppInfo, Provider, ProviderKind, UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
+import ProviderSettings from './ProviderSettings.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -125,6 +126,107 @@ const editing = ref<ProviderForm | null>(null)
 const busy = ref(false)
 const feedback = ref<{ ok: boolean; message: string } | null>(null)
 const appInfo = ref<AppInfo | null>(null)
+const providerSearch = ref('')
+const selectedProviderId = ref<string | null>(null)
+const detailModelTab = ref<'all' | 'selected'>('all')
+const detailModelQuery = ref('')
+const detailModelExpanded = ref(false)
+const detailShowKey = ref(false)
+
+const filteredProviders = computed(() => {
+  const q = providerSearch.value.trim().toLowerCase()
+  if (!q) return providers.value
+  return providers.value.filter(
+    (p) =>
+      p.name.toLowerCase().includes(q) ||
+      p.baseUrl.toLowerCase().includes(q) ||
+      p.models.some((m) => m.toLowerCase().includes(q))
+  )
+})
+const selectedProvider = computed(
+  () => providers.value.find((p) => p.id === selectedProviderId.value) ?? null
+)
+function providerHost(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url
+  }
+}
+function providerInitial(name: string): string {
+  const t = (name || '?').trim()
+  return t.slice(0, 2).toUpperCase()
+}
+function openProviderDetail(p: Provider): void {
+  selectedProviderId.value = p.id
+  detailModelTab.value = 'all'
+  detailModelQuery.value = ''
+  detailModelExpanded.value = false
+  detailShowKey.value = false
+  startEdit(p)
+}
+function closeProviderDetail(): void {
+  selectedProviderId.value = null
+  editing.value = null
+}
+const detailVisibleModels = computed(() => {
+  const p = selectedProvider.value
+  if (!p) return []
+  const q = detailModelQuery.value.trim().toLowerCase()
+  let list = [...p.models]
+  if (q) list = list.filter((m) => m.toLowerCase().includes(q))
+  if (detailModelTab.value === 'selected') {
+    list = list.filter((m) => !store.isModelHidden(p.id, m))
+  }
+  return list
+})
+async function toggleProviderEnabled(p: Provider): Promise<void> {
+  busy.value = true
+  try {
+    await window.shangbo.provider.upsert({
+      id: p.id,
+      name: p.name,
+      kind: p.kind,
+      baseUrl: p.baseUrl,
+      models: p.models,
+      enabled: !p.enabled,
+      priority: p.priority,
+      headers: p.headers
+    })
+    await store.loadProviders()
+    providers.value = await window.shangbo.provider.list()
+  } finally {
+    busy.value = false
+  }
+}
+const detailNewModel = ref('')
+function startCreateNew(): void {
+  startCreate()
+  selectedProviderId.value = '__new'
+  detailModelTab.value = 'all'
+  detailModelQuery.value = ''
+  detailModelExpanded.value = false
+  detailShowKey.value = false
+}
+async function selectFreeOnly(): Promise<void> {
+  const p = selectedProvider.value
+  if (!p) return
+  for (const m of p.models) {
+    const free = m.toLowerCase().includes('free')
+    await store.setModelHidden(p.id, m, !free)
+  }
+}
+function addDetailModel(): void {
+  if (!editing.value) return
+  const v = detailNewModel.value.trim()
+  if (!v) return
+  const cur = parseModels(editing.value.modelsText)
+  if (!cur.includes(v)) {
+    cur.push(v)
+    editing.value.modelsText = cur.join('\n')
+  }
+  detailNewModel.value = ''
+}
 
 /* ------------------------------------------------------------------ */
 /* 应用自更新：状态由主进程状态机广播，这里只做展示与"请求"            */
@@ -1418,127 +1520,8 @@ async function toggleAutoScreenshot(): Promise<void> {
         <!-- ========================================================
              4. 模型与推理网关 (Providers)
              ======================================================== -->
-        <section v-if="activeTab === 'providers'" class="content-pane">
-          <div class="pane-header-row">
-            <div>
-              <h3 class="pane-title">模型供应商与推理端点</h3>
-              <p class="pane-desc subtle">
-                密钥由系统安全密钥环加密托管于本地，支持 OpenAI 兼容、Responses 协议及 Anthropic 直连。
-              </p>
-            </div>
-            <button v-if="!editing" class="btn btn-primary tiny" :disabled="busy" @click="startCreate">
-              + 新增端点
-            </button>
-          </div>
-
-          <div class="provider-list">
-            <div v-for="provider in providers" :key="provider.id" class="provider-row-container">
-              <div class="provider-row">
-                <div class="provider-info">
-                  <div class="provider-name-line">
-                    <span class="provider-name">{{ provider.name }}</span>
-                    <span v-if="provider.enabled" class="tag tag-on">已启用</span>
-                    <span v-else class="tag">已停用</span>
-                    <span v-if="provider.kind === 'openai-responses'" class="tag tag-responses">Responses 协议</span>
-                    <span v-if="provider.hasApiKey" class="tag tag-key">已配密钥</span>
-                    <span v-else class="tag tag-warn">缺少密钥</span>
-                  </div>
-                  <p class="provider-meta subtle mono">{{ provider.baseUrl }}</p>
-                </div>
-                <div class="provider-actions">
-                  <button class="btn btn-ghost tiny" :disabled="busy" @click="testProvider(provider)">测试</button>
-                  <button class="btn btn-ghost tiny" :disabled="busy" @click="startEdit(provider)">编辑</button>
-                  <button class="btn btn-ghost tiny btn-danger" :disabled="busy" @click="removeProvider(provider)">删除</button>
-                </div>
-              </div>
-
-              <!-- 需求 2：模型可见性设置（控制哪些模型在聊天窗口的切换列表中显示） -->
-              <div v-if="provider.models && provider.models.length > 0" class="provider-models-visibility">
-                <div class="vis-header-row">
-                  <span class="vis-title">
-                    模型快速切换列表显示设置 ({{ getVisibleModelsCount(provider) }}/{{ provider.models.length }} 可见)
-                  </span>
-                  <div class="vis-quick-actions">
-                    <button type="button" class="btn-vis-link" @click="showAllProviderModels(provider)">全部显示</button>
-                    <span class="link-sep">·</span>
-                    <button type="button" class="btn-vis-link" @click="hideAllProviderModels(provider)">全部隐藏</button>
-                  </div>
-                </div>
-
-                <div class="vis-chips-grid">
-                  <label
-                    v-for="m in provider.models"
-                    :key="m"
-                    class="model-vis-chip"
-                    :class="{ checked: !store.isModelHidden(provider.id, m) }"
-                    :title="store.isModelHidden(provider.id, m) ? '已在下拉菜单中隐藏' : '已在下拉菜单中显示'"
-                  >
-                    <input
-                      type="checkbox"
-                      class="vis-checkbox"
-                      :checked="!store.isModelHidden(provider.id, m)"
-                      @change="store.toggleModelHidden(provider.id, m)"
-                    />
-                    <span class="vis-model-name text-truncate">{{ m }}</span>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <p v-if="providers.length === 0" class="hint subtle">暂无模型供应商，点击右上角新建配置。</p>
-          </div>
-
-          <!-- 编辑/新增表单 -->
-          <form v-if="editing" class="editor-card" @submit.prevent="saveProvider">
-            <h4 class="editor-heading">{{ isEditingExisting ? '编辑供应商' : '新建模型供应商' }}</h4>
-
-            <div class="grid-2">
-              <label class="field">
-                <span class="field-label">供应商名称</span>
-                <input v-model="editing.name" class="input" placeholder="例如 OpenCode Go 或 DeepSeek" required />
-              </label>
-
-              <label class="field">
-                <span class="field-label">协议类型</span>
-                <select v-model="editing.kind" class="input">
-                  <option value="openai-compatible">OpenAI 兼容 (/chat/completions)</option>
-                  <option value="openai-responses">OpenAI Responses 协议 (/responses)</option>
-                  <option value="anthropic">Anthropic 原生协议 (/v1/messages)</option>
-                </select>
-              </label>
-            </div>
-
-            <label class="field">
-              <span class="field-label">Base URL (服务地址)</span>
-              <input v-model="editing.baseUrl" class="input mono" placeholder="https://..." required />
-            </label>
-
-            <label class="field">
-              <span class="field-label">API Key (密钥)</span>
-              <input
-                v-model="editing.apiKey"
-                class="input mono"
-                type="password"
-                :placeholder="isEditingExisting ? '留空保持原有密钥不变' : '输入你的 API 密钥'"
-                autocomplete="off"
-              />
-            </label>
-
-            <label class="field">
-              <div class="field-label-row">
-                <span class="field-label">模型列表（每行一个）</span>
-                <button type="button" class="btn btn-ghost tiny" :disabled="busy" @click="fetchModels">
-                  在线拉取可用模型
-                </button>
-              </div>
-              <textarea v-model="editing.modelsText" class="input mono" rows="3" placeholder="muse-spark-1.3-contributor&#10;deepseek-chat" required />
-            </label>
-
-            <div class="editor-actions">
-              <button type="submit" class="btn btn-primary tiny" :disabled="busy">保存配置</button>
-              <button type="button" class="btn tiny" @click="editing = null">取消</button>
-            </div>
-          </form>
+        <section v-if="activeTab === 'providers'" class="content-pane provider-redesign">
+          <ProviderSettings />
         </section>
 
         <!-- ========================================================
