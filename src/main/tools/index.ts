@@ -16,6 +16,186 @@ import {
 
 const execAsync = promisify(exec)
 
+/**
+ * Qoder CLI 桥接（外部 Agent 调用 Qoder 干活的唯一正统通道）。
+ * 已验证：npm i -g @qoder-ai/qodercli → qoder login → qoder -p/-o json 可用。
+ * MCP 方向只能反向（Qoder 调尚搏），调不动 Qoder；9209 本地口路径全 404 不啃；
+ * qoder-cn:// 协议只能唤起不能派活。走 CLI 非交互最稳。
+ * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
+ */
+async function runQoderCli(args: string[], cwd: string | undefined, signal: AbortSignal): Promise<string> {
+  const { execFile } = await import('node:child_process')
+  const execFileAsync = promisify(execFile)
+  try {
+    const { stdout, stderr } = await execFileAsync('qoder', args, {
+      cwd,
+      timeout: 300_000,
+      maxBuffer: 8 * 1024 * 1024,
+      signal,
+      windowsHide: true
+    })
+    const out = `${stdout.trim()}${stderr.trim() ? `\n--- 标准错误 ---\n${stderr.trim()}` : ''}`
+    return truncate(out.trim() || '（Qoder 无输出）')
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; code?: number; message?: string }
+    const parts = ['--- Qoder 调用失败 ---']
+    if (failure.stdout?.trim()) parts.push(failure.stdout.trim())
+    if (failure.stderr?.trim()) parts.push(failure.stderr.trim())
+    if (parts.length === 1) parts.push(failure.message ?? String(error))
+    return truncate(parts.join('\n'))
+  }
+}
+
+const qoderAsk: ToolDefinition = {
+  name: 'qoder_ask',
+  description:
+    '调用本机 Qoder CLI（qoder -p）让 Qoder 干活并回结果。适合代码问答、解释、改写建议等一次问答；要在指定工程目录下问就传 cwd。需要本机已装 CLI 且已 login。',
+  parameters: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: '要发给 Qoder 的问题/任务' },
+      cwd: { type: 'string', description: '工作目录，缺省为当前项目目录' },
+      model: { type: 'string', description: '模型名，缺省用 Qoder 默认' }
+    },
+    required: ['prompt']
+  },
+  requiresApproval: true,
+  approvalReason: '将调用本机 Qoder CLI 并消耗你的 Qoder 额度，结果会回传给尚搏。',
+  async execute(input, context) {
+    const { prompt, cwd, model } = z
+      .object({
+        prompt: z.string().min(1).max(8000),
+        cwd: z.string().optional(),
+        model: z.string().optional()
+      })
+      .parse(input)
+    const dir = cwd ? resolveUserPath(context, cwd) : (context.workingDirectory ?? undefined)
+    if (dir) guardPrivatePath(dir)
+    const args = ['-p', prompt]
+    if (model) args.push('-m', model)
+    return runQoderCli(args, dir, context.signal)
+  }
+}
+
+const qoderStatus: ToolDefinition = {
+  name: 'qoder_status',
+  description: '查看本机 Qoder CLI 的版本与登录状态（qoder status）。不消耗额度，接线前先查这个。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute(_input, context) {
+    return runQoderCli(['status'], context.workingDirectory ?? undefined, context.signal)
+  }
+}
+
+/**
+ * Codex CLI 桥接（外部 Agent 调用 Codex 干活的正统通道）。
+ * 已验证：codex exec --skip-git-repo-check "prompt" < NUL 可回结果。
+ * 两个坑：stdin 必须关闭（否则卡在 Reading additional input from stdin），
+ * 输出含头部元信息与多轮过程，用 -o 文件取最后一条消息最干净。
+ * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
+ */
+async function runCodexCli(
+  prompt: string,
+  cwd: string | undefined,
+  model: string | undefined,
+  signal: AbortSignal
+): Promise<string> {
+  const { execFile } = await import('node:child_process')
+  const { mkdtemp, readFile: readTmp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const execFileAsync = promisify(execFile)
+  const dir = await mkdtemp(join(tmpdir(), 'shangbo-codex-'))
+  const outFile = join(dir, 'last.txt')
+  const args = ['exec', '--skip-git-repo-check', '-o', outFile]
+  if (cwd) args.push('-C', cwd)
+  if (model) args.push('-m', model)
+  args.push(prompt)
+  try {
+    await execFileAsync('codex', args, {
+      cwd,
+      timeout: 300_000,
+      maxBuffer: 8 * 1024 * 1024,
+      signal,
+      windowsHide: true
+      // 注意：execFile 默认 stdin 就是 ignore（父子进程不连管道），
+      // 之前实测卡在 Reading additional input 是因为 run_command 经 shell 给了继承的 stdin。
+      // 这里经 execFile 直调不配 stdio 即可，勿加 stdio 字段（其类型无此属性）。
+    })
+    const result = (await readTmp(outFile, 'utf8')).trim()
+    return truncate(result || '（Codex 无输出）')
+  } catch (error) {
+    // 失败也尝试读 -o 文件：Codex 可能已产出部分答案
+    try {
+      const partial = (await readTmp(outFile, 'utf8')).trim()
+      if (partial) return truncate(`${partial}\n\n--- Codex 退出异常 ---\n${describeError(error)}`)
+    } catch {
+      // 无文件则走常规错误通道
+    }
+    const failure = error as { stdout?: string; stderr?: string; message?: string }
+    const parts = ['--- Codex 调用失败 ---']
+    if (failure.stdout?.trim()) parts.push(failure.stdout.trim())
+    if (failure.stderr?.trim()) parts.push(failure.stderr.trim())
+    if (parts.length === 1) parts.push(failure.message ?? String(error))
+    return truncate(parts.join('\n'))
+  } finally {
+    try {
+      await rm(dir, { recursive: true, force: true })
+    } catch {
+      // 忽略清理失败
+    }
+  }
+}
+
+const codexAsk: ToolDefinition = {
+  name: 'codex_ask',
+  description:
+    '调用本机 Codex CLI（codex exec）让 Codex 干活并回结果。适合代码问答、改写、审查等一次任务；要在指定工程目录下问就传 cwd。需要本机已装 CLI 且已 login。',
+  parameters: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: '要发给 Codex 的问题/任务' },
+      cwd: { type: 'string', description: '工作目录，缺省为当前项目目录' },
+      model: { type: 'string', description: '模型名，缺省用 Codex 默认' }
+    },
+    required: ['prompt']
+  },
+  requiresApproval: true,
+  approvalReason: '将调用本机 Codex CLI 并消耗你的 Codex 额度，结果会回传给尚搏。',
+  async execute(input, context) {
+    const { prompt, cwd, model } = z
+      .object({
+        prompt: z.string().min(1).max(8000),
+        cwd: z.string().optional(),
+        model: z.string().optional()
+      })
+      .parse(input)
+    const dir = cwd ? resolveUserPath(context, cwd) : (context.workingDirectory ?? undefined)
+    if (dir) guardPrivatePath(dir)
+    return runCodexCli(prompt, dir, model, context.signal)
+  }
+}
+
+const codexStatus: ToolDefinition = {
+  name: 'codex_status',
+  description: '查看本机 Codex CLI 的版本与登录状态（codex login status）。不消耗额度，接线前先查这个。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute(_input, context) {
+    const { execFile } = await import('node:child_process')
+    const execFileAsync = promisify(execFile)
+    try {
+      const [{ stdout: v }, { stdout: s }] = await Promise.all([
+        execFileAsync('codex', ['--version'], { windowsHide: true, signal: context.signal }),
+        execFileAsync('codex', ['login', 'status'], { windowsHide: true, signal: context.signal })
+      ])
+      return truncate(`${v.trim()}\n${s.trim()}`.trim() || '（Codex 无输出）')
+    } catch (error) {
+      return truncate(`--- Codex 调用失败 ---\n${describeError(error)}`)
+    }
+  }
+}
+
 export interface ToolContext {
   conversationId: string
   /**
@@ -758,6 +938,10 @@ const definitions: ToolDefinition[] = [
   writeFileTool,
   patchFileTool,
   runCommand,
+  qoderAsk,
+  qoderStatus,
+  codexAsk,
+  codexStatus,
   computerScreenshot,
   computerClick,
   computerType,
