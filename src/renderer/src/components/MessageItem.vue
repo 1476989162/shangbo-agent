@@ -57,11 +57,23 @@ type RenderItem =
       key: string
       name: string
       input: unknown
-      result?: { content: string; isError: boolean }
+      result?: { content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }
     }
 
 const isUser = computed(() => props.message.role === 'user')
 const isStreaming = computed(() => props.message.status === 'streaming')
+const modelLabel = computed(() => {
+  const model = props.message.model?.trim()
+  if (!model) return ''
+  return model.split('/').pop() || model
+})
+
+const assistantState = computed(() => {
+  if (props.message.status === 'streaming') return { label: '运行中', className: 'running' }
+  if (props.message.status === 'error') return { label: '失败', className: 'failed' }
+  if (props.message.status === 'aborted') return { label: '已中断', className: 'aborted' }
+  return { label: '完成', className: 'done' }
+})
 
 /** 文本块用于复制与判断"是否只有思考没有正文"。 */
 const textContent = computed(() =>
@@ -105,10 +117,17 @@ function onPreviewKeydown(event: KeyboardEvent): void {
 }
 
 const renderItems = computed<RenderItem[]>(() => {
-  const results = new Map<string, { content: string; isError: boolean }>()
+  const results = new Map<
+    string,
+    { content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }
+  >()
   for (const block of props.message.blocks) {
     if (block.type === 'tool_result') {
-      results.set(block.toolUseId, { content: block.content, isError: block.isError })
+      results.set(block.toolUseId, {
+        content: block.content,
+        isError: block.isError,
+        image: block.image
+      })
     }
   }
 
@@ -133,6 +152,10 @@ const renderItems = computed<RenderItem[]>(() => {
 
   return items
 })
+
+const activityCount = computed(
+  () => renderItems.value.filter((item) => item.kind === 'reasoning' || item.kind === 'tool').length
+)
 
 /** 思考过程耗尽了单次 Token 额度，导致没有正式正文或工具调用的异常状态 */
 const hasOnlyReasoning = computed(() => {
@@ -207,14 +230,28 @@ const liveWorkingStatus = computed(() => {
 const usageLabel = computed(() => {
   const usage = props.message.usage
   if (!usage) return ''
-  const base = `输入 ${usage.promptTokens} · 输出 ${usage.completionTokens}`
-  // 多步工具循环时，末次请求与整轮累计差异可能很大，两个口径都给用户
-  if (usage.requests && usage.requests > 1) {
-    return `${base} tokens（${usage.requests} 次请求，累计输入 ${usage.totalPromptTokens ?? 0} / 输出 ${
-      usage.totalCompletionTokens ?? 0
-    }）`
-  }
-  return `${base} tokens`
+  const total = usage.totalTokens ?? usage.promptTokens + usage.completionTokens
+  const requestSuffix = usage.requests && usage.requests > 1 ? ` · ${usage.requests} 步` : ''
+  return `${formatCount(total)} tokens${requestSuffix}`
+})
+
+const usageTitle = computed(() => {
+  const usage = props.message.usage
+  if (!usage) return ''
+  const parts = [`输入 ${usage.promptTokens}`, `输出 ${usage.completionTokens}`]
+  if (usage.requests) parts.push(`${usage.requests} 次请求`)
+  if (usage.cacheReadTokens) parts.push(`缓存读取 ${usage.cacheReadTokens}`)
+  return parts.join(' · ')
+})
+
+const toolCountLabel = computed(() => {
+  const tools = renderItems.value.filter((item) => item.kind === 'tool').length
+  return tools > 0 ? `${tools} 个操作` : ''
+})
+
+const reasoningLabel = computed(() => {
+  const count = renderItems.value.filter((item) => item.kind === 'reasoning').length
+  return count > 0 ? `${count} 段思考` : ''
 })
 
 /** 工具卡片标题上的一句话摘要，避免用户展开才能看懂调用了什么。 */
@@ -226,6 +263,78 @@ function summarizeInput(name: string, input: unknown): string {
   if (typeof record.query === 'string') return record.query
   const first = Object.values(record)[0]
   return typeof first === 'string' ? first : ''
+}
+
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
+}
+
+function toolIcon(name: string): string {
+  if (name === 'read_file') return '↳'
+  if (name === 'search_files') return '⌕'
+  if (name === 'list_directory') return '≡'
+  if (name === 'write_file' || name === 'patch_file') return '±'
+  if (name === 'run_command') return '›_'
+  if (name === 'spawn_subagent') return '⑂'
+  if (name.startsWith('computer_')) return '▣'
+  if (name.startsWith('mcp__')) return '◇'
+  if (name.endsWith('_ask')) return '⌘'
+  return '•'
+}
+
+function toolAction(name: string): string {
+  if (name === 'read_file') return '读取文件'
+  if (name === 'search_files') return '搜索文件'
+  if (name === 'list_directory') return '查看目录'
+  if (name === 'write_file') return '写入文件'
+  if (name === 'patch_file') return '修改文件'
+  if (name === 'run_command') return '运行命令'
+  if (name === 'spawn_subagent') return '派生子任务'
+  if (name === 'computer_screenshot') return '截取屏幕'
+  if (name.startsWith('computer_')) return '操作桌面'
+  if (name.startsWith('mcp__')) return '调用 MCP'
+  if (name === 'qoder_ask') return '调用 Qoder'
+  if (name === 'codex_ask') return '调用 Codex'
+  if (name === 'claude_ask') return '调用 Claude'
+  return name
+}
+
+function toolTarget(name: string, input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const record = input as Record<string, unknown>
+  if (name === 'run_command' && typeof record.command === 'string') return record.command
+  if (name === 'spawn_subagent' && typeof record.task === 'string') return record.task
+  if (typeof record.path === 'string') return record.path
+  if (typeof record.query === 'string') return record.query
+  if (typeof record.text === 'string') return record.text
+  if (typeof record.prompt === 'string') return record.prompt
+  return summarizeInput(name, input)
+}
+
+function toolStatus(item: Extract<RenderItem, { kind: 'tool' }>): string {
+  if (!item.result) return '执行中'
+  if (item.result.isError) return '失败'
+  return '完成'
+}
+
+function toolStatusClass(item: Extract<RenderItem, { kind: 'tool' }>): string {
+  if (!item.result) return 'running'
+  if (item.result.isError) return 'failed'
+  return 'done'
+}
+
+function toolKindClass(name: string): string {
+  if (name === 'write_file' || name === 'patch_file') return 'write'
+  if (name === 'run_command') return 'command'
+  if (name === 'spawn_subagent') return 'agent'
+  if (name.startsWith('computer_')) return 'computer'
+  return 'read'
+}
+
+function reasoningPreview(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 120)
 }
 
 function prettyJson(value: unknown): string {
@@ -329,46 +438,83 @@ async function copy(): Promise<void> {
     </div>
 
     <template v-else>
-      <div class="assistant-body">
+      <div class="assistant-body codex-message">
+        <header class="assistant-head">
+          <span class="assistant-mark" aria-hidden="true">✦</span>
+          <span class="assistant-name">尚搏 Agent</span>
+          <span v-if="modelLabel" class="assistant-model">{{ modelLabel }}</span>
+          <span class="assistant-state" :class="assistantState.className">
+            <span class="assistant-state-dot" />
+            {{ assistantState.label }}
+          </span>
+          <span v-if="activityCount > 0" class="assistant-activity-count">
+            {{ toolCountLabel }}<template v-if="toolCountLabel && reasoningLabel"> · </template>{{ reasoningLabel }}
+          </span>
+        </header>
+
+        <div class="codex-flow">
         <template v-for="item in renderItems" :key="item.key">
           <MarkdownBlock v-if="item.kind === 'text'" :source="item.text" :streaming="isStreaming" />
 
-          <details v-else-if="item.kind === 'reasoning'" class="reasoning">
+          <details v-else-if="item.kind === 'reasoning'" class="codex-activity reasoning-activity">
             <summary>
+              <span class="activity-glyph">◌</span>
+              <span class="activity-title">思考</span>
+              <span class="activity-preview">{{ reasoningPreview(item.text) }}</span>
+              <span class="activity-status" :class="isStreaming ? 'running' : 'done'">
+                {{ isStreaming ? '思考中' : '已折叠' }}
+              </span>
               <svg class="chevron-icon" width="12" height="12" viewBox="0 0 16 16" fill="none">
                 <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
-              <span>思考过程</span>
             </summary>
-            <p class="reasoning-text">{{ item.text }}</p>
+            <div class="activity-detail">
+              <pre class="activity-pre reasoning-text mono">{{ item.text }}</pre>
+            </div>
           </details>
 
-          <details v-else class="tool-card" :class="{ failed: item.result?.isError }">
+          <details
+            v-else
+            class="codex-activity tool-activity"
+            :class="[toolKindClass(item.name), { failed: item.result?.isError }]"
+            :open="!item.result"
+          >
             <summary>
+              <span class="activity-glyph">{{ toolIcon(item.name) }}</span>
+              <span class="activity-title">{{ toolAction(item.name) }}</span>
+              <span v-if="toolTarget(item.name, item.input)" class="activity-preview mono">
+                {{ toolTarget(item.name, item.input) }}
+              </span>
+              <span class="activity-status" :class="toolStatusClass(item)">
+                <span v-if="!item.result" class="activity-spinner" />
+                {{ toolStatus(item) }}
+              </span>
               <svg class="chevron-icon" width="12" height="12" viewBox="0 0 16 16" fill="none">
                 <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
-              <span class="tool-name mono">{{ item.name }}</span>
-              <span v-if="summarizeInput(item.name, item.input)" class="tool-summary">
-                {{ summarizeInput(item.name, item.input) }}
-              </span>
-              <span v-if="!item.result" class="tool-pending subtle">执行中…</span>
             </summary>
 
-            <div class="tool-detail">
-              <p class="tool-section-label">参数</p>
-              <pre class="tool-pre mono">{{ prettyJson(item.input) }}</pre>
+            <div class="activity-detail">
+              <div class="activity-detail-label">调用参数</div>
+              <pre class="activity-pre mono">{{ prettyJson(item.input) }}</pre>
 
               <template v-if="item.result">
-                <p class="tool-section-label">
-                  结果
+                <div class="activity-detail-label">
+                  执行结果
                   <span v-if="item.result.isError" class="tool-error-tag">失败</span>
-                </p>
-                <pre class="tool-pre mono">{{ item.result.content }}</pre>
+                </div>
+                <img
+                  v-if="item.result.image?.dataUrl"
+                  :src="item.result.image.dataUrl"
+                  class="activity-image"
+                  alt="工具结果图片"
+                />
+                <pre class="activity-pre mono">{{ item.result.content }}</pre>
               </template>
             </div>
           </details>
         </template>
+        </div>
 
         <!-- Token 耗尽友好提示与 Qoder / Cline 级智能断点续写卡片 -->
         <div v-if="(hasOnlyReasoning || isTruncated) && !isStreaming" class="token-limit-warning">
@@ -413,7 +559,7 @@ async function copy(): Promise<void> {
         </p>
         <p v-else-if="message.status === 'aborted'" class="aborted subtle">已中断生成</p>
 
-        <footer v-if="!isStreaming" class="message-actions">
+        <footer v-if="!isStreaming" class="message-actions assistant-actions">
           <div v-if="branch && branch.total > 1" class="branch-nav">
             <button
               class="branch-btn"
@@ -444,7 +590,7 @@ async function copy(): Promise<void> {
           >
             重新生成
           </button>
-          <span v-if="usageLabel" class="usage subtle">{{ usageLabel }}</span>
+          <span v-if="usageLabel" class="usage subtle" :title="usageTitle">{{ usageLabel }}</span>
         </footer>
       </div>
     </template>
@@ -667,6 +813,272 @@ async function copy(): Promise<void> {
 
 .assistant-body {
   max-width: 100%;
+}
+
+/* Codex 式信息流：正文 + 可折叠活动行 */
+.codex-message {
+  width: 100%;
+  padding: 1px 0 0;
+}
+
+.assistant-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  user-select: none;
+}
+
+.assistant-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 7px;
+  color: #b45309;
+  background: linear-gradient(135deg, rgba(217, 119, 87, 0.16), rgba(245, 158, 11, 0.1));
+  border: 1px solid rgba(217, 119, 87, 0.24);
+  font-size: 13px;
+}
+
+.assistant-name {
+  color: var(--text);
+  font-weight: 650;
+  letter-spacing: 0.1px;
+}
+
+.assistant-model {
+  max-width: 230px;
+  overflow: hidden;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-subtle);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  font-size: 10.5px;
+  color: var(--text-subtle);
+}
+
+.assistant-state-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.assistant-state.running {
+  color: #b45309;
+}
+
+.assistant-state.failed {
+  color: var(--danger);
+}
+
+.assistant-state.aborted {
+  color: var(--text-subtle);
+}
+
+.assistant-state.done {
+  color: var(--success);
+}
+
+.assistant-activity-count {
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codex-activity {
+  margin: 1px 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.codex-activity:hover {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.codex-activity[open] {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.codex-activity.failed {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+
+.codex-activity summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.codex-activity summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.tool-activity.write .activity-glyph {
+  color: #b45309;
+  border-color: rgba(217, 119, 87, 0.3);
+  background: rgba(217, 119, 87, 0.08);
+}
+
+.tool-activity.command .activity-glyph {
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.25);
+  background: rgba(16, 185, 129, 0.07);
+}
+
+.tool-activity.agent .activity-glyph,
+.tool-activity.computer .activity-glyph {
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.25);
+  background: rgba(37, 99, 235, 0.07);
+}
+
+.activity-title {
+  flex: none;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.activity-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-subtle);
+  font-size: 9.5px;
+}
+
+.activity-status.running {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.activity-status.failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.activity-status.done {
+  color: var(--text-subtle);
+}
+
+.activity-spinner {
+  width: 7px;
+  height: 7px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.codex-activity .chevron-icon {
+  flex: none;
+  color: var(--text-subtle);
+}
+
+.activity-detail {
+  padding: 2px 10px 10px 33px;
+  border-top: 1px solid var(--border);
+}
+
+.activity-detail-label {
+  margin: 9px 0 4px;
+  color: var(--text-subtle);
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.activity-pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.activity-image {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  object-fit: contain;
+}
+
+.assistant-actions {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 .reasoning {
