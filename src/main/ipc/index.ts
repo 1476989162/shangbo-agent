@@ -1,6 +1,7 @@
-import { BrowserWindow, app, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { IPC } from '../../shared/ipc'
+import { eventBus } from '../events/bus'
 import * as repo from '../db/repo'
 import { getDbPath } from '../db'
 import { getAllSettings, setSetting } from '../settings'
@@ -85,7 +86,22 @@ function broadcast(event: AgentEvent): void {
   }
 }
 
+/**
+ * 阶段1：桌面窗口改为订阅事件总线（行为不变）。
+ * AgentRuntime 的 emit 经 withBus 包装后会自动 publish 到总线，
+ * 这里的订阅只负责把总线事件转发给桌面窗口；远程模块另行订阅。
+ */
+let desktopBridgeDisposer: (() => void) | null = null
+
+function ensureDesktopBridge(): void {
+  if (desktopBridgeDisposer) return
+  desktopBridgeDisposer = eventBus.subscribe((event) => {
+    broadcast(event)
+  })
+}
+
 export function registerIpcHandlers(): void {
+  ensureDesktopBridge()
   /* 会话 ---------------------------------------------------------- */
 
   ipcMain.handle(IPC.conversationList, () => repo.listConversations())
@@ -156,7 +172,10 @@ export function registerIpcHandlers(): void {
       images.push({ mimeType: attachment.mimeType, file })
     }
 
-    return agentRuntime.send({ ...parsed, images: images.length > 0 ? images : undefined }, broadcast)
+    return agentRuntime.send(
+      { ...parsed, images: images.length > 0 ? images : undefined },
+      agentRuntime.withBus(broadcast)
+    )
   })
 
   ipcMain.handle(IPC.chatAbort, (_event, runId: string) => {
@@ -170,7 +189,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageId: string) =>
-    agentRuntime.regenerate(assistantMessageId, broadcast)
+    agentRuntime.regenerate(assistantMessageId, agentRuntime.withBus(broadcast))
   )
 
   /* 供应商 -------------------------------------------------------- */

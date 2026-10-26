@@ -3,10 +3,13 @@ import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 import log from 'electron-log/main'
 import * as repo from '../db/repo'
 import { getSetting, setSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
+import { canonicalParamString } from '../../shared/remote'
+import { eventBus, type EventSubscriber } from '../events/bus'
 import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
 import { routingOrder } from '../providers/store'
 import { buildContext, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
@@ -98,7 +101,28 @@ function resolveTarget(
 
 interface PendingApproval {
   toolName: string
+  conversationId: string
+  messageId: string
+  input: unknown
+  paramHash: string
+  reason: string
+  createdAt: number
   settle: (approved: boolean) => void
+}
+
+/** 待审批清单项（手机连上时立刻下发，不含 settle）。 */
+export interface PendingApprovalSnapshot {
+  runId: string
+  toolUseId: string
+  conversationId: string
+  messageId: string
+  toolName: string
+  input: unknown
+  paramHash: string
+  reason: string
+  createdAt: number
+  expiresAt: number
+  remainingMs: number
 }
 
 interface ActiveRun {
@@ -124,6 +148,26 @@ export class AgentRuntime {
   private approvals = new Map<string, PendingApproval>()
   /** 会话 id → 该会话的等待队列。同一会话严格串行，不同会话互不阻塞。 */
   private queues = new Map<string, QueuedRun[]>()
+
+  /**
+   * 事件总线订阅（阶段1/阶段3共用）。
+   * AgentRuntime 内部不再直接依赖 IPC：每次 emit 都经过 withBus 包装，
+   * 自动 publish 到总线，桌面窗口与远程模块各自订阅。
+   */
+  subscribe(fn: EventSubscriber): () => void {
+    return eventBus.subscribe(fn)
+  }
+
+  /** 把闭包 emit 包装成“原样调用 + 同步 publish 到总线”。 */
+  withBus(emit: Emitter): Emitter {
+    return (event) => {
+      try {
+        emit(event)
+      } finally {
+        eventBus.publish(event)
+      }
+    }
+  }
 
   /**
    * 统一的生命周期包装：失败发 run_error，结束必发 run_end。
@@ -427,13 +471,62 @@ export class AgentRuntime {
 
   /** 渲染进程回传的权限确认结果。 */
   decide(decision: ApprovalDecision): void {
-    const key = `${decision.runId}:${decision.toolUseId}`
-    const pending = this.approvals.get(key)
-    if (!pending) return
+    this.decideWithHash(decision.runId, decision.toolUseId, decision.approved, undefined)
     if (decision.approved && decision.alwaysAllow) {
-      this.grantAutoApprove(pending.toolName)
+      const pending = this.approvals.get(`${decision.runId}:${decision.toolUseId}`)
+      // decideWithHash 已 settle 并删除，此处仅补记自动放行（若记录仍在）
+      if (pending) this.grantAutoApprove(pending.toolName)
     }
-    pending.settle(decision.approved)
+  }
+
+  /**
+   * 带哈希绑定的审批裁决（阶段5：远程审批必须带 paramHash）。
+   * - expectedParamHash 为 undefined 时为桌面本地审批，不做哈希校验（兼容现有调用）。
+   * - 远程审批必须提供哈希且与创建时一致，否则按拒绝处理（防参数中途被替换）。
+   * 返回 true 表示裁决被接受（批准或拒绝均已 settle），false 表示无此审批或哈希不一致。
+   */
+  decideWithHash(runId: string, toolUseId: string, approved: boolean, expectedParamHash?: string): boolean {
+    const key = `${runId}:${toolUseId}`
+    const pending = this.approvals.get(key)
+    if (!pending) return false
+    if (expectedParamHash !== undefined && expectedParamHash !== pending.paramHash) {
+      log.warn(`[agent] 远程审批哈希不一致，已按拒绝处理：${key}`)
+      pending.settle(false)
+      return false
+    }
+    pending.settle(approved)
+    return true
+  }
+
+  /** 当前所有待审批清单（手机连上时立刻下发）。 */
+  listPendingApprovals(): PendingApprovalSnapshot[] {
+    const now = Date.now()
+    const out: PendingApprovalSnapshot[] = []
+    for (const [key, pending] of this.approvals) {
+      const sep = key.indexOf(':')
+      const runId = key.slice(0, sep)
+      const toolUseId = key.slice(sep + 1)
+      const remainingMs = Math.max(0, pending.createdAt + APPROVAL_TIMEOUT_MS - now)
+      out.push({
+        runId,
+        toolUseId,
+        conversationId: pending.conversationId,
+        messageId: pending.messageId,
+        toolName: pending.toolName,
+        input: pending.input,
+        paramHash: pending.paramHash,
+        reason: pending.reason,
+        createdAt: pending.createdAt,
+        expiresAt: pending.createdAt + APPROVAL_TIMEOUT_MS,
+        remainingMs
+      })
+    }
+    return out
+  }
+
+  /** 对工具参数计算稳定哈希（审批绑定用，与手机端 WebCrypto SHA-256 对应）。 */
+  static paramHashOf(input: unknown): string {
+    return createHash('sha256').update(canonicalParamString(input), 'utf8').digest('hex')
   }
 
   /* ---------------------------------------------------------------- */
@@ -1332,6 +1425,8 @@ export class AgentRuntime {
     controller: AbortController
   ): Promise<ApprovalDecision> {
     const key = `${runId}:${call.id}`
+    const paramHash = AgentRuntime.paramHashOf(call.input)
+    const reason = tool.approvalReason ?? '该操作会修改你的本机环境。'
 
     emit({
       type: 'approval_required',
@@ -1341,7 +1436,7 @@ export class AgentRuntime {
       toolUseId: call.id,
       name: call.name,
       input: call.input,
-      reason: tool.approvalReason ?? '该操作会修改你的本机环境。'
+      reason
     })
 
     return new Promise<ApprovalDecision>((resolve) => {
@@ -1360,7 +1455,16 @@ export class AgentRuntime {
       const onAbort = (): void => settle(false)
       controller.signal.addEventListener('abort', onAbort, { once: true })
 
-      this.approvals.set(key, { toolName: tool.name, settle })
+      this.approvals.set(key, {
+        toolName: tool.name,
+        conversationId,
+        messageId,
+        input: call.input,
+        paramHash,
+        reason,
+        createdAt: Date.now(),
+        settle
+      })
     })
   }
 
