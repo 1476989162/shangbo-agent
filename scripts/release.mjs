@@ -61,13 +61,26 @@ copyFileSync(join(outDir, 'latest.yml'), join('release', 'latest.yml'))
 copyFileSync(join(outDir, 'latest.yml'), join('release', `latest-${version}.yml`))
 console.log('[release] 已拷回 release/')
 
-// 5. git 提交检查：工作区必须干净（除 release 产物外）
+// 5. git 提交检查：工作区必须干净（构建产物/忽略目录除外）
 const status = execSync('git status --porcelain', { encoding: 'utf8' }).trim()
 const dirty = status
   .split('\n')
   .map((l) => l.trim())
   .filter(Boolean)
-  .filter((l) => !l.includes('release/'))
+  // ?? 未跟踪：只看是否被 gitignore 忽略（release/、dist-mobile/、outputs/ 等构建/本地产物跳过）
+  // M 已跟踪：示例文档的行尾空格类改动也视为脏，必须先提交
+  .filter((l) => {
+    if (l.startsWith('??')) {
+      const p = l.slice(3).trim()
+      try {
+        execSync(`git check-ignore -q "${p}"`, { stdio: 'ignore' })
+        return false
+      } catch {
+        return true
+      }
+    }
+    return !l.includes('release/')
+  })
 if (dirty.length) {
   console.log('[release] 工作区还有未提交改动（已忽略 release/）：\n' + dirty.join('\n'))
   fail('先提交代码再打 tag，避免 tag 与代码错位')
