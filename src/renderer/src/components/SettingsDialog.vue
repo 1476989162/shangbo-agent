@@ -31,6 +31,7 @@ export type SettingsTab =
   | 'cowork'
   | 'import_export'
   | 'general'
+  | 'remote'
   | 'developer'
   | 'skills'
   | 'connectors'
@@ -229,8 +230,87 @@ function addDetailModel(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* 应用自更新：状态由主进程状态机广播，这里只做展示与"请求"            */
+/* 手机远程：开关 / 中转地址 / 审批策略 / 配对 / 设备管理               */
 /* ------------------------------------------------------------------ */
+interface RemoteDevice {
+  id: string
+  name: string
+  createdAt: number
+  lastSeenAt: number | null
+}
+const remoteEnabled = ref(false)
+const remoteRelayUrl = ref('')
+const remoteApprovalPolicy = ref<'allow-all' | 'confirm-high' | 'read-only'>('allow-all')
+const remoteStatusText = ref('未开启')
+const remotePairing = ref<{ qrText: string; code: string; expiresAt: number; fingerprint: string } | null>(null)
+const remoteDevices = ref<RemoteDevice[]>([])
+const remoteBusy = ref(false)
+
+async function loadRemote(): Promise<void> {
+  try {
+    const st = await window.shangbo.remote.status()
+    remoteEnabled.value = st.enabled
+    remoteStatusText.value = st.enabled ? `状态：${st.status}${st.detail ? `（${st.detail}）` : ''}` : '未开启'
+  } catch {
+    remoteStatusText.value = '读取失败'
+  }
+  try {
+    remoteDevices.value = await window.shangbo.remote.devices()
+  } catch {
+    remoteDevices.value = []
+  }
+}
+
+async function toggleRemoteEnabled(): Promise<void> {
+  await window.shangbo.settings.set('remote.enabled', remoteEnabled.value)
+  feedback.value = {
+    ok: true,
+    message: remoteEnabled.value ? '手机远程已开启：桌面开始连接中转' : '手机远程已关闭：不再产生任何外网连接'
+  }
+  await loadRemote()
+}
+
+async function saveRemoteRelayUrl(): Promise<void> {
+  await window.shangbo.settings.set('remote.relayUrl', remoteRelayUrl.value.trim())
+  feedback.value = { ok: true, message: '中转地址已保存' }
+}
+
+async function saveRemotePolicy(): Promise<void> {
+  await window.shangbo.settings.set('remote.approvalPolicy', remoteApprovalPolicy.value)
+  feedback.value = { ok: true, message: '远程审批策略已更新' }
+}
+
+async function issueRemotePairing(): Promise<void> {
+  if (!remoteEnabled.value) {
+    feedback.value = { ok: false, message: '请先开启手机远程' }
+    return
+  }
+  remoteBusy.value = true
+  try {
+    remotePairing.value = await window.shangbo.remote.pair()
+    feedback.value = { ok: true, message: '配对码已生成：用手机扫码或手动输入配对码' }
+  } catch (error) {
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '配对失败' }
+  } finally {
+    remoteBusy.value = false
+  }
+}
+
+async function revokeRemoteDevice(id: string): Promise<void> {
+  if (!confirm('确定吊销这台手机？吊销后其连接立即断开。')) return
+  const ok = await window.shangbo.remote.revoke(id)
+  feedback.value = ok ? { ok: true, message: '已吊销' } : { ok: false, message: '吊销失败' }
+  await loadRemote()
+}
+
+async function disconnectRemoteAll(): Promise<void> {
+  if (!confirm('立即断开所有远程设备并关闭远程功能？')) return
+  await window.shangbo.remote.disconnect()
+  remoteEnabled.value = false
+  remotePairing.value = null
+  feedback.value = { ok: true, message: '已断开所有远程设备并关闭远程功能' }
+  await loadRemote()
+}
 const updateState = ref<UpdateState | null>(null)
 const autoCheck = ref(true)
 const autoDownload = ref(true)
@@ -375,6 +455,11 @@ async function load(): Promise<void> {
   autoCheck.value = (settings['app.update.check'] as boolean) ?? true
   autoDownload.value = (settings['app.update.autoDownload'] as boolean) ?? true
   updateState.value = await window.shangbo.update.status()
+  remoteEnabled.value = (settings['remote.enabled'] as boolean) ?? false
+  remoteRelayUrl.value = (settings['remote.relayUrl'] as string) ?? ''
+  remoteApprovalPolicy.value =
+    (settings['remote.approvalPolicy'] as 'allow-all' | 'confirm-high' | 'read-only') ?? 'allow-all'
+  await loadRemote()
   await loadPlugins()
   await loadRealUsage()
 }
@@ -1100,6 +1185,18 @@ async function toggleAutoScreenshot(): Promise<void> {
 
             <button
               class="nav-tab-btn"
+              :class="{ active: activeTab === 'remote' }"
+              @click="activeTab = 'remote'"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <rect x="4.5" y="2" width="7" height="12" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+                <path d="M7 12.5h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              </svg>
+              <span>手机远程</span>
+            </button>
+
+            <button
+              class="nav-tab-btn"
               :class="{ active: activeTab === 'developer' }"
               @click="activeTab = 'developer'"
             >
@@ -1623,6 +1720,101 @@ async function toggleAutoScreenshot(): Promise<void> {
               <button class="btn btn-ghost tiny btn-danger" :disabled="autoApprove.length === 0" @click="clearAutoApprove">
                 清空全部放行授权
               </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================================================
+             手机远程（外网 PWA + 端到端加密）
+             ======================================================== -->
+        <section v-if="activeTab === 'remote'" class="content-pane">
+          <div class="section-block">
+            <h3 class="pane-title">手机远程</h3>
+            <p class="row-sub">
+              在外网用手机查看会话、发消息、批准高危命令。桌面主动外连中转服务，两边都不用开放端口；
+              所有业务经端到端加密，中转只转发密文。默认关闭，开启后才产生外网连接。
+            </p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">开启手机远程</span>
+                <span class="row-sub">{{ remoteStatusText }}</span>
+              </div>
+              <label class="switch-control">
+                <input v-model="remoteEnabled" type="checkbox" @change="toggleRemoteEnabled" />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">中转地址</span>
+                <span class="row-sub">wss:// 开头。留空则不连接；可填自己的自建中转（relay/docker-compose.yml 一键启动）。</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <input
+                v-model="remoteRelayUrl"
+                type="text"
+                class="select-control mono"
+                placeholder="wss://relay.example.com"
+                style="flex: 1"
+              />
+              <button class="btn btn-ghost tiny" @click="saveRemoteRelayUrl">保存</button>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">远程审批策略</span>
+                <span class="row-sub">允许所有 / 高危回桌面确认 / 完全只读（只能看不能操作）。</span>
+              </div>
+              <select v-model="remoteApprovalPolicy" class="select-control" @change="saveRemotePolicy">
+                <option value="allow-all">允许所有审批</option>
+                <option value="confirm-high">高危必须回桌面确认</option>
+                <option value="read-only">完全只读</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="divider" />
+
+          <div class="section-block">
+            <h3 class="pane-title">配对新手机</h3>
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">一次性配对码</span>
+                <span class="row-sub">5 分钟有效、只能用一次。手机扫码或手动输入配对码完成密钥交换。</span>
+              </div>
+              <button class="btn btn-primary tiny" :disabled="remoteBusy || !remoteEnabled" @click="issueRemotePairing">
+                {{ remoteBusy ? '生成中…' : '生成配对码' }}
+              </button>
+            </div>
+            <div v-if="remotePairing" class="info-grid">
+              <div class="info-item"><span class="info-k">配对码:</span> <span class="info-v mono">{{ remotePairing.code }}</span></div>
+              <div class="info-item"><span class="info-k">桌面公钥指纹:</span> <span class="info-v mono">{{ remotePairing.fingerprint }}</span></div>
+              <div class="info-item"><span class="info-k">有效期至:</span> <span class="info-v">{{ new Date(remotePairing.expiresAt).toLocaleString() }}</span></div>
+              <div class="info-item"><span class="info-k">扫码内容:</span> <span class="info-v mono text-truncate" :title="remotePairing.qrText">{{ remotePairing.qrText.slice(0, 80) }}…</span></div>
+            </div>
+          </div>
+
+          <div class="divider" />
+
+          <div class="section-block">
+            <h3 class="pane-title">已配对手机（{{ remoteDevices.length }}）</h3>
+            <div v-if="remoteDevices.length === 0" class="row-sub">暂无已配对手机。</div>
+            <div v-for="d in remoteDevices" :key="d.id" class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">{{ d.name || '未命名手机' }}</span>
+                <span class="row-sub">配对 {{ new Date(d.createdAt).toLocaleString() }} · 上次在线 {{ d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : '从未' }}</span>
+              </div>
+              <button class="btn btn-ghost tiny btn-danger" @click="revokeRemoteDevice(d.id)">吊销</button>
+            </div>
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">一键断开</span>
+                <span class="row-sub">立即断开所有远程设备并关闭远程功能。</span>
+              </div>
+              <button class="btn btn-ghost tiny btn-danger" @click="disconnectRemoteAll">立即断开</button>
             </div>
           </div>
         </section>

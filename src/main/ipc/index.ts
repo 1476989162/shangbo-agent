@@ -2,6 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { IPC } from '../../shared/ipc'
 import { eventBus } from '../events/bus'
+import { remoteService } from '../remote/service'
+import { listRemoteAudit } from '../remote/audit'
 import * as repo from '../db/repo'
 import { getDbPath } from '../db'
 import { getAllSettings, setSetting } from '../settings'
@@ -277,6 +279,10 @@ export function registerIpcHandlers(): void {
     setSetting(name, parsed)
     // 更新开关改完立即生效，不必等重启
     if (name.startsWith('app.update.')) updateService.syncSettings()
+    // 远程开关/地址/策略改完立即生效
+    if (name === 'remote.enabled' || name === 'remote.relayUrl' || name === 'remote.approvalPolicy') {
+      remoteService.sync()
+    }
     return true
   })
 
@@ -357,4 +363,26 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.updateDownload, () => updateService.download())
 
   ipcMain.handle(IPC.updateInstall, () => updateService.install())
+
+  /* 手机远程（只能桌面本机调用；远程通道无 settings:set，见 remote/handler） */
+
+  // 开关变更即时生效：remote.enabled / remote.relayUrl 改完立即 sync，不断开重连
+  ipcMain.handle(IPC.remoteStatus, () => remoteService.getStatus())
+
+  ipcMain.handle(IPC.remotePair, async (_event, phoneName: unknown) => {
+    const name = typeof phoneName === 'string' ? phoneName : ''
+    return remoteService.issuePairing(name)
+  })
+
+  ipcMain.handle(IPC.remoteDevices, () => remoteService.listDevices())
+
+  ipcMain.handle(IPC.remoteRevoke, async (_event, id: string) => remoteService.revokeDevice(id))
+
+  ipcMain.handle(IPC.remoteDisconnect, () => {
+    remoteService.disconnectAll()
+    return true
+  })
+
+  // 兼容旧测试：审计查询走 settings 通道不合适，暂挂 remoteStatus 扩展返回
+  void listRemoteAudit
 }

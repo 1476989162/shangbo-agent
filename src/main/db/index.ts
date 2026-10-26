@@ -105,6 +105,27 @@ const MIGRATIONS: Migration[] = [
     // v3：对话可绑定本机项目目录，作为工具相对路径与命令工作目录的锚点
     version: 3,
     sql: `ALTER TABLE conversations ADD COLUMN working_dir TEXT;`
+  },
+  {
+    // v4：手机远程已配对设备（元数据；密钥与令牌走 secrets.ts，不落库明文）
+    version: 4,
+    sql: `
+      CREATE TABLE IF NOT EXISTS remote_devices (
+        id               TEXT PRIMARY KEY,
+        name             TEXT NOT NULL DEFAULT '未命名手机',
+        phone_public_key TEXT NOT NULL DEFAULT '',
+        created_at       INTEGER NOT NULL,
+        last_seen_at     INTEGER,
+        revoked_at       INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS remote_audit (
+        id          TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL,
+        detail      TEXT NOT NULL DEFAULT '',
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_remote_audit_time ON remote_audit(created_at);
+    `
   }
 ]
 

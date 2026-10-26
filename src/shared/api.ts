@@ -94,4 +94,19 @@ export interface ShangboApi {
     onEvent(handler: (state: import('./types').UpdateState) => void): void
     offEvent(): void
   }
+
+  remote: {
+    /** 远程状态（开关、连接状态、在线手机数），设置页轮询/订阅用。 */
+    status(): Promise<{ enabled: boolean; status: string; detail: string }>
+    /** 申请配对：返回二维码文本（含中转地址+配对码+桌面公钥指纹）。 */
+    pair(phoneName?: string): Promise<{ qrText: string; code: string; expiresAt: number; fingerprint: string }>
+    /** 已配对设备列表。 */
+    devices(): Promise<{ id: string; name: string; createdAt: number; lastSeenAt: number | null }[]>
+    /** 吊销设备。 */
+    revoke(id: string): Promise<boolean>
+    /** 一键断开所有远程设备并关闭远程功能。 */
+    disconnect(): Promise<boolean>
+    onEvent(handler: (status: string, detail: string) => void): void
+    offEvent(): void
+  }
 }

@@ -56,6 +56,10 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'chat.providerId': z.string().max(200),
   'cowork.filesPath': z.string().max(1000),
   'cowork.globalInstructions': z.string().max(20_000, '全局指导过长'),
+  // 手机远程（只能桌面本机改，远程通道无 settings:set）
+  'remote.enabled': z.boolean(),
+  'remote.relayUrl': z.string().max(500),
+  'remote.approvalPolicy': z.enum(['allow-all', 'confirm-high', 'read-only']),
   // 枚举
   'agent.browser.default': z.enum(['external', 'builtin']),
   // 字符串数组

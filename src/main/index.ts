@@ -5,6 +5,7 @@ import { settleOrphanStreamingMessages } from './db/repo'
 import { ensureDefaultProviders } from './providers/store'
 import { registerIpcHandlers } from './ipc'
 import { createTray, destroyTray } from './tray'
+import { remoteService } from './remote/service'
 import { updateService } from './update'
 import { createMainWindow, getMainWindow, markQuitting } from './windows/mainWindow'
 import { pythonBridge } from './py/bridge'
@@ -47,6 +48,12 @@ if (!gotLock) {
     handleImageProtocol()
     createMainWindow()
     createTray()
+    // 远程默认关闭：仅当用户在设置中手动开启后才连接中转
+    try {
+      remoteService.sync()
+    } catch (error) {
+      log.warn('[app] 远程模块初始化失败（不影响主流程）', error)
+    }
     // 自动更新放在最后：它要读设置里的开关，且不参与首屏渲染，慢一点无妨
     updateService.init()
   })

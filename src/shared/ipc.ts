@@ -43,7 +43,14 @@ export const IPC = {
   updateCheck: 'update:check',
   updateDownload: 'update:download',
   updateInstall: 'update:install',
-  updateEvent: 'update:event'
+  updateEvent: 'update:event',
+
+  remoteStatus: 'remote:status',
+  remotePair: 'remote:pair',
+  remoteDevices: 'remote:devices',
+  remoteRevoke: 'remote:revoke',
+  remoteDisconnect: 'remote:disconnect',
+  remoteEvent: 'remote:event'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
