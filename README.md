@@ -38,6 +38,12 @@ gh release create v0.2.2 --title "尚搏 Agent v0.2.2" \
 
 已装应用的更新链路：`electron-builder.yml` 的 `publish` 指向本仓库 Releases → 打包时生成 `resources/app-update.yml` → 应用内 electron-updater 读 `latest.yml` 比对版本 → 下载校验 SHA-512 → 用户确认后 `quitAndInstall`。签名校验目前跳过（无证书），见 CHANGELOG「安装包未做代码签名」。
 
+打包时若报 `EBUSY` / `EPERM`（`release/win-unpacked` 里的 asar 被索引器占用），把产物输出到工作区外再打，然后把三个文件拷回 `release/`：
+
+```bash
+npx electron-builder --win --config.directories.output=C:/Users/<你>/AppData/Local/Temp/shangbo-rel
+```
+
 0.2.1 及更早版本没有 `app-update.yml`，不会自动更新，需要手动装一次新安装包。
 
 ## 环境要求

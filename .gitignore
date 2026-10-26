@@ -2,6 +2,8 @@ node_modules/
 out/
 dist/
 release/
+# 备用打包目录（release/ 里的产物被索引器占用时用 --config.directories.output 指定）
+release-*/
 *.log
 .DS_Store
 .env
