@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   commandStaysInsideWorkspace,
+  isPathAutoApprovable,
   isPathInside,
+  isPathInsideResolved,
   splitCommand,
   touchesPrivateData
 } from './commandGuard'
@@ -169,5 +174,70 @@ describe('touchesPrivateData', () => {
     expect(touchesPrivateData('git commit -m "shangbo-agent"', userData)).toBe(false)
     expect(touchesPrivateData('type G:\\repo\\src\\a.ts', userData)).toBe(false)
     expect(touchesPrivateData('cat db-walk.txt', userData)).toBe(false)
+  })
+})
+
+describe('符号链接边界 (T2)', () => {
+  it('普通工作区内路径可免审批', () => {
+    const root = mkdtempSync(join(tmpdir(), 'guard-ws-'))
+    try {
+      mkdirSync(join(root, 'src'))
+      writeFileSync(join(root, 'src', 'a.ts'), 'export {}\n')
+      expect(isPathAutoApprovable(root, join(root, 'src', 'a.ts'))).toBe(true)
+      // 尚不存在的新文件：按最近存在的父目录判断
+      expect(isPathAutoApprovable(root, join(root, 'src', 'new.ts'))).toBe(true)
+      expect(isPathAutoApprovable(root, 'src/new.ts')).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('借 junction 指向工作区外时不放行', () => {
+    const base = mkdtempSync(join(tmpdir(), 'guard-junction-'))
+    const workspace = join(base, 'ws')
+    const outside = join(base, 'outside')
+    try {
+      mkdirSync(workspace)
+      mkdirSync(outside)
+      const link = join(workspace, 'escape')
+      symlinkSync(outside, link, 'junction')
+
+      // 字符串比较会认为它在工作区内，realpath 后才发现指向外部
+      expect(isPathInside(workspace, join(link, 'pwn.txt'))).toBe(true)
+      expect(isPathInsideResolved(workspace, join(link, 'pwn.txt'))).toBe(false)
+      expect(isPathAutoApprovable(workspace, join(link, 'pwn.txt'))).toBe(false)
+      expect(isPathAutoApprovable(workspace, 'escape/pwn.txt')).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('工作区根本身是符号链接时，按其真实路径判断', () => {
+    const base = mkdtempSync(join(tmpdir(), 'guard-rootlink-'))
+    const real = join(base, 'real')
+    try {
+      mkdirSync(real)
+      const linkRoot = join(base, 'linkroot')
+      symlinkSync(real, linkRoot, 'junction')
+      expect(isPathAutoApprovable(linkRoot, join(linkRoot, 'a.txt'))).toBe(true)
+      expect(isPathAutoApprovable(linkRoot, join(base, 'a.txt'))).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('命令里的绝对路径借 junction 越界时不放行', () => {
+    const base = mkdtempSync(join(tmpdir(), 'guard-cmdlink-'))
+    const workspace = join(base, 'ws')
+    const outside = join(base, 'outside')
+    try {
+      mkdirSync(workspace)
+      mkdirSync(outside)
+      const link = join(workspace, 'escape')
+      symlinkSync(outside, link, 'junction')
+      expect(commandStaysInsideWorkspace(`type ${join(link, 'x.txt')}`, workspace)).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })

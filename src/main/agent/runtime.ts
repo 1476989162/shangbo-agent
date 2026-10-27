@@ -35,6 +35,8 @@ import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { listLessons, markLessonsUsed } from '../autonomous/store'
 import {
   commandStaysInsideWorkspace,
+  isPathAutoApprovable,
+  isPathInsideResolved,
   isPathInside,
   touchesPrivateData
 } from './commandGuard'
@@ -1755,8 +1757,7 @@ export class AgentRuntime {
     if (toolName === 'write_file' || toolName === 'patch_file' || toolName === 'read_file') {
       const rawPath = (input as { path?: unknown } | null)?.path
       if (typeof rawPath !== 'string' || !rawPath.trim()) return false
-      const target = isAbsolute(rawPath) ? rawPath : resolve(workingDirectory, rawPath)
-      return isPathInside(workingDirectory, target) && !touchesPrivateData(target)
+        return isPathAutoApprovable(workingDirectory, rawPath)
     }
 
     if (toolName === 'run_command') {
@@ -1765,6 +1766,7 @@ export class AgentRuntime {
       const cwd = typeof record.cwd === 'string' && record.cwd.trim() ? record.cwd : workingDirectory
       const resolvedCwd = isAbsolute(cwd) ? resolve(cwd) : resolve(workingDirectory, cwd)
       if (!isPathInside(workingDirectory, resolvedCwd)) return false
+        if (!isPathInsideResolved(workingDirectory, resolvedCwd)) return false
       return (
         commandStaysInsideWorkspace(record.command, resolvedCwd) &&
         !touchesPrivateData(record.command)

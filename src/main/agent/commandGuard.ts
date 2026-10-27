@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { existsSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 /**
@@ -123,6 +124,8 @@ function segmentStaysInside(segment: string, workspace: string): boolean {
   const absolutePaths = segment.match(/(?:[a-zA-Z]:[\\/][^\s"';&|]*|\\\\[^\s"';&|]+)/g) ?? []
   for (const path of absolutePaths) {
     if (!isPathInside(workspace, path)) return false
+    // 工作区真实存在时再加一道 realpath：防止借 junction 指向外部
+    if (existsSync(workspace) && !isPathInsideResolved(workspace, path)) return false
   }
   return true
 }
@@ -145,6 +148,55 @@ export function isPathInside(root: string, candidate: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * 解析符号链接后的路径包含判断。
+ *
+ * 工作区里的 junction / 符号链接可以指向外部目录，只做字符串比较会被绕过。
+ * 目标存在时解析目标本身；目标不存在时解析最近一层存在的父目录，
+ * 再把剩余的不存在部分拼回去比较。
+ */
+export function isPathInsideResolved(root: string, candidate: string): boolean {
+  try {
+    const base = realpathSync.native(resolve(root))
+    const target = isAbsolute(candidate) ? resolve(candidate) : resolve(base, candidate)
+    const resolvedTarget = realpathNearest(target)
+    const rel = relative(base, resolvedTarget)
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  } catch {
+    // 路径不存在、符号链接成环或无权限时一律判否
+    return false
+  }
+}
+
+/** 解析最近一层存在的祖先，再把不存在的那几段拼回去。 */
+function realpathNearest(target: string): string {
+  const missing: string[] = []
+  let cursor = target
+  while (!existsSync(cursor)) {
+    const parent = resolve(cursor, '..')
+    if (parent === cursor) throw new Error('无法解析路径')
+    missing.unshift(resolve(cursor).slice(parent.length).replace(/^[\\/]+/, ''))
+    cursor = parent
+  }
+  const base = realpathSync.native(cursor)
+  return missing.length > 0 ? resolve(base, ...missing) : base
+}
+
+/**
+ * 文件类工具能否在许愿模式下免审批。
+ * 字符串边界 + realpath 边界都要通过，且不能触碰私有数据。
+ */
+export function isPathAutoApprovable(
+  workingDirectory: string,
+  rawPath: string,
+  userDataPath?: string | null
+): boolean {
+  if (!rawPath.trim()) return false
+  const target = isAbsolute(rawPath) ? rawPath : resolve(workingDirectory, rawPath)
+  if (!isPathInsideResolved(workingDirectory, target)) return false
+  return !touchesPrivateData(target, userDataPath)
 }
 
 /**
