@@ -176,14 +176,18 @@ export function buildContext(
   }
 
   // 最新一轮单独就可能超预算（许愿模式一轮 120 步）：
-  // 超过预算 60% 就先压缩轮内旧的工具输出，而不是把整轮丢掉。
+  // 最新一轮自身超过预算 60% 就压缩轮内旧的工具输出，而不是把整轮丢掉。
+  // 即使前面仍有旧轮被保留，也必须检查，否则大轮会继续挤占上下文。
   // tool_use 与 tool_result 成对保留。
   let compressedInTurn = false
-  if (kept.length === 1 && used > options.budgetTokens * 0.6) {
-    const compressed = compressTurnToolResults(kept[0], maxChars)
+  const latestTurnIndex = kept.length - 1
+  const latestTurnTokens =
+    latestTurnIndex >= 0 ? estimateTurn(kept[latestTurnIndex], maxChars) : 0
+  if (latestTurnIndex >= 0 && latestTurnTokens > options.budgetTokens * 0.6) {
+    const compressed = compressTurnToolResults(kept[latestTurnIndex], maxChars)
     if (compressed.changed) {
-      kept[0] = compressed.turn
-      used = systemTokens + estimateTurn(kept[0], maxChars)
+      kept[latestTurnIndex] = compressed.turn
+      used = systemTokens + kept.reduce((sum, turn) => sum + estimateTurn(turn, maxChars), 0)
       compressedInTurn = true
     }
   }

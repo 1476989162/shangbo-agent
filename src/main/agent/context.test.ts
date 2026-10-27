@@ -284,14 +284,14 @@ describe('buildContext', () => {
 
 describe('buildContext 轮内压缩 (T3)', () => {
   /** 一轮里塞 100 组 tool_use/tool_result，每组输出都很长。 */
-  function hugeTurn(): Message[] {
+  function hugeTurn(resultChars = 3000): Message[] {
     const blocks: ContentBlock[] = []
     for (let i = 0; i < 100; i++) {
       blocks.push({ type: 'tool_use', id: `t${i}`, name: 'read_file', input: { path: `/f${i}` } })
       blocks.push({
         type: 'tool_result',
         toolUseId: `t${i}`,
-        content: `第${i}次输出` + 'x'.repeat(3000),
+        content: `第${i}次输出` + 'x'.repeat(resultChars),
         isError: false
       })
     }
@@ -307,6 +307,23 @@ describe('buildContext 轮内压缩 (T3)', () => {
     const budget = 16_000
     const result = buildContext(hugeTurn(), { system: 'sys', budgetTokens: budget })
 
+    expect(result.compressedInTurn).toBe(true)
+    expect(result.estimatedTokens).toBeLessThanOrEqual(budget)
+  })
+
+  it('保留旧轮时，最新一轮自身超过预算 60% 也会压缩', () => {
+    const oldTurn = [
+      makeMessage('user', [textBlock('旧问题')]),
+      makeMessage('assistant', [textBlock('旧回答')])
+    ]
+    const budget = 16_000
+    // 最新一轮约 10k，自身超过 16k 预算的 60%，但加上旧轮后总量仍低于预算。
+    const result = buildContext([...oldTurn, ...hugeTurn(250)], {
+      system: 'sys',
+      budgetTokens: budget
+    })
+
+    expect(result.omittedTurns).toBe(0)
     expect(result.compressedInTurn).toBe(true)
     expect(result.estimatedTokens).toBeLessThanOrEqual(budget)
   })
