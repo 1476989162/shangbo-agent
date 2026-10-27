@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import log from 'electron-log/main'
@@ -33,6 +33,14 @@ import type {
 import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { listLessons, markLessonsUsed } from '../autonomous/store'
+import {
+  commandStaysInsideWorkspace,
+  isPathInside,
+  touchesPrivateData
+} from './commandGuard'
+
+// 保持原有导出路径：wish.test.ts 等既有调用方无需改动
+export { commandStaysInsideWorkspace } from './commandGuard'
 
 export type Emitter = (event: AgentEvent) => void
 
@@ -1772,45 +1780,6 @@ export class AgentRuntime {
     setSetting(AUTO_APPROVE_KEY, [...current, toolName])
     log.info(`[agent] 已永久放行工具：${toolName}`)
   }
-}
-
-function isPathInside(root: string, candidate: string): boolean {
-  try {
-    const base = resolve(root)
-    const target = isAbsolute(candidate) ? resolve(candidate) : resolve(base, candidate)
-    const rel = relative(base, target)
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-  } catch {
-    return false
-  }
-}
-
-function touchesPrivateData(value: string): boolean {
-  const normalized = value.replace(/\//g, '\\').toLowerCase()
-  return (
-    normalized.includes('secrets.json') ||
-    normalized.includes('shangbo-agent.db') ||
-    normalized.includes('%appdata%') ||
-    normalized.includes('$env:appdata')
-  )
-}
-
-/**
- * 粗粒度命令边界检查：拦掉显式工作区外绝对路径、父目录穿越和环境变量路径逃逸。
- * 它不是操作系统沙箱，但能挡住模型最常写的 `cd .. && ...`、`C:\Users\...`、
- * `%USERPROFILE%\...` 这类绕过；真正的文件级密钥保护仍由 tools 层兜底。
- */
-export function commandStaysInsideWorkspace(command: string, workspace: string): boolean {
-  const cmd = command.trim()
-  if (!cmd) return false
-  if (/(^|[\s;&|"'`])(?:\.\.|~)(?=[\\/\s;&|"'`]|$)/m.test(cmd)) return false
-  if (/%[a-z_]+%|\$env:|\$\{?home\}?|\$\{?userprofile\}?/i.test(cmd)) return false
-
-  const absolutePaths = cmd.match(/(?:[a-zA-Z]:[\\/][^\s"';&|]*|\\\\[^\s"';&|]+)/g) ?? []
-  for (const path of absolutePaths) {
-    if (!isPathInside(workspace, path)) return false
-  }
-  return true
 }
 
 export const agentRuntime = new AgentRuntime()
