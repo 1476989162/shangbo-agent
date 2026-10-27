@@ -99,18 +99,27 @@ function scrollToBottomSmooth(): void {
   }, 400)
 }
 
+/**
+ * 首次挂载或切换会话时，Markdown、图片和折叠活动行可能在同一轮内继续改变高度。
+ * 只在 nextTick 后滚一次会停在“旧高度”的底部；等两帧再按最终高度同步一次。
+ */
+async function scrollToBottomAfterLayout(): Promise<void> {
+  await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  scrollToBottom()
+}
+
 watch([contentTick, () => path.value.length], async () => {
   if (!pinnedToBottom.value) return
-  await nextTick()
-  scrollToBottom()
+  await scrollToBottomAfterLayout()
 })
 
 watch(
   () => store.activeConversationId,
   async () => {
     pinnedToBottom.value = true
-    await nextTick()
-    scrollToBottom()
+    await scrollToBottomAfterLayout()
   }
 )
 
