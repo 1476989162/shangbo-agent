@@ -18,6 +18,7 @@ interface PendingImage {
 import { useChatStore } from '../stores/chat'
 import type { BranchInfo, EffortLevel } from '../stores/chat'
 import MessageItem from './MessageItem.vue'
+import ApprovalPanel from './ApprovalPanel.vue'
 import logoImg from '../assets/logo.png'
 
 const emit = defineEmits<{ openSettings: [tab?: string] }>()
@@ -298,11 +299,6 @@ async function onAutoContinue(messageId: string): Promise<void> {
   await store.autoContinue(messageId)
 }
 
-const isSecurityCriticalApproval = computed(() => {
-  const reason = store.approval?.reason || ''
-  return reason.includes('Freebuff') || reason.includes('安全护栏') || reason.includes('安全红线')
-})
-
 async function exportConversation(): Promise<void> {
   const result = await store.exportConversation()
   if (result.canceled) return
@@ -379,10 +375,6 @@ onBeforeUnmount(() => {
   clearPendingImages()
 })
 
-async function decide(approved: boolean, alwaysAllow = false): Promise<void> {
-  await store.decideApproval(approved, alwaysAllow)
-}
-
 /** 项目目录按钮上显示的短名：取路径最后一段，未绑定时提示选择。 */
 const folderLabel = computed(() => {
   const dir = store.activeConversation?.workingDir
@@ -412,14 +404,6 @@ function shortReason(reason: string): string {
   if (/timeout|超时/i.test(flat)) return '（首字节超时）'
   if (/5\d\d|overloaded|unavailable/i.test(flat)) return '（服务暂时不可用）'
   return flat ? `（${flat.slice(0, 60)}${flat.length > 60 ? '…' : ''}）` : ''
-}
-
-function prettyJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -880,23 +864,11 @@ const suggestions = [
         </div>
 
         <!-- 工具审批卡片 (整合 Freebuff 级安全审计与护栏) -->
-        <div v-if="store.approval" class="approval" :class="{ 'critical-security-card': isSecurityCriticalApproval }">
-          <div class="approval-head">
-            <span class="approval-badge" :class="{ 'critical-badge': isSecurityCriticalApproval }">
-              {{ isSecurityCriticalApproval ? '🛡️ Freebuff 安全护栏高危拦截' : '需要操作确认' }}
-            </span>
-            <span class="mono approval-tool">{{ store.approval.name }}</span>
-          </div>
-          <p class="approval-reason" :class="{ 'critical-text': isSecurityCriticalApproval }">{{ store.approval.reason }}</p>
-          <pre class="approval-params mono">{{ prettyJson(store.approval.input) }}</pre>
-          <div class="approval-actions">
-            <button class="btn btn-primary" :class="{ 'btn-critical': isSecurityCriticalApproval }" @click="decide(true)">
-              {{ isSecurityCriticalApproval ? '我已知晓风险，仍执行一次' : '允许这一次' }}
-            </button>
-            <button v-if="!isSecurityCriticalApproval" class="btn" @click="decide(true, true)">始终允许该工具</button>
-            <button class="btn btn-danger" @click="decide(false)">拒绝操作</button>
-          </div>
-        </div>
+        <ApprovalPanel
+          v-if="store.approval"
+          :approval="store.approval"
+          @decide="store.decideApproval"
+        />
 
         <!-- 自动重试通知 -->
         <div v-if="store.retryInfo" class="retry-banner">
@@ -2735,75 +2707,6 @@ const suggestions = [
 .todo-item.completed .todo-content {
   color: var(--text-subtle);
   text-decoration: line-through;
-}
-
-.approval {
-  margin-bottom: 12px;
-  padding: 12px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--accent-soft);
-}
-
-.approval-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.approval-badge {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.approval-tool {
-  font-size: 12px;
-}
-
-.approval-reason {
-  margin: 6px 0;
-  font-size: 12px;
-}
-
-.approval-params {
-  margin: 4px 0 8px;
-  padding: 6px 8px;
-  font-size: 11px;
-  background: var(--bg-elevated);
-  border-radius: var(--radius-sm);
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.approval-actions {
-  display: flex;
-  gap: 8px;
-}
-
-/* Freebuff 高危安全护栏拦截卡片样式 */
-.critical-security-card {
-  border-color: #ef4444 !important;
-  background: rgba(239, 68, 68, 0.08) !important;
-  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.15) !important;
-}
-
-.critical-badge {
-  background: #ef4444 !important;
-  color: #ffffff !important;
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-
-.critical-text {
-  color: #b91c1c !important;
-  font-weight: 600;
-}
-
-.btn-critical {
-  background: #ef4444 !important;
-  border-color: #ef4444 !important;
-  color: #ffffff !important;
 }
 
 /* TRAE 工作流模式切换按钮 */

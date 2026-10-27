@@ -131,6 +131,12 @@ vi.mock('../storage/images', () => ({
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5))
 const drain = (ms = 300): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const waitFor = async (predicate: () => boolean, timeoutMs = 1000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate() && Date.now() < deadline) {
+    await tick()
+  }
+}
 
 describe('停止整个会话 abortConversationRuns', () => {
   let runtime: InstanceType<typeof import('./runtime').AgentRuntime>
@@ -216,7 +222,12 @@ describe('队列插话指导 steerRunningRound', () => {
     await tick()
     // A 跑中时连发 B
     runtime.send({ conversationId: 'c1', parentMessageId: null, content: '别删 node_modules' }, emit)
-    await tick()
+    // 等异步落库完成；固定 5ms 在高负载 CI 上不足以稳定等到 B
+    await waitFor(() =>
+      inserted.some((m) =>
+        m.blocks.some((b) => b.type === 'text' && b.text === '别删 node_modules')
+      )
+    )
     expect(runtime.queueLength('c1')).toBe(1)
 
     const bUser = inserted.find((m) =>
