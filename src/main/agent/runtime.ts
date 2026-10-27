@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import log from 'electron-log/main'
 import * as repo from '../db/repo'
@@ -42,13 +42,10 @@ import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { listLessons, markLessonsUsed } from '../autonomous/store'
 import {
-  commandStaysInsideWorkspace,
-  isPathAutoApprovable,
-  isPathInsideResolved,
-  isPathInside,
-  touchesPrivateData
+  commandStaysInsideWorkspace
 } from './commandGuard'
 import { ApprovalBroker, type PendingApprovalSnapshot } from './approvals'
+import { isWishAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
 
 // 保持原有导出路径：wish.test.ts 等既有调用方无需改动
 export { commandStaysInsideWorkspace } from './commandGuard'
@@ -71,8 +68,6 @@ const MAX_REASONING_CHARS = 8_000
 /** 上轮思考耗尽预算后的续写指令：本轮不再思考，直接输出。 */
 const SKIP_THINKING_SUFFIX = '\n\n（上轮思考过长被截断：本轮不要再思考，直接输出正文或工具调用。）'
 const BUDGET_KEY = 'agent.contextBudgetTokens'
-const WISH_AUTO_APPROVE_KEY = 'agent.wish.autoApproveWorkspace'
-
 const DEFAULT_SYSTEM_PROMPT = `你是「尚搏 Agent」，运行在用户本机的个人助理，用中文回答，先给结论。
 
 硬规则：
@@ -836,10 +831,11 @@ export class AgentRuntime {
     if (plugins.includes('security-guidance')) pluginDirectives.push('注意密钥/SQL注入/命令拼接风险。')
     if (plugins.includes('github')) pluginDirectives.push('GitHub 操作优先用本机 gh。')
 
-    const agentMode =
-      conversation.mode === 'wish' && !getSetting<boolean>('agent.wish.enabled', true)
-        ? 'builder'
-        : (conversation.mode ?? getSetting<string>('agent.mode', 'builder'))
+    const agentMode = resolveAgentMode(conversation.mode, {
+      wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
+      autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
+      defaultMode: getSetting<string>('agent.mode', 'builder')
+    })
 
     // 许愿闭环：把当前分支的真实 diff 作为“改动证据”注入，避免模型只凭记忆总结。
     if (
@@ -1708,10 +1704,11 @@ export class AgentRuntime {
 
   private isWishMode(conversationId: string): boolean {
     const conversation = repo.getConversation(conversationId)
-    return (
-      getSetting<boolean>('agent.wish.enabled', true) &&
-      (conversation?.mode ?? getSetting<string>('agent.mode', 'builder')) === 'wish'
-    )
+    return isWishModeActive(conversation?.mode ?? null, {
+      wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
+      autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
+      defaultMode: getSetting<string>('agent.mode', 'builder')
+    })
   }
 
   /**
@@ -1726,30 +1723,13 @@ export class AgentRuntime {
     conversationId: string,
     workingDirectory: string | null
   ): boolean {
-    if (!getSetting<boolean>('agent.wish.autoApproveWorkspace', true)) return false
-    if (!this.isWishMode(conversationId)) return false
-    if (!workingDirectory) return false
-
-    if (toolName === 'write_file' || toolName === 'patch_file' || toolName === 'read_file') {
-      const rawPath = (input as { path?: unknown } | null)?.path
-      if (typeof rawPath !== 'string' || !rawPath.trim()) return false
-        return isPathAutoApprovable(workingDirectory, rawPath)
-    }
-
-    if (toolName === 'run_command') {
-      const record = (input ?? {}) as { command?: unknown; cwd?: unknown }
-      if (typeof record.command !== 'string' || !record.command.trim()) return false
-      const cwd = typeof record.cwd === 'string' && record.cwd.trim() ? record.cwd : workingDirectory
-      const resolvedCwd = isAbsolute(cwd) ? resolve(cwd) : resolve(workingDirectory, cwd)
-      if (!isPathInside(workingDirectory, resolvedCwd)) return false
-        if (!isPathInsideResolved(workingDirectory, resolvedCwd)) return false
-      return (
-        commandStaysInsideWorkspace(record.command, resolvedCwd) &&
-        !touchesPrivateData(record.command)
-      )
-    }
-
-    return false
+    return isWishAutoApproved(
+      toolName,
+      input,
+      this.isWishMode(conversationId),
+      getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
+      workingDirectory
+    )
   }
 
   private grantAutoApprove(toolName: string): void {
