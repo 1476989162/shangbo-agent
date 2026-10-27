@@ -3,13 +3,11 @@ import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { createHash } from 'node:crypto'
 import log from 'electron-log/main'
 import * as repo from '../db/repo'
-import { getSetting, setSetting } from '../settings'
+import { getSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
 import { clearTodoItems, getTodoItems } from '../tools/todo'
-import { canonicalParamString } from '../../shared/remote'
 import { eventBus, type EventSubscriber } from '../events/bus'
 import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
 import { routingOrder } from '../providers/store'
@@ -50,9 +48,11 @@ import {
   isPathInside,
   touchesPrivateData
 } from './commandGuard'
+import { ApprovalBroker, type PendingApprovalSnapshot } from './approvals'
 
 // 保持原有导出路径：wish.test.ts 等既有调用方无需改动
 export { commandStaysInsideWorkspace } from './commandGuard'
+export type { PendingApprovalSnapshot } from './approvals'
 
 export type Emitter = (event: AgentEvent) => void
 
@@ -65,15 +65,12 @@ export interface ToolOutcome {
 
 const execFileAsync = promisify(execFile)
 
-/** 审批弹窗超时：用户 5 分钟不点按拒绝处理。 */
-const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_OUTPUT_TOKENS = DEFAULT_MAX_OUTPUT_TOKENS
 /** 思考过程只用于界面展示，不回传模型；封顶避免超长思考撑爆落库与界面。 */
 const MAX_REASONING_CHARS = 8_000
 /** 上轮思考耗尽预算后的续写指令：本轮不再思考，直接输出。 */
 const SKIP_THINKING_SUFFIX = '\n\n（上轮思考过长被截断：本轮不要再思考，直接输出正文或工具调用。）'
 const BUDGET_KEY = 'agent.contextBudgetTokens'
-const AUTO_APPROVE_KEY = 'tools.autoApprove'
 const WISH_AUTO_APPROVE_KEY = 'agent.wish.autoApproveWorkspace'
 
 const DEFAULT_SYSTEM_PROMPT = `你是「尚搏 Agent」，运行在用户本机的个人助理，用中文回答，先给结论。
@@ -138,32 +135,6 @@ function resolveTarget(
   return { providerId: provider.id, model, providerName: provider.name }
 }
 
-interface PendingApproval {
-  toolName: string
-  conversationId: string
-  messageId: string
-  input: unknown
-  paramHash: string
-  reason: string
-  createdAt: number
-  settle: (approved: boolean) => void
-}
-
-/** 待审批清单项（手机连上时立刻下发，不含 settle）。 */
-export interface PendingApprovalSnapshot {
-  runId: string
-  toolUseId: string
-  conversationId: string
-  messageId: string
-  toolName: string
-  input: unknown
-  paramHash: string
-  reason: string
-  createdAt: number
-  expiresAt: number
-  remainingMs: number
-}
-
 interface ActiveRun {
   controller: AbortController
   conversationId: string
@@ -195,7 +166,7 @@ interface QueuedRun {
 
 export class AgentRuntime {
   private runs = new Map<string, ActiveRun>()
-  private approvals = new Map<string, PendingApproval>()
+  private approvalBroker = new ApprovalBroker()
   /** 会话 id → 该会话的等待队列。同一会话严格串行，不同会话互不阻塞。 */
   private queues = new Map<string, QueuedRun[]>()
   /** 会话 id → 中途指导（steer）：排队消息转指导后暂存，主循环每轮开跑前取走拼进系统提示。 */
@@ -478,14 +449,7 @@ export class AgentRuntime {
       this.queues.delete(conversationId)
     }
     // 挂起的审批按拒绝处理，避免弹窗残留
-    for (const [key, pending] of [...this.approvals]) {
-      if (pending.conversationId === conversationId) {
-        try {
-          pending.settle(false)
-        } catch {}
-        this.approvals.delete(key)
-      }
-    }
+    this.approvalBroker.rejectConversation(conversationId)
     return { abortedRun, clearedQueued }
   }
 
@@ -622,10 +586,7 @@ export class AgentRuntime {
     for (const [runId, run] of this.runs) {
       if (run.conversationId === conversationId) runIds.add(runId)
     }
-    for (const [key, pending] of this.approvals) {
-      const runId = key.split(':')[0]
-      if (runIds.has(runId)) pending.settle(false)
-    }
+    this.approvalBroker.rejectRuns(runIds)
     for (const run of this.runs.values()) {
       if (run.conversationId === conversationId) run.controller.abort()
     }
@@ -640,14 +601,7 @@ export class AgentRuntime {
 
   /** 渲染进程回传的权限确认结果（桌面本地，允许 alwaysAllow）。 */
   decide(decision: ApprovalDecision): void {
-    const key = `${decision.runId}:${decision.toolUseId}`
-    const pending = this.approvals.get(key)
-    const toolName = pending?.toolName
-    this.decideWithHash(decision.runId, decision.toolUseId, decision.approved, undefined)
-    // 5.3：只有桌面本地审批的 alwaysAllow 才记自动放行；远程审批永不记入
-    if (decision.approved && decision.alwaysAllow && toolName) {
-      this.grantAutoApprove(toolName)
-    }
+    this.approvalBroker.decide(decision)
   }
 
   /**
@@ -657,47 +611,17 @@ export class AgentRuntime {
    * 返回 true 表示裁决被接受（批准或拒绝均已 settle），false 表示无此审批或哈希不一致。
    */
   decideWithHash(runId: string, toolUseId: string, approved: boolean, expectedParamHash?: string): boolean {
-    const key = `${runId}:${toolUseId}`
-    const pending = this.approvals.get(key)
-    if (!pending) return false
-    if (expectedParamHash !== undefined && expectedParamHash !== pending.paramHash) {
-      log.warn(`[agent] 远程审批哈希不一致，已按拒绝处理：${key}`)
-      pending.settle(false)
-      return false
-    }
-    pending.settle(approved)
-    return true
+    return this.approvalBroker.decideWithHash(runId, toolUseId, approved, expectedParamHash)
   }
 
   /** 当前所有待审批清单（手机连上时立刻下发）。 */
   listPendingApprovals(): PendingApprovalSnapshot[] {
-    const now = Date.now()
-    const out: PendingApprovalSnapshot[] = []
-    for (const [key, pending] of this.approvals) {
-      const sep = key.indexOf(':')
-      const runId = key.slice(0, sep)
-      const toolUseId = key.slice(sep + 1)
-      const remainingMs = Math.max(0, pending.createdAt + APPROVAL_TIMEOUT_MS - now)
-      out.push({
-        runId,
-        toolUseId,
-        conversationId: pending.conversationId,
-        messageId: pending.messageId,
-        toolName: pending.toolName,
-        input: pending.input,
-        paramHash: pending.paramHash,
-        reason: pending.reason,
-        createdAt: pending.createdAt,
-        expiresAt: pending.createdAt + APPROVAL_TIMEOUT_MS,
-        remainingMs
-      })
-    }
-    return out
+    return this.approvalBroker.list()
   }
 
   /** 对工具参数计算稳定哈希（审批绑定用，与手机端 WebCrypto SHA-256 对应）。 */
   static paramHashOf(input: unknown): string {
-    return createHash('sha256').update(canonicalParamString(input), 'utf8').digest('hex')
+    return ApprovalBroker.paramHashOf(input)
   }
 
   /* ---------------------------------------------------------------- */
@@ -1775,52 +1699,11 @@ export class AgentRuntime {
     emit: Emitter,
     controller: AbortController
   ): Promise<ApprovalDecision> {
-    const key = `${runId}:${call.id}`
-    const paramHash = AgentRuntime.paramHashOf(call.input)
-    const reason = tool.approvalReason ?? '该操作会修改你的本机环境。'
-
-    emit({
-      type: 'approval_required',
-      runId,
-      conversationId,
-      messageId,
-      toolUseId: call.id,
-      name: call.name,
-      input: call.input,
-      reason
-    })
-
-    return new Promise<ApprovalDecision>((resolve) => {
-      const settle = (approved: boolean): void => {
-        clearTimeout(timer)
-        controller.signal.removeEventListener('abort', onAbort)
-        this.approvals.delete(key)
-        resolve({ runId, toolUseId: call.id, approved })
-      }
-
-      const timer = setTimeout(() => {
-        log.warn(`[agent] 工具 ${call.name} 的确认超时，按拒绝处理`)
-        settle(false)
-      }, APPROVAL_TIMEOUT_MS)
-
-      const onAbort = (): void => settle(false)
-      controller.signal.addEventListener('abort', onAbort, { once: true })
-
-      this.approvals.set(key, {
-        toolName: tool.name,
-        conversationId,
-        messageId,
-        input: call.input,
-        paramHash,
-        reason,
-        createdAt: Date.now(),
-        settle
-      })
-    })
+    return this.approvalBroker.request(runId, conversationId, messageId, call, tool, emit, controller)
   }
 
   private isAutoApproved(toolName: string): boolean {
-    return getSetting<string[]>(AUTO_APPROVE_KEY, []).includes(toolName)
+    return this.approvalBroker.isAutoApproved(toolName)
   }
 
   private isWishMode(conversationId: string): boolean {
@@ -1870,10 +1753,7 @@ export class AgentRuntime {
   }
 
   private grantAutoApprove(toolName: string): void {
-    const current = getSetting<string[]>(AUTO_APPROVE_KEY, [])
-    if (current.includes(toolName)) return
-    setSetting(AUTO_APPROVE_KEY, [...current, toolName])
-    log.info(`[agent] 已永久放行工具：${toolName}`)
+    this.approvalBroker.grantAutoApprove(toolName)
   }
 }
 
