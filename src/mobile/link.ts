@@ -15,6 +15,7 @@ export interface MobileCredentials {
   phoneToken: string
   sessionKeyB64: string
   deviceName: string
+  phonePubB64: string
 }
 
 export interface RemoteRequest {
@@ -41,17 +42,34 @@ export class MobileLink {
     { resolve: (data: unknown) => void; reject: (e: Error) => void; timer: number }
   >()
   private reqSeq = 0
+  private pairAcknowledged = false
+  private joinWaiter: {
+    resolve: () => void
+    reject: (error: Error) => void
+    timer: number
+  } | null = null
 
   onPush: ((event: unknown) => void) | null = null
   onStatus: ((status: string, detail?: string) => void) | null = null
 
-  constructor(private readonly creds: MobileCredentials) {}
+  constructor(
+    private readonly creds: MobileCredentials,
+    private announcePairing = false
+  ) {}
 
   async connect(): Promise<void> {
     const raw = await b64urlDecodeAsync(this.creds.sessionKeyB64)
     this.cipherKey = raw
     this.stopped = false
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.joinWaiter = null
+        reject(new Error('连接超时'))
+      }, 15_000)
+      this.joinWaiter = { resolve, reject, timer }
+    })
     this.loop()
+    return ready
   }
 
   disconnect(): void {
@@ -81,7 +99,15 @@ export class MobileLink {
     this.ws = ws
     ws.onopen = () => {
       this.backoffMs = BASE_BACKOFF_MS
-      ws.send(JSON.stringify({ op: 'join-phone', phoneToken: this.creds.phoneToken }))
+      ws.send(
+        JSON.stringify({
+          op: 'join-phone',
+          phoneToken: this.creds.phoneToken,
+          ...(this.announcePairing
+            ? { phonePub: this.creds.phonePubB64, phoneName: this.creds.deviceName }
+            : {})
+        })
+      )
     }
     ws.onmessage = (ev) => {
       void this.onMessage(ev.data)
@@ -92,6 +118,13 @@ export class MobileLink {
         p.reject(new Error('连接已断开'))
       })
       this.pending.clear()
+      if (this.joinWaiter) {
+        clearTimeout(this.joinWaiter.timer)
+        this.joinWaiter.reject(
+          new Error(this.announcePairing ? '配对连接已断开' : '连接已断开')
+        )
+        this.joinWaiter = null
+      }
       if (this.stopped) {
         this.setStatus('off')
         return
@@ -112,7 +145,43 @@ export class MobileLink {
     if (typeof data === 'string') {
       // 控制面回包
       try {
-        const msg = JSON.parse(data) as { id?: string; ok?: boolean; data?: unknown; error?: string }
+        const msg = JSON.parse(data) as {
+          id?: string
+          kind?: string
+          ok?: boolean
+          data?: unknown
+          error?: string
+        }
+        if (msg.id === 'pair-ack') {
+          this.announcePairing = false
+          this.pairAcknowledged = true
+          this.setStatus('online', '配对完成')
+          if (this.joinWaiter) {
+            const waiter = this.joinWaiter
+            this.joinWaiter = null
+            clearTimeout(waiter.timer)
+            waiter.resolve()
+          }
+          return
+        }
+        if (msg.kind === 'res' && this.joinWaiter) {
+          if (!msg.ok) {
+            const waiter = this.joinWaiter
+            this.joinWaiter = null
+            clearTimeout(waiter.timer)
+            waiter.reject(new Error(msg.error || '加入中转失败'))
+          } else if (this.announcePairing && !this.pairAcknowledged) {
+            // 首次配对必须等桌面派生完会话密钥并回 pair-ack，不能提前发业务请求。
+            this.setStatus('等待桌面确认')
+          } else {
+            const waiter = this.joinWaiter
+            this.joinWaiter = null
+            clearTimeout(waiter.timer)
+            this.setStatus('online')
+            waiter.resolve()
+          }
+          return
+        }
         if (msg.id && this.pending.has(msg.id)) {
           const p = this.pending.get(msg.id)!
           this.pending.delete(msg.id)

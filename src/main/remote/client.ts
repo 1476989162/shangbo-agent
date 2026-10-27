@@ -7,6 +7,7 @@ import { appendRemoteAudit } from './audit'
 import { touchDeviceSeen } from './devices'
 import type { AgentEvent } from '../../shared/types'
 import { PendingApprovalsSnapshotSchema } from '../../shared/remote'
+import { deleteSecret, setSecret } from '../secrets'
 
 /**
  * 阶段3：桌面端远程连接模块。
@@ -18,13 +19,19 @@ import { PendingApprovalsSnapshotSchema } from '../../shared/remote'
 
 export type RemoteStatus = 'off' | 'connecting' | 'online' | 'reconnecting' | 'banned'
 
+export interface PairingHello {
+  deviceName: string
+  phonePub: string
+  phoneToken: string
+}
+
 export interface RemoteClientOptions {
   relayUrl: string
   deviceToken: string | null
   getSession: () => { cipher: SessionCipher; deviceId: string } | null
   handlerContext: () => RemoteHandlerContext
   onStatus: (status: RemoteStatus, detail?: string) => void
-  onPairingRedeemed?: (deviceId: string) => void
+  onPairingHello: (hello: PairingHello) => void
 }
 
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -56,8 +63,11 @@ export class RemoteClient {
   private bannedUntil = 0
   private controlSeq = 0
   private unsubscribeBus: (() => void) | null = null
+  private deviceToken: string | null
 
-  constructor(private readonly opts: RemoteClientOptions) {}
+  constructor(private readonly opts: RemoteClientOptions) {
+    this.deviceToken = opts.deviceToken
+  }
 
   get statusEnabled(): boolean {
     return this.enabled
@@ -180,10 +190,15 @@ export class RemoteClient {
 
   private async register(): Promise<void> {
     try {
-      const deviceToken = this.opts.deviceToken
+      const deviceToken = this.deviceToken
       const data = (await this.sendControl('register-desktop', deviceToken ? { deviceToken } : {})) as {
         roomId: string
         deviceToken?: string
+      }
+      if (data.deviceToken) {
+        // 首次注册返回的 token 必须落盘，否则桌面重启会新建 room，已配对手机全部失联。
+        this.deviceToken = data.deviceToken
+        setSecret('remote.deviceToken', data.deviceToken)
       }
       this.setStatus('online', data.roomId)
       // 订阅事件总线：桌面发起的会话事件同步推送给手机
@@ -195,6 +210,16 @@ export class RemoteClient {
       // 上线即下发待审批快照（手机可能错过 approval_required）
       await this.pushPendingApprovals()
     } catch (error) {
+      // 中转重启后内存中的 room 会丢失；清掉失效 token，换一个新 room 重新上线。
+      if (
+        this.deviceToken &&
+        error instanceof Error &&
+        error.message.includes('unknown device token')
+      ) {
+        deleteSecret('remote.deviceToken')
+        this.deviceToken = null
+        return this.register()
+      }
       log.warn('[remote] 注册失败', error)
       this.scheduleReconnect()
     }
@@ -219,6 +244,11 @@ export class RemoteClient {
     await this.sendControl('revoke-phone', { phoneToken })
   }
 
+  /** 桌面完成 X25519 派生后通知中转，让手机结束配对等待。 */
+  async confirmPairing(phoneToken: string): Promise<void> {
+    await this.sendControl('pair-ack', { phoneToken })
+  }
+
   /** 一键断开：关闭远程功能（阶段5.6，托盘菜单调用）。 */
   disconnectAll(reason = 'manual'): void {
     appendRemoteAudit('remote.disconnect', reason)
@@ -231,13 +261,31 @@ export class RemoteClient {
     if (!isBinary) {
       // 控制面回包
       try {
-        const msg = JSON.parse(String(data)) as { id?: string; ok?: boolean; data?: unknown; error?: string }
+        const msg = JSON.parse(String(data)) as {
+          id?: string
+          ok?: boolean
+          data?: unknown
+          error?: string
+        }
         if (msg.id && this.pendingControl.has(msg.id)) {
           const p = this.pendingControl.get(msg.id)!
           this.pendingControl.delete(msg.id)
           clearTimeout(p.timer)
           if (msg.ok) p.resolve(msg.data)
           else p.reject(new Error(msg.error || '中转返回失败'))
+        } else if (msg.id === 'pair-hello' && msg.ok && msg.data) {
+          const data = msg.data as { deviceName?: unknown; phonePub?: unknown; phoneToken?: unknown }
+          if (
+            typeof data.deviceName === 'string' &&
+            typeof data.phonePub === 'string' &&
+            typeof data.phoneToken === 'string'
+          ) {
+            this.opts.onPairingHello({
+              deviceName: data.deviceName,
+              phonePub: data.phonePub,
+              phoneToken: data.phoneToken
+            })
+          }
         }
       } catch {
         // 忽略

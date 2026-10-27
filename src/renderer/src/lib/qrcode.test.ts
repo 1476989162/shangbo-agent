@@ -1,35 +1,55 @@
 import { describe, expect, it } from 'vitest'
+import jsQR from 'jsqr'
 import { makeQrMatrix } from './qrcode'
 
-/* 配对二维码：版本自动、寻像图形正确、内容变化矩阵变化。 */
+/* 配对二维码：必须能被真实扫码器完整解码，而不只是“看起来像二维码”。 */
 
 describe('配对二维码 (qrcode)', () => {
-  it('短文本生成版本1（21x21）', () => {
+  function decode(matrix: boolean[][], scale = 6): string | null {
+    const quiet = 4
+    const width = (matrix.length + quiet * 2) * scale
+    const pixels = new Uint8ClampedArray(width * width * 4)
+    pixels.fill(255)
+    for (let row = 0; row < matrix.length; row++) {
+      for (let col = 0; col < matrix.length; col++) {
+        if (!matrix[row][col]) continue
+        for (let y = 0; y < scale; y++) {
+          for (let x = 0; x < scale; x++) {
+            const offset =
+              ((row + quiet) * scale + y) * width * 4 + ((col + quiet) * scale + x) * 4
+            pixels[offset] = 0
+            pixels[offset + 1] = 0
+            pixels[offset + 2] = 0
+            pixels[offset + 3] = 255
+          }
+        }
+      }
+    }
+    return jsQR(pixels, width, width, { inversionAttempts: 'dontInvert' })?.data ?? null
+  }
+
+  it('短文本可被真实解码器完整还原', () => {
     const m = makeQrMatrix('hello')
     expect(m.length).toBe(21)
-    expect(m[0][0]).toBe(true)
-    expect(m[0][6]).toBe(true)
+    expect(decode(m)).toBe('hello')
   })
 
-  it('配对 JSON（约 300 字节）能生成且尺寸合法', () => {
-    const qrText = JSON.stringify({
-      v: 1,
-      relayUrl: 'wss://www.lnbxsoft.com/sb-remote/',
-      code: '123456',
-      desktopPub: 'A'.repeat(43),
-      fingerprint: 'ABCD-1234-EFGH-5678',
-      name: 'test'
-    })
+  it('完整配对链接可被真实解码器完整还原', () => {
+    const qrText =
+      'https://www.lnbxsoft.com/sb-remote/?relay=wss%3A%2F%2Fwww.lnbxsoft.com%2Fsb-remote%2F' +
+      '&code=123456&pub=' +
+      'A'.repeat(43) +
+      '&fp=ABCD-1234-EFGH-5678&secret=' +
+      'B'.repeat(43)
     const m = makeQrMatrix(qrText)
-    // 版本自动：尺寸 = 版本*4+17，且为奇数
     expect(m.length % 2).toBe(1)
     expect(m.length).toBeGreaterThanOrEqual(21)
-    expect(m.length).toBeLessThanOrEqual(57)
+    expect(decode(m)).toBe(qrText)
   })
 
   it('内容不同矩阵不同（扫码不会撞）', () => {
-    const a = JSON.stringify(makeQrMatrix('code-111111'))
-    const b = JSON.stringify(makeQrMatrix('code-222222'))
+    const a = JSON.stringify(makeQrMatrix('https://example.com/?code=111111'))
+    const b = JSON.stringify(makeQrMatrix('https://example.com/?code=222222'))
     expect(a).not.toBe(b)
   })
 

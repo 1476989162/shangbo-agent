@@ -84,6 +84,9 @@ export class RelayState {
     room.phones.set(phoneToken, {
       token: phoneToken,
       name: phoneName.slice(0, 100),
+      roomId: pairing.roomId,
+      phonePub: null,
+      pairedAt: null,
       connectedAt: Date.now(),
       lastSeen: Date.now()
     })
@@ -101,6 +104,38 @@ export class RelayState {
 
   isRevoked(phoneToken) {
     return this.revokedPhones.has(phoneToken)
+  }
+
+  /** 手机加入时登记公钥；同一 token 重新上报公钥视为新的待确认配对。 */
+  setPhonePairing(roomId, phoneToken, phonePub, phoneName = '') {
+    const room = this.rooms.get(roomId)
+    const info = room?.phones.get(phoneToken)
+    if (!info || typeof phonePub !== 'string') return false
+    info.phonePub = phonePub
+    info.pairedAt = null
+    if (phoneName.trim()) info.name = phoneName.trim().slice(0, 100)
+    return true
+  }
+
+  /** 桌面完成密钥派生后标记已确认；桌面重连时只补发尚未确认的配对。 */
+  markPhonePaired(roomId, phoneToken) {
+    const room = this.rooms.get(roomId)
+    const info = room?.phones.get(phoneToken)
+    if (!info) return false
+    info.pairedAt = Date.now()
+    return true
+  }
+
+  listPendingPairings(roomId) {
+    const room = this.rooms.get(roomId)
+    if (!room) return []
+    return [...room.phones.entries()]
+      .filter(([, info]) => info.phonePub && !info.pairedAt)
+      .map(([phoneToken, info]) => ({
+        phoneToken,
+        phonePub: info.phonePub,
+        phoneName: info.name
+      }))
   }
 
   listPhones(roomId) {

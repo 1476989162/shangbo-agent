@@ -1887,7 +1887,7 @@ async function toggleAutoScreenshot(): Promise<void> {
             <div class="setting-row">
               <div class="row-text">
                 <span class="setting-label">一次性配对码</span>
-                <span class="row-sub">5 分钟有效、只能用一次。手机扫码或手动输入配对码完成密钥交换。</span>
+                <span class="row-sub">5 分钟有效、只能用一次。手机扫码会打开配对页并自动填写地址、配对码与桌面公钥。</span>
               </div>
               <button class="btn btn-primary tiny" :disabled="remoteBusy || !remoteEnabled" @click="issueRemotePairing">
                 {{ remoteBusy ? '生成中…' : '生成配对码' }}

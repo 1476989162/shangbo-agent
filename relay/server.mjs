@@ -10,7 +10,7 @@ import { RelayState, RateLimiter, MAX_FRAME_BYTES, HEARTBEAT_MS } from './state.
  * 中转服务：只按 roomId 转发二进制帧，不解析、不存储消息内容。
  * - 桌面：{ role: 'desktop', deviceToken } 注册到自己的 room
  * - 手机：{ role: 'phone', phoneToken } 加入 room（token 由配对码换取）
- * - 控制消息（JSON）：register / pair-issue / pair-redeem / revoke / list-phones
+ * - 控制消息（JSON）：register / pair-issue / pair-redeem / join-phone / revoke / list-phones
  * - 业务帧（二进制）：按 room 转发给对方，附带帧大小与限流检查
  *
  * 部署要求：必须经 TLS 反代（Caddy/Nginx）对外，只接受 wss://，拒绝明文 ws://。
@@ -89,6 +89,23 @@ const wss = new WebSocketServer({
 
 function sendJson(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj))
+}
+
+/** 把手机公钥交给桌面，由桌面完成 X25519 派生并回 pair-ack。 */
+function notifyPairing(room, phoneToken) {
+  const info = room?.phones.get(phoneToken)
+  if (!info?.phonePub || !room.desktop || room.desktop.readyState !== 1) return false
+  sendJson(room.desktop, {
+    id: 'pair-hello',
+    kind: 'res',
+    ok: true,
+    data: {
+      deviceName: info.name || '手机',
+      phonePub: info.phonePub,
+      phoneToken
+    }
+  })
+  return true
 }
 
 wss.on('connection', (ws, req) => {
@@ -173,6 +190,10 @@ wss.on('connection', (ws, req) => {
             room.desktop = ws
             peer = { kind: 'desktop', roomId: room.roomId }
             reply(true, { roomId: room.roomId })
+            // 手机已加入但桌面当时不在线：桌面重连后补发未确认的配对公钥。
+            for (const pending of state.listPendingPairings(room.roomId)) {
+              notifyPairing(room, pending.phoneToken)
+            }
             return
           }
           reply(false, null, 'unknown device token')
@@ -185,7 +206,7 @@ wss.on('connection', (ws, req) => {
         return
       }
       case 'join-phone': {
-        const { phoneToken } = msg
+        const { phoneToken, phonePub, phoneName } = msg
         if (typeof phoneToken !== 'string' || state.isRevoked(phoneToken)) {
           reply(false, null, 'revoked or unknown phone token')
           ws.close(1008, 'revoked')
@@ -198,6 +219,15 @@ wss.on('connection', (ws, req) => {
             peer = { kind: 'phone', roomId: room.roomId, phoneToken }
             phoneSockets.set(phoneToken, ws)
             reply(true, { roomId: room.roomId, pendingApprovals: [] })
+            if (typeof phonePub === 'string') {
+              state.setPhonePairing(
+                room.roomId,
+                phoneToken,
+                phonePub,
+                typeof phoneName === 'string' ? phoneName : ''
+              )
+              notifyPairing(room, phoneToken)
+            }
             return
           }
         }
@@ -255,6 +285,20 @@ wss.on('connection', (ws, req) => {
           return
         }
         reply(true, state.listPhones(peer.roomId))
+        return
+      }
+      case 'pair-ack': {
+        // 桌面已完成 X25519 派生：通知正在等待配对结果的手机
+        if (peer?.kind !== 'desktop') {
+          reply(false, null, 'desktop only')
+          return
+        }
+        const sock = phoneSockets.get(msg.phoneToken)
+        if (sock && sock.readyState === 1) {
+          state.markPhonePaired(peer.roomId, msg.phoneToken)
+          sendJson(sock, { id: 'pair-ack', kind: 'res', ok: true })
+        }
+        reply(true, true)
         return
       }
       default:

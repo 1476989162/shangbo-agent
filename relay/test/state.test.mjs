@@ -54,6 +54,29 @@ describe('RelayState', () => {
     assert.equal(s.revokePhone(roomId, 'nope'), false)
   })
 
+  it('手机公钥等待桌面确认，确认后不再补发', () => {
+    const s = new RelayState()
+    const { roomId } = s.createRoom()
+    const pairing = s.issuePairingCode(roomId)
+    const redeemed = s.redeemPairingCode(pairing.code, 'pixel')
+    assert.ok(redeemed)
+
+    assert.equal(
+      s.setPhonePairing(roomId, redeemed.phoneToken, 'phone-public-key', 'Pixel'),
+      true
+    )
+    assert.deepEqual(s.listPendingPairings(roomId), [
+      {
+        phoneToken: redeemed.phoneToken,
+        phonePub: 'phone-public-key',
+        phoneName: 'Pixel'
+      }
+    ])
+
+    assert.equal(s.markPhonePaired(roomId, redeemed.phoneToken), true)
+    assert.deepEqual(s.listPendingPairings(roomId), [])
+  })
+
   it('RateLimiter 每窗口限流', () => {
     const limiter = new RateLimiter(3, 1000)
     assert.equal(limiter.take(), true)

@@ -4,25 +4,32 @@ import { getSetting } from '../settings'
 import { RemoteClient, type RemoteStatus } from './client'
 import { deriveSessionKey, deriveSharedSecret, generateKeyPair, publicKeyFingerprint } from './crypto'
 import { SessionCipher } from './crypto'
-import { addPairedDevice, listPairedDevices, revokePairedDevice } from './devices'
+import {
+  addPairedDevice,
+  getPairedDevice,
+  listPairedDevices,
+  revokePairedDevice
+} from './devices'
 import { appendRemoteAudit } from './audit'
 import type { RemoteHandlerContext } from './handler'
+import { buildPairingUrl } from './pairing-url'
 
 /**
  * 阶段3：远程总控（单例）。
  * - 默认关闭：remote.enabled 为 false 时不创建任何连接。
  * - 密钥：桌面 X25519 长期密钥对存 secrets（remote.devicePrivate/remote.devicePublic）；
  *   每台手机的会话密钥存 secrets（remote.session.<deviceId>），safeStorage 加密。
- * - 配对二维码内容：JSON { relayUrl, code, desktopPub, fingerprint }。
+ * - 配对二维码内容：同源 HTTPS PWA 链接，附带中转地址、配对码和桌面公钥。
  */
 
 const K_DEVICE_PRIVATE = 'remote.devicePrivate'
 const K_DEVICE_PUBLIC = 'remote.devicePublic'
 const K_DEVICE_TOKEN = 'remote.deviceToken'
 const SESSION_PREFIX = 'remote.session.'
+const PHONE_TOKEN_PREFIX = 'remote.phoneToken.'
 
 export interface PairingInfo {
-  /** 二维码内容（手机扫码）：中转地址 + 配对码 + 桌面公钥 + 指纹 */
+  /** 二维码内容（手机扫码）：可直接打开 PWA 的配对链接 */
   qrText: string
   code: string
   expiresAt: number
@@ -130,7 +137,17 @@ class RemoteService {
           return { cipher, deviceId: this.currentDeviceId }
         },
         handlerContext: () => this.handlerContext(),
-        onStatus: (s, d) => this.emit(s, d ?? '')
+        onStatus: (s, d) => this.emit(s, d ?? ''),
+        onPairingHello: (hello) => {
+          try {
+            this.completePairing(hello.deviceName, hello.phonePub, hello.phoneToken)
+            void this.client?.confirmPairing(hello.phoneToken).catch((error) => {
+              log.warn('[remote] 配对确认发送失败', error)
+            })
+          } catch (error) {
+            log.warn('[remote] 完成配对失败', error)
+          }
+        }
       })
     }
     this.client.setEnabled(true)
@@ -141,28 +158,26 @@ class RemoteService {
     if (!this.client) throw new Error('远程功能未开启')
     const { code, expiresAt } = await this.client.issuePairingCode()
     const { publicRaw } = this.ensureDeviceKeys()
-    const qrText = JSON.stringify({
-      v: 1,
-      relayUrl: this.relayUrl(),
+    const fingerprint = publicKeyFingerprint(publicRaw)
+    const qrText = buildPairingUrl(
+      this.relayUrl(),
       code,
-      desktopPub: publicRaw.toString('base64url'),
-      fingerprint: publicKeyFingerprint(publicRaw),
-      name: phoneName
-    })
-    void code
-    return { qrText, code, expiresAt, fingerprint: publicKeyFingerprint(publicRaw) }
+      publicRaw.toString('base64url'),
+      fingerprint,
+      phoneName
+    )
+    return { qrText, code, expiresAt, fingerprint }
   }
 
-  /**
-   * 配对完成（手机已提交配对码换到 phoneToken，中转会把手机的公钥经加密通道发回；
-   * 第一版简化：手机在配对成功后首帧即为 { op:'pair-hello', phonePub }，
-   * 由 client.onMessage 透传到这里完成 ECDH。）
-   * 为保持阶段3最小可用，这里提供由桌面侧直接完成配对的接口：
-   * 手机扫码后在同一加密通道内发送 phonePub，桌面据此派生会话密钥并落库设备。
-   */
-  completePairing(deviceName: string, phonePubB64: string): { deviceId: string; fingerprint: string } {
+  /** 配对完成：手机经中转控制面提交 X25519 公钥，桌面派生会话密钥并落库。 */
+  completePairing(
+    deviceName: string,
+    phonePubB64: string,
+    phoneToken: string
+  ): { deviceId: string; fingerprint: string } {
     const phonePub = Buffer.from(phonePubB64, 'base64url')
     if (phonePub.length !== 32) throw new Error('手机公钥非法')
+    if (!phoneToken) throw new Error('手机令牌缺失')
     const privDer = this.loadDevicePrivateKey()
     if (!privDer) throw new Error('桌面密钥缺失')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -171,8 +186,19 @@ class RemoteService {
     const { publicRaw } = this.ensureDeviceKeys()
     const shared = deriveSharedSecret(privateKey, phonePub)
     const sessionKey = deriveSessionKey(shared, publicRaw, phonePub)
-    const device = addPairedDevice(deviceName, phonePubB64)
+    const tokenSecret = PHONE_TOKEN_PREFIX + phoneToken
+    const existingDeviceId = getSecret(tokenSecret)
+    const existingDevice = existingDeviceId ? getPairedDevice(existingDeviceId) : null
+    let device: ReturnType<typeof addPairedDevice>
+    if (existingDevice && !existingDevice.revokedAt) {
+      device = existingDevice
+    } else {
+      if (existingDeviceId) deleteSecret(tokenSecret)
+      device = addPairedDevice(deviceName, phonePubB64)
+    }
     setSecret(SESSION_PREFIX + device.id, sessionKey.toString('base64url'))
+    setSecret(SESSION_PREFIX + device.id + '.phoneToken', phoneToken)
+    setSecret(tokenSecret, device.id)
     this.sessions.set(device.id, new SessionCipher(sessionKey))
     this.currentDeviceId = device.id
     appendRemoteAudit('remote.pair', `device=${device.name}`)
@@ -196,6 +222,7 @@ class RemoteService {
       }
       deleteSecret(SESSION_PREFIX + id)
       deleteSecret(SESSION_PREFIX + id + '.phoneToken')
+      if (token) deleteSecret(PHONE_TOKEN_PREFIX + token)
       this.sessions.delete(id)
       if (this.currentDeviceId === id) this.currentDeviceId = null
       appendRemoteAudit('remote.revoke', `device=${id.slice(0, 8)}`)

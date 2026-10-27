@@ -37,9 +37,10 @@ cd relay && docker compose up -d --build
 | op | 发起方 | 说明 |
 |---|---|---|
 | `register-desktop` | 桌面 | 首次不带 token（创建 room），重连带 `deviceToken` 认领 |
-| `join-phone` | 手机 | 带 `phoneToken` 加入，吊销 token 被拒绝并断开 |
+| `join-phone` | 手机 | 带 `phoneToken` 加入；首次配对同时带 `phonePub`，中转把公钥转交桌面 |
 | `pair-issue` | 桌面 | 申请一次性配对码（覆盖旧码） |
 | `pair-redeem` | 手机 | 提交配对码换取 `phoneToken` |
+| `pair-ack` | 桌面 | 桌面完成 X25519 派生后通知手机 |
 | `revoke-phone` | 桌面 | 吊销手机，连接立即断开 |
 | `list-phones` | 桌面 | 已配对手机列表 |
 

@@ -1,6 +1,7 @@
 import { createApp, computed, onMounted, onUnmounted, ref } from 'vue'
 import { MobileLink, type MobileCredentials } from './link'
 import { stableStringify, sha256Hex } from './crypto-web'
+import { createPairingSession, type PairingSession } from './pairing'
 
 /* PWA 主界面：配对 → 会话列表 → 消息流（含流式）→ 审批（批准/拒绝，高危二次确认）。
    不提供：设置修改、供应商/API Key 查看、文件选择、MCP 管理。 */
@@ -48,6 +49,8 @@ const app = createApp({
     const screen = ref<'pair' | 'main'>('pair')
     const relayUrl = ref('')
     const pairCode = ref('')
+    const desktopPub = ref('')
+    const desktopFingerprint = ref('')
     const status = ref('未连接')
     const conversations = ref<Conversation[]>([])
     const activeId = ref<string | null>(null)
@@ -57,6 +60,7 @@ const app = createApp({
     const busy = ref(false)
     const confirmHigh = ref<{ a: PendingApproval } | null>(null)
     let link: MobileLink | null = null
+    let pairingSession: PairingSession | null = null
 
     const activeConv = computed(() => conversations.value.find((c) => c.id === activeId.value) ?? null)
 
@@ -64,9 +68,12 @@ const app = createApp({
       status.value = d ? `${s}（${d}）` : s
     }
 
-    async function ensureLink(creds: MobileCredentials): Promise<MobileLink> {
+    async function ensureLink(
+      creds: MobileCredentials,
+      announcePairing = false
+    ): Promise<MobileLink> {
       if (link) link.disconnect()
-      link = new MobileLink(creds)
+      link = new MobileLink(creds, announcePairing)
       link.onStatus = setStatus
       link.onPush = (event: unknown) => {
         const e = event as { type?: string; conversationId?: string; messageId?: string; text?: string; name?: string; toolUseId?: string; input?: unknown; reason?: string; runId?: string; message_done?: unknown; status?: string } | null
@@ -86,23 +93,27 @@ const app = createApp({
         }
       }
       await link.connect()
+      if (announcePairing) setStatus('已提交配对信息', '等待桌面确认')
       return link
     }
 
     async function pair(): Promise<void> {
-      // 配对：提交配对码换取 phoneToken（密钥交换第一版走简化流程：
-      // 手机生成会话密钥经配对码绑定通道下发——桌面 service.completePairing 落库。
-      // 注：完整 X25519 握手为二期项，当前版本配对通道依赖 wss + 一次性配对码。）
       busy.value = true
       try {
         const url = relayUrl.value.trim()
         const code = pairCode.value.trim()
         if (!/^wss:\/\//i.test(url)) throw new Error('中转地址必须为 wss://')
         if (!code) throw new Error('请输入配对码')
+        if (!desktopPub.value) throw new Error('请扫描桌面二维码，或填写桌面公钥')
+        // 每次点击配对都重新生成手机临时密钥，避免失败重试复用旧会话。
+        pairingSession = createPairingSession(desktopPub.value)
         const ws = new WebSocket(url)
         ws.binaryType = 'arraybuffer'
         const token: { roomId: string; phoneToken: string } = await new Promise((resolve, reject) => {
-          const timer = window.setTimeout(() => reject(new Error('配对超时')), 15000)
+          const timer = window.setTimeout(() => {
+            ws.close()
+            reject(new Error('配对超时'))
+          }, 15000)
           ws.onopen = () => ws.send(JSON.stringify({ op: 'pair-redeem', code, phoneName: '手机' }))
           ws.onmessage = (ev) => {
             try {
@@ -117,18 +128,26 @@ const app = createApp({
           }
           ws.onerror = () => {
             clearTimeout(timer)
+            ws.close()
             reject(new Error('连接失败'))
           }
         })
         ws.close()
-        // 会话密钥：手机生成 32B，经桌面扫码后的带外确认完成（第一版：手机生成并经加密通道发送）。
-        // 简化：直接生成并保存，桌面侧由用户在设置页确认设备后完成握手（见威胁说明文档）。
-        const key = new Uint8Array(32)
-        crypto.getRandomValues(key)
-        const sessionKeyB64 = btoa(String.fromCharCode(...key)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-        const creds: MobileCredentials = { relayUrl: url, phoneToken: token.phoneToken, sessionKeyB64, deviceName: '手机' }
+        // 用二维码中的桌面公钥做 X25519，手机只把公钥交给桌面。
+        const sessionKeyB64 = pairingSession.sessionKeyB64
+        const creds: MobileCredentials = {
+          relayUrl: url,
+          phoneToken: token.phoneToken,
+          sessionKeyB64,
+          deviceName: '手机',
+          phonePubB64: pairingSession.phonePublicKeyB64
+        }
+        await boot(creds, true)
+        // 只有桌面回 pair-ack、会话密钥真正可用后才持久化，失败重试不会留下半配对凭据。
         saveCreds(creds)
-        await boot(creds)
+        // 配对握手（含桌面确认）完成后，清除扫码链接遗留的临时输入。
+        desktopPub.value = ''
+        pairCode.value = ''
       } catch (e) {
         setStatus('配对失败', e instanceof Error ? e.message : String(e))
       } finally {
@@ -193,8 +212,8 @@ const app = createApp({
       }
     }
 
-    async function boot(creds: MobileCredentials): Promise<void> {
-      await ensureLink(creds)
+    async function boot(creds: MobileCredentials, announcePairing = false): Promise<void> {
+      await ensureLink(creds, announcePairing)
       screen.value = 'main'
       await refreshConversations()
       await refreshApprovals()
@@ -206,13 +225,28 @@ const app = createApp({
     }
 
     onMounted(() => {
-      const creds = loadCreds()
-      if (creds) {
-        relayUrl.value = creds.relayUrl
-        void boot(creds).catch(() => {
-          screen.value = 'pair'
-        })
+      const params = new URLSearchParams(location.search)
+      const hasPairingParams = params.get('v') === '1'
+      if (hasPairingParams) {
+        // 新扫码优先于旧凭据：否则已配对手机重扫新码时会被旧会话直接带进主界面。
+        screen.value = 'pair'
+        relayUrl.value = params.get('relay') ?? relayUrl.value
+        pairCode.value = params.get('code') ?? ''
+        desktopPub.value = params.get('pub') ?? ''
+        desktopFingerprint.value = params.get('fp') ?? ''
+        setStatus('已读取桌面配对信息', '核对指纹后点击配对')
+      } else {
+        const creds = loadCreds()
+        if (creds) {
+          relayUrl.value = creds.relayUrl
+          void boot(creds).catch(() => {
+            screen.value = 'pair'
+            setStatus('连接失败', '请重新扫码配对')
+          })
+        }
       }
+      // 扫码链接只用于预填，配对完成后从地址栏移除敏感参数。
+      if (hasPairingParams) history.replaceState(null, '', location.pathname)
       // PWA：注册 Service Worker（离线壳 + 推送底座，二期接 Web Push）
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('./sw.js').catch(() => {})
@@ -231,6 +265,8 @@ const app = createApp({
       screen,
       relayUrl,
       pairCode,
+      desktopPub,
+      desktopFingerprint,
       status,
       conversations,
       activeId,
@@ -261,6 +297,8 @@ const app = createApp({
       <p class="m-hint">在桌面「设置 → 手机远程」生成配对码，填入中转地址与配对码。</p>
       <input v-model="relayUrl" class="m-input" placeholder="wss://relay.example.com" inputmode="url" />
       <input v-model="pairCode" class="m-input" placeholder="6 位配对码" inputmode="numeric" />
+      <input v-model="desktopPub" class="m-input mono" placeholder="桌面公钥（扫码自动填写）" />
+      <p v-if="desktopFingerprint" class="m-hint">桌面公钥指纹：<strong class="mono">{{ desktopFingerprint }}</strong>，请与桌面显示一致。</p>
       <button class="m-btn primary" :disabled="busy" @click="pair">{{ busy ? '配对中…' : '配对并连接' }}</button>
     </section>
     <section v-else class="m-main">

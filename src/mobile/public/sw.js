@@ -1,5 +1,6 @@
 // 离线壳：缓存应用外壳，业务数据不缓存（永远走网络，保证审批实时性）。
-const CACHE = 'shangbo-remote-v1'
+const CACHE = 'shangbo-remote-v2'
+// 版本化 JS 不在安装时预缓存；改为首次请求时缓存，升级后不会继续命中旧配对逻辑。
 const SHELL = ['./', './index.html', './manifest.webmanifest']
 
 self.addEventListener('install', (event) => {
@@ -25,7 +26,16 @@ self.addEventListener('fetch', (event) => {
   // 只缓存同源 GET 外壳；API/中转一律走网络
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return
   event.respondWith(
-    caches.match(event.request).then((hit) => hit ?? fetch(event.request))
+    caches.match(event.request).then((hit) => {
+      if (hit) return hit
+      return fetch(event.request).then((response) => {
+        if (response.ok) {
+          const copy = response.clone()
+          void caches.open(CACHE).then((cache) => cache.put(event.request, copy))
+        }
+        return response
+      })
+    })
   )
 })
 
