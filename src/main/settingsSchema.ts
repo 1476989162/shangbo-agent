@@ -41,6 +41,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 布尔开关
   'agent.computerUse': z.boolean(),
   'agent.readOnly': z.boolean(),
+  // 轮间摘要默认关闭：开启后调用当前模型生成摘要，会产生额外请求
+  'agent.context.summarize': z.boolean(),
   'agent.wish.enabled': z.boolean(),
   'agent.wish.autoApproveWorkspace': z.boolean(),
   'agent.wish.autoVerify': z.boolean(),

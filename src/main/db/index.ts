@@ -94,9 +94,9 @@ const MIGRATIONS: Migration[] = [
         created_at   INTEGER NOT NULL,
         updated_at   INTEGER NOT NULL
       );
-    `
-  },
-  {
+      `
+    },
+    {
     // v2：供应商支持自定义 HTTP 请求头（部分网关如 opencode 要求 x-opencode-session）
     version: 2,
     sql: `ALTER TABLE providers ADD COLUMN headers TEXT NOT NULL DEFAULT '{}';`
@@ -189,8 +189,13 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_lessons_scope
         ON lessons(scope, project_path, updated_at DESC);
     `
-  }
-]
+    },
+    {
+      // v6：上下文轮间摘要缓存（覆盖到哪个 messageId + 摘要正文）
+      version: 6,
+      sql: `ALTER TABLE conversations ADD COLUMN summary_json TEXT;`
+    }
+  ]
 
 function migrate(database: Database.Database): void {
   database.exec(

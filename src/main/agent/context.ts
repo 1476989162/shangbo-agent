@@ -123,6 +123,10 @@ export interface BuiltContext {
   messages: LLMMessage[]
   omittedTurns: number
   estimatedTokens: number
+  /** 轮内压缩发生时为 true：最新一轮的旧工具输出已被替换为占位符。 */
+  compressedInTurn?: boolean
+  /** 当前被裁掉的轮次；调用方据此判断摘要缓存是否仍然覆盖。 */
+  omittedMessages?: Message[]
 }
 
 /**
@@ -141,26 +145,28 @@ export async function hydrateContextImages(context: BuiltContext): Promise<Built
 
 export function buildContext(
   path: Message[],
-  options: { system: string; budgetTokens: number; extraTokens?: number; toolResultMaxChars?: number }
+  options: {
+    system: string
+    budgetTokens: number
+    extraTokens?: number
+    toolResultMaxChars?: number
+    /** 轮间摘要：放在历史最前面的一条 user 消息，不计入原始轮次。 */
+    summary?: string
+  }
 ): BuiltContext {
   const turns = groupIntoTurns(path)
   const maxChars = options.toolResultMaxChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
   // 工具 schema 等"历史之外但必发"的开销也要占预算，否则名义 32000 实际早超
-  const systemTokens = estimateTokens(options.system) + (options.extraTokens ?? 0)
+  const summaryTokens = options.summary ? estimateTokens(options.summary) + 8 : 0
+  const systemTokens =
+    estimateTokens(options.system) + (options.extraTokens ?? 0) + summaryTokens
 
   const kept: Message[][] = []
   let used = systemTokens
 
   for (let index = turns.length - 1; index >= 0; index--) {
     const turn = turns[index]
-    const turnTokens = turn.reduce((sum, message) => {
-      const blocks = message.blocks.map((b) =>
-        b.type === 'tool_result' && b.content.length > maxChars
-          ? { ...b, content: truncateToolResult(b.content, maxChars) }
-          : b
-      )
-      return sum + estimateBlocks(blocks) + 8
-    }, 0)
+    const turnTokens = estimateTurn(turn, maxChars)
 
     // 最新一轮无论如何都保留，否则模型会看不到用户刚说的话
     if (kept.length > 0 && used + turnTokens > options.budgetTokens) break
@@ -169,9 +175,159 @@ export function buildContext(
     kept.unshift(turn)
   }
 
-  return {
-    messages: toLLMMessages(kept.flat()),
-    omittedTurns: turns.length - kept.length,
-    estimatedTokens: used
+  // 最新一轮单独就可能超预算（许愿模式一轮 120 步）：
+  // 超过预算 60% 就先压缩轮内旧的工具输出，而不是把整轮丢掉。
+  // tool_use 与 tool_result 成对保留。
+  let compressedInTurn = false
+  if (kept.length === 1 && used > options.budgetTokens * 0.6) {
+    const compressed = compressTurnToolResults(kept[0], maxChars)
+    if (compressed.changed) {
+      kept[0] = compressed.turn
+      used = systemTokens + estimateTurn(kept[0], maxChars)
+      compressedInTurn = true
+    }
   }
+
+  const messages = toLLMMessages(kept.flat())
+  if (options.summary) {
+    messages.unshift({
+      role: 'user',
+      blocks: [{ type: 'text', text: `【此前对话摘要】\n${options.summary}` }]
+    })
+  }
+
+  return {
+    messages,
+    omittedTurns: turns.length - kept.length,
+    estimatedTokens: used,
+    compressedInTurn,
+    omittedMessages: turns.slice(0, turns.length - kept.length).flat()
+  }
+}
+
+/** 单轮 token 估算：先按单条输出上限截断，再累计。 */
+function estimateTurn(turn: Message[], maxChars: number): number {
+  return turn.reduce((sum, message) => {
+    const blocks = message.blocks.map((b) =>
+      b.type === 'tool_result' && b.content.length > maxChars
+        ? { ...b, content: truncateToolResult(b.content, maxChars) }
+        : b
+    )
+    return sum + estimateBlocks(blocks) + 8
+  }, 0)
+}
+
+/**
+ * 轮内压缩：保留最近 N 组 tool_use/tool_result 的完整输出，
+ * 更早的 tool_result 只留 `[已省略旧工具输出：<工具名> <前200字符>…]`。
+ *
+ * 只改 tool_result 的 content，不删任何块——tool_use 与 tool_result 必须成对，
+ * 删掉一侧会让 Anthropic / Responses 协议直接报错。
+ */
+export const KEEP_RECENT_TOOL_RESULTS = 6
+export const TOOL_RESULT_PREVIEW_CHARS = 200
+
+export function compressTurnToolResults(
+  turn: Message[],
+  maxChars = DEFAULT_TOOL_RESULT_MAX_CHARS,
+  keepRecent = KEEP_RECENT_TOOL_RESULTS
+): { turn: Message[]; changed: boolean } {
+  // 工具名从对应的 tool_use 块取；同一轮里 tool_result 只按顺序编号
+  const toolNames = new Map<string, string>()
+  const resultOrder: { messageIndex: number; blockIndex: number; toolUseId: string }[] = []
+
+  turn.forEach((message, messageIndex) => {
+    message.blocks.forEach((block, blockIndex) => {
+      if (block.type === 'tool_use') toolNames.set(block.id, block.name)
+      if (block.type === 'tool_result') {
+        resultOrder.push({ messageIndex, blockIndex, toolUseId: block.toolUseId })
+      }
+    })
+  })
+
+  if (resultOrder.length <= keepRecent) return { turn, changed: false }
+
+  const replaceBefore = resultOrder.length - keepRecent
+  const compressed: Message[] = turn.map((message) => ({ ...message, blocks: [...message.blocks] }))
+  let changed = false
+
+  for (let index = 0; index < replaceBefore; index++) {
+    const { messageIndex, blockIndex, toolUseId } = resultOrder[index]
+    const block = compressed[messageIndex].blocks[blockIndex]
+    if (block.type !== 'tool_result') continue
+    const preview = block.content.replace(/\s+/g, ' ').trim().slice(0, TOOL_RESULT_PREVIEW_CHARS)
+    const name = toolNames.get(toolUseId) ?? 'tool'
+    const placeholder = `[已省略旧工具输出：${name} ${preview}${block.content.length > TOOL_RESULT_PREVIEW_CHARS ? '…' : ''}]`
+    if (placeholder.length >= block.content.length) continue
+    compressed[messageIndex].blocks[blockIndex] = {
+      ...block,
+      content: placeholder,
+      // 图片同样不再回传：旧截图对模型已无价值，保留会继续占预算
+      image: undefined
+    }
+    changed = true
+  }
+
+  // maxChars 仍要生效：最近几组过长的输出照旧截断
+  if (changed) {
+    for (const message of compressed) {
+      message.blocks = message.blocks.map((block) =>
+        block.type === 'tool_result' && block.content.length > maxChars
+          ? { ...block, content: truncateToolResult(block.content, maxChars) }
+          : block
+      )
+    }
+  }
+
+  return { turn: compressed, changed }
+}
+
+/** 轮间摘要：被裁掉的轮次（从最旧开始数 omittedTurns 轮）。 */
+export function turnsToSummarize(path: Message[], omittedTurns: number): Message[] {
+  if (omittedTurns <= 0) return []
+  const turns = groupIntoTurns(path)
+  return turns.slice(0, omittedTurns).flat()
+}
+
+/**
+ * 把被裁掉的轮次压成一段供模型做摘要的纯文本。
+ * 工具输出只保留前 400 字符：摘要不需要完整日志，原文仍在 DB 里。
+ */
+export function buildSummaryTranscript(messages: Message[], maxChars = 12_000): string {
+  const lines: string[] = []
+  for (const message of messages) {
+    const role = message.role === 'user' ? '用户' : message.role === 'assistant' ? '助手' : message.role
+    const parts: string[] = []
+    for (const block of message.blocks) {
+      if (block.type === 'text' && block.text.trim()) parts.push(block.text.trim())
+      else if (block.type === 'tool_use') parts.push(`[调用工具 ${block.name}]`)
+      else if (block.type === 'tool_result') {
+        const preview = block.content.replace(/\s+/g, ' ').trim().slice(0, 400)
+        parts.push(`[工具结果] ${preview}${block.content.length > 400 ? '…' : ''}`)
+      }
+    }
+    if (parts.length > 0) lines.push(`${role}：${parts.join(' / ')}`)
+  }
+  const text = lines.join('\n')
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n…（更早内容已省略）` : text
+}
+
+/**
+ * 缓存的摘要是否仍覆盖当前被裁掉的轮次。
+ * 覆盖点必须恰好落在被裁轮次的最后一条消息上：会话继续增长后需要重新摘要。
+ */
+export function summaryCovers(
+  path: Message[],
+  coveredMessageId: string,
+  omittedTurns: number
+): boolean {
+  if (omittedTurns <= 0) return false
+  const omitted = turnsToSummarize(path, omittedTurns)
+  return omitted.length > 0 && omitted[omitted.length - 1].id === coveredMessageId
+}
+
+/** 摘要正文按任务书要求压到 400 字以内。 */
+export function clampSummary(text: string): string {
+  const trimmed = text.trim()
+  return trimmed.length > 400 ? trimmed.slice(0, 400) : trimmed
 }

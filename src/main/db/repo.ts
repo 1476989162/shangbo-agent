@@ -24,9 +24,18 @@ interface ConversationRow {
   model: string | null
   system_prompt: string | null
   mode: string | null
+  summary_json: string | null
   created_at: number
   updated_at: number
   archived_at: number | null
+}
+
+/** 轮间摘要缓存：覆盖到哪个消息 + 摘要正文。 */
+export interface ConversationSummary {
+  /** 摘要覆盖到的最后一条消息 id；之后的轮次仍需原文。 */
+  coveredMessageId: string
+  text: string
+  updatedAt: number
 }
 
 interface MessageRow {
@@ -158,6 +167,32 @@ export function updateConversation(
 /** 首次产生对话内容时用首条用户消息生成标题，之后不再自动覆盖。 */
 export function touchConversation(id: string): void {
   getDb().prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(Date.now(), id)
+}
+
+/** 读取会话的轮间摘要缓存；损坏或缺失时返回 null。 */
+export function getConversationSummary(id: string): ConversationSummary | null {
+  const row = getDb().prepare('SELECT summary_json FROM conversations WHERE id = ?').get(id) as
+    | { summary_json: string | null }
+    | undefined
+  if (!row?.summary_json) return null
+  try {
+    const parsed = JSON.parse(row.summary_json) as Partial<ConversationSummary>
+    if (typeof parsed.coveredMessageId !== 'string' || typeof parsed.text !== 'string') return null
+    return {
+      coveredMessageId: parsed.coveredMessageId,
+      text: parsed.text,
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 写入轮间摘要缓存。 */
+export function setConversationSummary(id: string, summary: ConversationSummary): void {
+  getDb()
+    .prepare('UPDATE conversations SET summary_json = ? WHERE id = ?')
+    .run(JSON.stringify(summary), id)
 }
 
 export function deleteConversation(id: string): void {

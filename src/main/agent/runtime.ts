@@ -12,7 +12,15 @@ import { canonicalParamString } from '../../shared/remote'
 import { eventBus, type EventSubscriber } from '../events/bus'
 import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
 import { routingOrder } from '../providers/store'
-import { buildContext, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
+import {
+  buildContext,
+  buildSummaryTranscript,
+  clampSummary,
+  estimateTokens,
+  hydrateContextImages,
+  summaryCovers,
+  toLLMMessages
+} from './context'
 import { DEFAULT_MAX_OUTPUT_TOKENS, resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 import { runSubagent, SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME } from './subagent'
@@ -784,6 +792,39 @@ export class AgentRuntime {
   }
 
   /**
+   * 用当前模型把被裁掉的历史压成 ≤400 字摘要。
+   * 失败或用户中断时返回 null：摘要只是优化，不能让它拖垮主回合。
+   */
+  private async summarizeHistory(
+    transcript: string,
+    providerId: string,
+    signal: AbortSignal
+  ): Promise<string | null> {
+    try {
+      let text = ''
+      for await (const chunk of streamWithFallback(
+        {
+          model: resolveTarget(providerId, null).model,
+          system:
+            '你是对话摘要器。把下面的历史压成不超过 400 字的中文摘要，保留：用户目标、已确认的事实与约束、已完成与未完成的事项、关键文件与命令。不要编造，不要输出标题。',
+          messages: [{ role: 'user', blocks: [{ type: 'text', text: transcript }] }],
+          maxTokens: 800,
+          temperature: 0
+        },
+        signal,
+        providerId
+      )) {
+        if (chunk.type === 'text') text += chunk.text
+      }
+      const clamped = clampSummary(text)
+      return clamped || null
+    } catch (error) {
+      log.warn('[agent] 上下文摘要生成失败，本轮改用裁剪后的原文', error)
+      return null
+    }
+  }
+
+  /**
    * 「规划 → 调用工具 → 观察 → 再规划」主循环。
    * 一条助手消息承载整轮的全部内容块（文本、工具调用、工具结果），
    * 这样界面上呈现为一个可折叠的助手回合，回传历史时再拆回协议要求的角色序列。
@@ -1008,11 +1049,46 @@ export class AgentRuntime {
 
         const persisted = repo.getPathTo(userMessage.id)
         // 工具 schema 常年 8000-15000 tokens，不计入预算等于预算虚高：这里复用 try 外一次估值
-        const context = buildContext(persisted, {
+          // 轮间摘要（可选）：被裁掉的历史先换成语义摘要，避免模型直接“失忆”。
+          // 摘要由当前模型异步生成，并缓存在 conversations.summary_json。
+          const summarizeEnabled = getSetting<boolean>('agent.context.summarize', false)
+          let cachedSummary: repo.ConversationSummary | null = null
+          if (summarizeEnabled) {
+            cachedSummary = repo.getConversationSummary(conversation.id)
+            const probe = buildContext(persisted, {
+              system,
+              budgetTokens: budget,
+              extraTokens: toolSchemaTokens,
+              toolResultMaxChars: effectiveToolResultMaxChars
+            })
+            if (probe.omittedMessages?.length && probe.omittedMessages.length > 0) {
+              const lastOmitted = probe.omittedMessages[probe.omittedMessages.length - 1]
+              if (!cachedSummary || cachedSummary.coveredMessageId !== lastOmitted.id) {
+                const transcript = buildSummaryTranscript(probe.omittedMessages)
+                if (transcript.trim()) {
+                  const text = await this.summarizeHistory(
+                    transcript,
+                    resolved.providerId,
+                    controller.signal
+                  )
+                  if (text) {
+                    cachedSummary = {
+                      coveredMessageId: lastOmitted.id,
+                      text,
+                      updatedAt: Date.now()
+                    }
+                    repo.setConversationSummary(conversation.id, cachedSummary)
+                  }
+                }
+              }
+            }
+          }
+          const context = buildContext(persisted, {
           system,
           budgetTokens: budget,
           extraTokens: toolSchemaTokens,
-          toolResultMaxChars: effectiveToolResultMaxChars
+            toolResultMaxChars: effectiveToolResultMaxChars,
+            summary: cachedSummary?.text
         })
         // 裁剪完成后才读图片：被裁掉的历史轮次里的图永远不进内存
         await hydrateContextImages(context)

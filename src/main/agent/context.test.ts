@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildSummaryTranscript,
   buildContext,
+  clampSummary,
+  compressTurnToolResults,
   estimateBlocks,
   estimateTokens,
   groupIntoTurns,
+  summaryCovers,
+  turnsToSummarize,
   toLLMMessages
 } from './context'
 import type { ContentBlock, Message } from '../../shared/types'
@@ -274,5 +279,130 @@ describe('buildContext', () => {
     ]
     const result = buildContext(big, { system: 'sys', budgetTokens: 5 })
     expect(result.messages.length).toBe(2)
+  })
+})
+
+describe('buildContext 轮内压缩 (T3)', () => {
+  /** 一轮里塞 100 组 tool_use/tool_result，每组输出都很长。 */
+  function hugeTurn(): Message[] {
+    const blocks: ContentBlock[] = []
+    for (let i = 0; i < 100; i++) {
+      blocks.push({ type: 'tool_use', id: `t${i}`, name: 'read_file', input: { path: `/f${i}` } })
+      blocks.push({
+        type: 'tool_result',
+        toolUseId: `t${i}`,
+        content: `第${i}次输出` + 'x'.repeat(3000),
+        isError: false
+      })
+    }
+    return [
+      makeMessage('user', [textBlock('跑完这一轮')]),
+      makeMessage('assistant', [...blocks, textBlock('完成')])
+    ]
+  }
+
+  it('单轮超预算时压缩旧工具输出，估算值落到预算内', () => {
+    // 100 组工具的固定块开销本身约 4k；压缩后仍有最近 6 组完整输出。
+    // 预算取 16k：压缩前约 79k 明显超预算，压缩后应落回预算内。
+    const budget = 16_000
+    const result = buildContext(hugeTurn(), { system: 'sys', budgetTokens: budget })
+
+    expect(result.compressedInTurn).toBe(true)
+    expect(result.estimatedTokens).toBeLessThanOrEqual(budget)
+  })
+
+  it('压缩后 tool_use 与 tool_result 仍然一一配对', () => {
+    const result = buildContext(hugeTurn(), { system: 'sys', budgetTokens: 16_000 })
+    const uses = new Set<string>()
+    const results = new Set<string>()
+    for (const message of result.messages) {
+      for (const block of message.blocks) {
+        if (block.type === 'tool_use') uses.add(block.id)
+        if (block.type === 'tool_result') results.add(block.toolUseId)
+      }
+    }
+    expect(uses.size).toBe(100)
+    expect(results.size).toBe(100)
+    expect([...uses].sort()).toEqual([...results].sort())
+
+    const placeholders = result.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === 'tool_result' && block.content.startsWith('[已省略旧工具输出'))
+    // 100 组只保留最近 6 组完整输出
+    expect(placeholders.length).toBe(94)
+    expect(placeholders[0].type === 'tool_result' && placeholders[0].content).toContain('read_file')
+  })
+
+  it('工具输出不足 6 组时不压缩', () => {
+    const turn = [
+      makeMessage('user', [textBlock('问')]),
+      makeMessage('assistant', [
+        { type: 'tool_use', id: 't0', name: 'read_file', input: {} },
+        { type: 'tool_result', toolUseId: 't0', content: 'x'.repeat(5000), isError: false }
+      ])
+    ]
+    const compressed = compressTurnToolResults(turn)
+    expect(compressed.changed).toBe(false)
+  })
+
+  it('摘要消息排在历史第一条', () => {
+    const path = [
+      makeMessage('user', [textBlock('旧问题')]),
+      makeMessage('assistant', [textBlock('旧回答')]),
+      makeMessage('user', [textBlock('新问题')]),
+      makeMessage('assistant', [textBlock('新回答')])
+    ]
+    const result = buildContext(path, {
+      system: 'sys',
+      budgetTokens: 10_000,
+      summary: '用户此前在修复构建，已确认使用 npm。'
+    })
+    expect(result.messages[0]).toEqual({
+      role: 'user',
+      blocks: [
+        { type: 'text', text: '【此前对话摘要】\n用户此前在修复构建，已确认使用 npm。' }
+      ]
+    })
+    expect(result.messages[1].role).toBe('user')
+    expect(result.omittedTurns).toBe(0)
+  })
+})
+
+describe('轮间摘要辅助 (T3)', () => {
+  it('只取被裁掉的最旧轮次', () => {
+    const t1 = [makeMessage('user', [textBlock('一')]), makeMessage('assistant', [textBlock('答一')])]
+    const t2 = [makeMessage('user', [textBlock('二')]), makeMessage('assistant', [textBlock('答二')])]
+    const t3 = [makeMessage('user', [textBlock('三')]), makeMessage('assistant', [textBlock('答三')])]
+    const path = [...t1, ...t2, ...t3]
+    expect(turnsToSummarize(path, 2).map((m) => m.id)).toEqual([...t1, ...t2].map((m) => m.id))
+    expect(turnsToSummarize(path, 0)).toEqual([])
+  })
+
+  it('摘要缓存只在覆盖点恰好等于最后一条被裁消息时有效', () => {
+    const t1 = [makeMessage('user', [textBlock('一')]), makeMessage('assistant', [textBlock('答一')])]
+    const t2 = [makeMessage('user', [textBlock('二')]), makeMessage('assistant', [textBlock('答二')])]
+    const path = [...t1, ...t2]
+    expect(summaryCovers(path, t1[1].id, 1)).toBe(true)
+    expect(summaryCovers(path, t1[0].id, 1)).toBe(false)
+    expect(summaryCovers(path, t1[1].id, 0)).toBe(false)
+  })
+
+  it('transcript 包含角色与工具摘要，且受长度上限约束', () => {
+    const message = makeMessage('assistant', [
+      { type: 'tool_use', id: 't1', name: 'read_file', input: {} },
+      { type: 'tool_result', toolUseId: 't1', content: 'x'.repeat(1000), isError: false },
+      textBlock('读完了')
+    ])
+    const text = buildSummaryTranscript([message])
+    expect(text).toContain('助手：')
+    expect(text).toContain('[调用工具 read_file]')
+    expect(text).toContain('[工具结果]')
+    expect(text).toContain('读完了')
+    expect(buildSummaryTranscript([message], 50).length).toBeLessThan(100)
+  })
+
+  it('摘要正文截到 400 字', () => {
+    expect(clampSummary('  短摘要  ')).toBe('短摘要')
+    expect(clampSummary('长'.repeat(600)).length).toBe(400)
   })
 })
