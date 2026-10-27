@@ -137,7 +137,7 @@ Windows 下用户数据目录通常为 `%APPDATA%\shangbo-agent`。确切路径�
 
 ## 镜像源
 
-仓库里的 `.npmrc` 指向 `registry.npmmirror.com`，并让 Electron 二进制从国内镜像下载，用于加速中国大陆的安装。
+仓库里的 `.npmrc` 指向 `registry.npmmirror.com`，用于加速中国大陆的 npm 包安装。
 
 海外环境请直接删除 `.npmrc`，或改回官方源：
 
@@ -145,7 +145,12 @@ Windows 下用户数据目录通常为 `%APPDATA%\shangbo-agent`。确切路径�
 registry=https://registry.npmjs.org/
 ```
 
-（`electron_mirror` 这一项会让 npm 打印一条 `Unknown project config` 警告，不影响安装，忽略即可。）
+如果 Electron 二进制下载较慢，用环境变量指定镜像（npm 12 已不再读取 `.npmrc` 里的 `electron_mirror`）：
+
+```powershell
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+npm install
+```
 
 ## 许可
 

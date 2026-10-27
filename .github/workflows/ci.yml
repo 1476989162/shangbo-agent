@@ -38,5 +38,8 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Relay tests
+        run: npm test --prefix relay
+
       - name: Build
         run: npm run build
