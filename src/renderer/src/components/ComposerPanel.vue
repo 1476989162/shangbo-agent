@@ -996,6 +996,19 @@ defineExpose({ editMessage, setDraft })
   </div>
 </template>
 <style scoped>
+.editing-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+}
+
 .modern-input-wrapper {
   display: flex;
   flex-direction: column;
