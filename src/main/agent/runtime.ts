@@ -24,6 +24,7 @@ import {
 } from './context'
 import { DEFAULT_MAX_OUTPUT_TOKENS, resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
+import { isReadOnlyToolName, normalizeToolConcurrency, runToolBatch } from './toolScheduler'
 import { runSubagent, SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME } from './subagent'
 import { mcpManager, parseMcpToolName } from '../mcp/manager'
 import { deleteImageFile } from '../storage/images'
@@ -1223,14 +1224,7 @@ export class AgentRuntime {
           break
         }
 
-        // 只读工具与 spawn 可并行（同一批 read_file/search 曾经要串行等很久）；
-        // 需要审批的写操作保持串行，避免同时弹多个确认框。
-        const canParallel = toolUses.every((call) => {
-          if (call.name === SPAWN_TOOL_NAME) return true
-          const tool = toolRegistry.get(call.name)
-          return !!tool && !tool.requiresApproval && call.name !== 'run_command'
-        })
-        // 子任务不限个数并行：要速度不要省 Token，上限只剩深度 1 与行为保险丝。
+        const configuredConcurrency = getSetting<number>('agent.toolConcurrency', 4)
         const invokeOne = (call: { id: string; name: string; input: unknown }): Promise<{
           call: { id: string; name: string; input: unknown }
           result: ToolOutcome
@@ -1253,13 +1247,19 @@ export class AgentRuntime {
         }
 
         type Settled = { call: { id: string; name: string; input: unknown }; result: ToolOutcome }
-        let settled: Settled[]
-        if (canParallel) {
-          settled = await Promise.all(toolUses.map(invokeOne))
-        } else {
-          settled = []
-          for (const call of toolUses) settled.push(await invokeOne(call))
-        }
+        // 只读工具先并发跑，写工具与命令随后串行；结果始终按原 tool_use 顺序回填。
+        const outcomes = await runToolBatch(toolUses, {
+          concurrency: normalizeToolConcurrency(configuredConcurrency),
+          canRunConcurrently: (call) => {
+            const tool = toolRegistry.get(call.name)
+            return isReadOnlyToolName(call.name) && !!tool && !tool.requiresApproval
+          },
+          invoke: async (call) => (await invokeOne(call)).result
+        })
+        const settled: Settled[] = toolUses.map((call, index) => ({
+          call,
+          result: outcomes[index]
+        }))
 
         for (const { call, result } of settled) {
           blocks.push({

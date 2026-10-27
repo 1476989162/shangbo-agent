@@ -345,6 +345,7 @@ async function toggleAutoDownload(): Promise<void> {
   }
 }
 const budgetTokens = ref(32000)
+const toolConcurrency = ref(4)
 const autoApprove = ref<string[]>([])
 
 
@@ -352,6 +353,7 @@ const autoApprove = ref<string[]>([])
 async function load(): Promise<void> {
   const settings = await window.shangbo.settings.getAll()
   budgetTokens.value = (settings['agent.contextBudgetTokens'] as number) ?? 32000
+  toolConcurrency.value = (settings['agent.toolConcurrency'] as number) ?? 4
   autoApprove.value = (settings['tools.autoApprove'] as string[]) ?? []
   customInstructions.value = (settings['agent.instructions'] as string) ?? ''
   userRole.value = (settings['agent.workRole'] as string) ?? 'software'
@@ -788,6 +790,14 @@ const maxDailyTokens = computed(() => {
 async function saveBudgetTokens(): Promise<void> {
   await window.shangbo.settings.set('agent.contextBudgetTokens', Number(budgetTokens.value))
   feedback.value = { ok: true, message: `已保存上下文预算上限: ${Number(budgetTokens.value).toLocaleString()} tokens` }
+  setTimeout(() => (feedback.value = null), 2000)
+}
+
+async function saveToolConcurrency(): Promise<void> {
+  const normalized = Math.max(1, Math.min(16, Math.floor(Number(toolConcurrency.value) || 4)))
+  toolConcurrency.value = normalized
+  await window.shangbo.settings.set('agent.toolConcurrency', normalized)
+  feedback.value = { ok: true, message: `已保存工具并发上限: ${normalized}` }
   setTimeout(() => (feedback.value = null), 2000)
 }
 
@@ -1635,6 +1645,22 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <option :value="200000">200,000 tokens (Claude 原生满血)</option>
                 <option :value="1000000">1,000,000 tokens (1M 极限长文本)</option>
               </select>
+            </div>
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">只读工具并发上限</span>
+                <span class="row-sub">
+                  同一批读取、搜索与目录列举可并行执行；写入与命令始终串行。范围 1-16，默认 4。
+                </span>
+              </div>
+              <input
+                v-model.number="toolConcurrency"
+                class="submodal-input"
+                type="number"
+                min="1"
+                max="16"
+                @blur="saveToolConcurrency"
+              />
             </div>
           </div>
         </section>
