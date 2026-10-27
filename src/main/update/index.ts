@@ -25,22 +25,75 @@ const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
  * GitHub Release 的 releaseNotes 形态不稳定：单条时是字符串，多条时是
  * [{note, url}] 数组，老版本还可能是 [{version, url}]。渲染层只要纯文本，
  * 这里统一折叠，取不到就留空，不让界面显示 [object Object]。
+ *
+ * 另外 GitHub 的 Atom feed 里 <content> 是渲染后的 HTML，
+ * 直接给渲染层会原样显示 <h1>、<ul> 等标签，这里先转成纯文本。
  */
 export function normalizeReleaseNotes(info: UpdateInfo): string | undefined {
   const notes = info.releaseNotes
-  if (typeof notes === 'string') return notes.trim() || undefined
+  if (typeof notes === 'string') return toPlainText(notes)
   if (Array.isArray(notes)) {
     const parts = notes
       .map((item) => {
-        if (typeof item === 'string') return item
+        if (typeof item === 'string') return toPlainText(item)
         const obj = item as { note?: unknown; version?: unknown }
         const value = obj?.note ?? obj?.version
-        return typeof value === 'string' ? value : ''
+        return typeof value === 'string' ? toPlainText(value) : ''
       })
       .filter(Boolean)
     return parts.length ? parts.join('\n\n') : undefined
   }
   return undefined
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  '#39': "'",
+  apos: "'",
+  nbsp: ' '
+}
+
+/**
+ * GitHub feed 给的是 HTML 片段：去标签、还原实体、把块级标签换成换行。
+ * 只做展示用的纯文本转换，不解析也不执行任何内容。
+ */
+export function toPlainText(html: string): string | undefined {
+  const normalized = html.replace(/\r\n?/g, '\n')
+  // electron-updater 解析 Atom 后通常已是 HTML；若拿到的是整段被转义的内容
+  // （以 &lt; 开头），先解一层才能把标签剥掉。正文里的 &lt;x&gt; 不受影响。
+  const source = /^\s*&lt;/i.test(normalized) ? decodeEntities(normalized) : normalized
+  const text = source
+    // 代码块与段落/标题/列表项之间保留换行，避免挤成一行
+    .replace(/<\/(p|h[1-6]|li|ul|ol|pre|blockquote|div)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, entity: string) => decodeEntity(match, entity))
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return text || undefined
+}
+
+/** 只解码一层实体；`&amp;lt;` 解码后是 `&lt;`，不会被二次解码成标签。 */
+function decodeEntities(value: string): string {
+  return value.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, entity: string) => decodeEntity(match, entity))
+}
+
+function decodeEntity(match: string, entity: string): string {
+  const key = entity.toLowerCase()
+  if (key.startsWith('#x')) {
+    const code = Number.parseInt(key.slice(2), 16)
+    return Number.isFinite(code) ? String.fromCodePoint(code) : match
+  }
+  if (key.startsWith('#')) {
+    const code = Number.parseInt(key.slice(1), 10)
+    return Number.isFinite(code) ? String.fromCodePoint(code) : match
+  }
+  return HTML_ENTITIES[key] ?? match
 }
 
 class UpdateService {

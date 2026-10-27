@@ -1,0 +1,13 @@
+&lt;h1&gt;更新日志&lt;/h1&gt;
+&lt;p&gt;本文件记录尚搏 Agent 每个版本的变化。格式参考 &lt;a href=&quot;https://keepachangelog.com/zh-CN/1.1.0/&quot; rel=&quot;nofollow&quot;&gt;Keep a Changelog&lt;/a&gt;，版本号遵循&lt;a href=&quot;https://semver.org/lang/zh-CN/&quot; rel=&quot;nofollow&quot;&gt;语义化版本&lt;/a&gt;。&lt;/p&gt;
+&lt;h2&gt;[0.5.3] - 2026-10-27&lt;/h2&gt;
+&lt;p&gt;流式文本重复修复版本。&lt;/p&gt;
+&lt;h3&gt;修复&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;正文结巴式重复&lt;/strong&gt;：修复桌面事件总线接线错误——&lt;code&gt;chat:send&lt;/code&gt; 与 &lt;code&gt;chat:regenerate&lt;/code&gt; 把事件同时直接发给窗口、又经总线转发一次，导致每个增量被渲染两遍（如「结论：你好结论：你好」）。现在事件只走总线，窗口每个事件只收到一次。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;重新生成同样受影响&lt;/strong&gt;：该问题在重新生成回复时同样存在，已一并修复。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;测试&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;新增回归测试：用生产代码的 &lt;code&gt;bridgeEventsToWindow&lt;/code&gt; 与 &lt;code&gt;withBus&lt;/code&gt; 锁定「桌面窗口每个事件只投递一次」，旧接线会失败。&lt;/li&gt;
+&lt;/ul&gt;
