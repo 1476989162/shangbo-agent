@@ -8,6 +8,7 @@ import type {
   Message,
   MessageStatus,
   Role,
+  UsageMode,
   Usage
 } from '../../shared/types'
 
@@ -49,6 +50,7 @@ interface MessageRow {
   provider_id: string | null
   model: string | null
   usage: string | null
+  usage_mode: string | null
   created_at: number
   updated_at: number
 }
@@ -81,6 +83,7 @@ function toMessage(row: MessageRow): Message {
     providerId: row.provider_id,
     model: row.model,
     usage: row.usage ? (JSON.parse(row.usage) as Usage) : null,
+    usageMode: (row.usage_mode as UsageMode | null) ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
@@ -261,14 +264,15 @@ export function insertMessage(input: {
   providerId?: string | null
   model?: string | null
   usage?: Usage | null
+  usageMode?: UsageMode | null
 }): Message {
   const now = Date.now()
   const id = input.id ?? randomUUID()
   getDb()
     .prepare(
       `INSERT INTO messages
-         (id, conversation_id, parent_id, role, blocks, status, provider_id, model, usage, created_at, updated_at)
-       VALUES (@id, @conversationId, @parentId, @role, @blocks, @status, @providerId, @model, @usage, @createdAt, @updatedAt)`
+         (id, conversation_id, parent_id, role, blocks, status, provider_id, model, usage, usage_mode, created_at, updated_at)
+       VALUES (@id, @conversationId, @parentId, @role, @blocks, @status, @providerId, @model, @usage, @usageMode, @createdAt, @updatedAt)`
     )
     .run({
       id,
@@ -280,6 +284,7 @@ export function insertMessage(input: {
       providerId: input.providerId ?? null,
       model: input.model ?? null,
       usage: input.usage ? JSON.stringify(input.usage) : null,
+      usageMode: input.usageMode ?? null,
       createdAt: now,
       updatedAt: now
     })
@@ -295,6 +300,7 @@ export function updateMessage(
     usage: Usage | null
     model: string | null
     providerId: string | null
+    usageMode: UsageMode | null
   }>
 ): void {
   const current = getMessage(id)
@@ -303,7 +309,8 @@ export function updateMessage(
     .prepare(
       `UPDATE messages
        SET blocks = @blocks, status = @status, error = @error,
-           usage = @usage, model = @model, provider_id = @providerId, updated_at = @updatedAt
+           usage = @usage, model = @model, provider_id = @providerId,
+           usage_mode = @usageMode, updated_at = @updatedAt
        WHERE id = @id`
     )
     .run({
@@ -321,6 +328,7 @@ export function updateMessage(
             : null,
       model: patch.model ?? current.model,
       providerId: patch.providerId ?? current.providerId,
+      usageMode: patch.usageMode === undefined ? current.usageMode ?? null : patch.usageMode,
       updatedAt: Date.now()
     })
 }
@@ -444,6 +452,7 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
       toolCallsCount: number
       coworkTokens: number
       codeTokens: number
+      legacyTokens: number
     }
   >()
 
@@ -462,38 +471,54 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
       totalTokens: 0,
       toolCallsCount: 0,
       coworkTokens: 0,
-      codeTokens: 0
+      codeTokens: 0,
+      legacyTokens: 0
     })
   }
 
   // 2. 查询真实 messages 数据
   const startTimestamp = now.getTime() - (safeDays - 1) * dayMs
   const startOfDay = new Date(new Date(startTimestamp).setHours(0, 0, 0, 0)).getTime()
+  const endTimestamp = now.getTime()
 
   interface RawUsageRow {
     created_at: number
     usage: string | null
     blocks: string | null
+    usage_mode: string | null
     working_dir: string | null
   }
 
   const rows = getDb()
     .prepare(
-      `SELECT m.created_at, m.usage, m.blocks, c.working_dir
+      `SELECT m.created_at, m.usage, m.blocks, m.usage_mode, c.working_dir
        FROM messages m
        LEFT JOIN conversations c ON m.conversation_id = c.id
-       WHERE m.created_at >= ? AND m.usage IS NOT NULL`
+       WHERE m.created_at >= ? AND m.created_at <= ? AND m.usage IS NOT NULL`
     )
-    .all(startOfDay) as RawUsageRow[]
+    .all(startOfDay, endTimestamp) as RawUsageRow[]
 
+  let promptTokens = 0
+  let completionTokens = 0
   let totalTokens = 0
   let coworkTokens = 0
   let codeTokens = 0
+  let legacyTokens = 0
   let totalToolCalls = 0
+  let legacyModeRows = 0
+  let fallbackUsageRows = 0
+  let zeroInputUsageRows = 0
 
   for (const row of rows) {
     if (!row.usage) continue
-    let u: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null
+    let u: {
+      promptTokens?: number
+      completionTokens?: number
+      totalTokens?: number
+      totalPromptTokens?: number
+      totalCompletionTokens?: number
+      requests?: number
+    } | null = null
     try {
       u = JSON.parse(row.usage)
     } catch {
@@ -501,9 +526,25 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
     }
     if (!u) continue
 
-    const pTokens = u.promptTokens || 0
-    const cTokens = u.completionTokens || 0
-    const itemTotal = u.totalTokens || pTokens + cTokens
+    const lastPromptTokens = u.promptTokens || 0
+    const lastCompletionTokens = u.completionTokens || 0
+    // 多步工具循环每步都会重新发送上下文，因此计费口径优先使用整轮累计。
+    // 缺失累计拆分时退回末次请求，绝不把 totalTokens 与末次输入输出混在一起展示。
+    const hasCumulativeSplit =
+      typeof u.totalPromptTokens === 'number' && typeof u.totalCompletionTokens === 'number'
+    const pTokens = hasCumulativeSplit ? u.totalPromptTokens! : lastPromptTokens
+    const cTokens = hasCumulativeSplit ? u.totalCompletionTokens! : lastCompletionTokens
+    const itemTotal = pTokens + cTokens
+    if (pTokens === 0 && cTokens > 0) zeroInputUsageRows++
+    if (
+      !hasCumulativeSplit &&
+      ((u.requests ?? 0) > 1 ||
+        (typeof u.totalTokens === 'number' &&
+          u.totalTokens !== lastPromptTokens + lastCompletionTokens))
+    ) {
+      // 旧版本只存了整轮总量、没存累计输入/输出；保留计数用于 UI 明确提示口径回退。
+      fallbackUsageRows++
+    }
 
     // 工具调用次数分析
     let toolCount = 0
@@ -525,35 +566,49 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
     const key = `${y}-${m}-${day}`
 
     const bucket = dayMap.get(key)
-    const isCode = Boolean(row.working_dir)
+    const recordedMode =
+      row.usage_mode === 'cowork' || row.usage_mode === 'code' ? row.usage_mode : null
+    if (!recordedMode) legacyModeRows++
 
     if (bucket) {
       bucket.promptTokens += pTokens
       bucket.completionTokens += cTokens
       bucket.totalTokens += itemTotal
       bucket.toolCallsCount += toolCount
-      if (isCode) {
+      if (recordedMode === 'code') {
         bucket.codeTokens += itemTotal
-      } else {
+      } else if (recordedMode === 'cowork') {
         bucket.coworkTokens += itemTotal
+      } else {
+        bucket.legacyTokens += itemTotal
       }
     }
 
     totalTokens += itemTotal
+    promptTokens += pTokens
+    completionTokens += cTokens
     totalToolCalls += toolCount
-    if (isCode) {
+    if (recordedMode === 'code') {
       codeTokens += itemTotal
-    } else {
+    } else if (recordedMode === 'cowork') {
       coworkTokens += itemTotal
+    } else {
+      legacyTokens += itemTotal
     }
   }
 
   return {
     days: safeDays,
+    promptTokens,
+    completionTokens,
     totalTokens,
     coworkTokens,
     codeTokens,
+    legacyTokens,
     toolCallsCount: totalToolCalls,
+    legacyModeRows,
+    fallbackUsageRows,
+    zeroInputUsageRows,
     dailyList: Array.from(dayMap.values())
   }
 }

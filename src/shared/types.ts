@@ -16,6 +16,9 @@ export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'aborte
  */
 export type AgentMode = 'chat' | 'builder' | 'wish'
 
+/** 侧边栏的协同 / 代码视图模式；用于统计时区分用户实际选择的工作方式。 */
+export type UsageMode = 'cowork' | 'code'
+
 /** 助手的回复不是纯字符串，而是有序内容块序列（文本 / 思考 / 工具调用 / 工具结果 / 图片）。 */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -58,15 +61,28 @@ export interface DailyUsageStat {
   toolCallsCount: number
   coworkTokens: number
   codeTokens: number
+  /** 旧数据没有记录视图模式，单独统计，避免强行归入协同或代码。 */
+  legacyTokens: number
 }
 
 /** 周期 Token 用量汇总数据 */
 export interface UsageSummaryStats {
   days: number
+  /** 按整轮累计口径统计的输入与输出；totalTokens 始终等于两者之和。 */
+  promptTokens: number
+  completionTokens: number
   totalTokens: number
   coworkTokens: number
   codeTokens: number
+  /** 旧数据没有记录视图模式，单独统计，避免强行归入协同或代码。 */
+  legacyTokens: number
   toolCallsCount: number
+  /** 未记录视图模式、无法精确归类的历史消息数。 */
+  legacyModeRows: number
+  /** 只有末次拆分、没有累计拆分，因而按末次口径回退的旧消息数。 */
+  fallbackUsageRows: number
+  /** 供应商只返回输出、输入为 0 的记录数；这类记录无法反推真实输入。 */
+  zeroInputUsageRows: number
   dailyList: DailyUsageStat[]
 }
 
@@ -181,6 +197,11 @@ export interface Message {
   providerId: string | null
   model: string | null
   usage: Usage | null
+  /**
+   * 产生这条消息时用户选择的协同 / 代码模式。
+   * 旧数据没有该字段，统计时只能按是否绑定项目目录近似归类。
+   */
+  usageMode?: UsageMode | null
   createdAt: number
   updatedAt: number
 }
@@ -293,6 +314,8 @@ export interface SendPayload {
   images?: ImageAttachment[]
   providerId?: string
   model?: string
+  /** 发送时侧边栏的协同 / 代码模式，用于让 Token 统计按真实选择归类。 */
+  viewMode?: UsageMode
 }
 
 /** 主进程内部使用的发送请求：图片已落盘，只剩路径。 */

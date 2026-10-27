@@ -36,6 +36,15 @@ const maxDailyTokens = computed(() => {
   return max > 0 ? max : 1
 })
 
+const hasLegacyUsage = computed(() => (realUsageStats.value?.legacyTokens ?? 0) > 0)
+const hasFallbackUsage = computed(() => (realUsageStats.value?.fallbackUsageRows ?? 0) > 0)
+const hasZeroInputUsage = computed(() => (realUsageStats.value?.zeroInputUsageRows ?? 0) > 0)
+
+function barHeight(tokens: number): number {
+  if (tokens <= 0) return 0
+  return Math.max(2, Math.round((tokens / maxDailyTokens.value) * 95))
+}
+
 async function saveBudgetTokens(): Promise<void> {
   await window.shangbo.settings.set('agent.contextBudgetTokens', Number(budgetTokens.value))
   emit('feedback', {
@@ -67,7 +76,8 @@ watch(usageDays, () => {
   <section class="content-pane">
     <div class="usage-head">
       <p class="usage-desc">
-        本设备在对话协同与代码模式下的 Token 用量统计。实际费用按您配置的模型供应商官方费率结算。
+        本设备从本地会话数据库聚合的真实 Token 用量。累计输入包含多步工具循环中重复发送的上下文，
+        与单次请求的上下文规模不是同一个指标；实际费用按模型供应商官方费率结算。
       </p>
       <div class="days-toggle">
         <button
@@ -94,51 +104,82 @@ watch(usageDays, () => {
       </div>
     </div>
 
-    <!-- 真实三卡片统计展示 -->
+    <!-- 统一采用“整轮累计输入 + 输出”的计费口径，三个数字可以直接相加核对 -->
     <div class="usage-metric-cards">
-      <div class="metric-card">
-        <div class="metric-title">协同模式 (Cowork)</div>
-        <div class="metric-value">
-          {{ formatTokensNumber(realUsageStats?.coworkTokens ?? 0) }}
-          <span class="metric-unit">tokens</span>
-        </div>
-        <div class="metric-sub subtle">日常问答与多轮对话消耗</div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-title">代码模式 (Code)</div>
-        <div class="metric-value">
-          {{ formatTokensNumber(realUsageStats?.codeTokens ?? 0) }}
-          <span class="metric-unit">tokens</span>
-        </div>
-        <div class="metric-sub subtle">
-          {{ realUsageStats?.toolCallsCount ?? 0 }} 次工具与终端命令调用
-        </div>
-      </div>
-
       <div class="metric-card highlight-card">
-        <div class="metric-title">近 {{ usageDays }} 天真实总消耗</div>
+        <div class="metric-title">近 {{ usageDays }} 天累计消耗</div>
         <div class="metric-value">
           {{ formatTokensNumber(realUsageStats?.totalTokens ?? 0) }}
           <span class="metric-unit">tokens</span>
         </div>
         <div class="metric-sub subtle">
-          输入: {{ formatTokensNumber(realUsageStats?.dailyList.reduce((acc, d) => acc + d.promptTokens, 0) ?? 0) }} ·
-          输出: {{ formatTokensNumber(realUsageStats?.dailyList.reduce((acc, d) => acc + d.completionTokens, 0) ?? 0) }}
+          {{ realUsageStats?.toolCallsCount ?? 0 }} 次工具调用 · 输入与输出合计
         </div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-title">累计输入</div>
+        <div class="metric-value">
+          {{ formatTokensNumber(realUsageStats?.promptTokens ?? 0) }}
+          <span class="metric-unit">tokens</span>
+        </div>
+        <div class="metric-sub subtle">多步工具循环中的上下文重发已计入</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-title">累计输出</div>
+        <div class="metric-value">
+          {{ formatTokensNumber(realUsageStats?.completionTokens ?? 0) }}
+          <span class="metric-unit">tokens</span>
+        </div>
+        <div class="metric-sub subtle">模型实际生成的正文、思考与工具参数</div>
       </div>
     </div>
 
-    <!-- 每日用量图表 (Tokens per day) -->
+    <!-- 模式分类只使用发送时真实落库的 viewMode；旧数据不猜，单独列出 -->
+    <div class="mode-breakdown">
+      <div class="mode-item">
+        <span class="mode-label"><span class="legend-box cowork-box" /> 协同模式</span>
+        <strong>{{ formatTokensNumber(realUsageStats?.coworkTokens ?? 0) }}</strong>
+      </div>
+      <div class="mode-item">
+        <span class="mode-label"><span class="legend-box code-box" /> 代码模式</span>
+        <strong>{{ formatTokensNumber(realUsageStats?.codeTokens ?? 0) }}</strong>
+      </div>
+      <div v-if="hasLegacyUsage" class="mode-item">
+        <span class="mode-label"><span class="legend-box legacy-box" /> 旧记录未分类</span>
+        <strong>{{ formatTokensNumber(realUsageStats?.legacyTokens ?? 0) }}</strong>
+      </div>
+    </div>
+
+    <p v-if="hasLegacyUsage" class="data-note">
+      有 {{ realUsageStats?.legacyModeRows ?? 0 }} 条历史消息产生于模式记录上线前，无法可靠还原当时选择的是协同还是代码，
+      因此单列为“旧记录未分类”，不会强行计入任一模式。之后的新消息会按发送时的真实模式统计。
+    </p>
+    <p v-if="hasFallbackUsage" class="data-note">
+      另有 {{ realUsageStats?.fallbackUsageRows ?? 0 }} 条旧消息缺少完整的整轮输入 / 输出拆分，
+      已按现有末次请求数据回退统计；因此历史总量可能低于实际计费量。
+    </p>
+    <p v-if="hasZeroInputUsage" class="data-note">
+      有 {{ realUsageStats?.zeroInputUsageRows ?? 0 }} 条记录只有输出、输入为 0。若供应商未返回输入用量，
+      应用无法凭空补算，这部分只会显示已知的输出。
+    </p>
+
+    <!-- 每日累计用量图表 (Tokens per day) -->
     <div class="usage-chart-card">
       <div class="chart-header">
         <div class="chart-title-area">
-          <h4 class="chart-heading">每日真实 Token 用量 (Tokens per day)</h4>
-          <p class="chart-sub subtle">过去 {{ usageDays }} 天各模式输入与输出真实统计 (无任何虚拟数据)</p>
+          <h4 class="chart-heading">每日累计 Token 用量</h4>
+          <p class="chart-sub subtle">
+            过去 {{ usageDays }} 天按整轮输入 + 输出聚合，单位 tokens
+          </p>
         </div>
         <div class="chart-legend">
           <span class="legend-item"><span class="legend-box cowork-box" /> 协同模式</span>
           <span class="legend-item"><span class="legend-box code-box" /> 代码模式</span>
+          <span v-if="hasLegacyUsage" class="legend-item">
+            <span class="legend-box legacy-box" /> 旧记录未分类
+          </span>
         </div>
       </div>
 
@@ -149,19 +190,25 @@ watch(usageDays, () => {
             v-for="(day, index) in (realUsageStats?.dailyList ?? [])"
             :key="index"
             class="histogram-col"
-            :title="`${day.fullDate} | 协同: ${day.coworkTokens} tokens, 代码: ${day.codeTokens} tokens (合计: ${day.totalTokens})`"
+            :title="`${day.fullDate} | 输入: ${day.promptTokens}, 输出: ${day.completionTokens}, 合计: ${day.totalTokens} tokens`"
           >
             <div class="bar-stack">
               <div
                 class="bar-segment code-segment"
                 :style="{
-                  height: `${day.codeTokens > 0 ? Math.max(3, Math.round((day.codeTokens / maxDailyTokens) * 95)) : 0}px`
+                  height: `${barHeight(day.codeTokens)}px`
                 }"
               />
               <div
                 class="bar-segment cowork-segment"
                 :style="{
-                  height: `${day.coworkTokens > 0 ? Math.max(3, Math.round((day.coworkTokens / maxDailyTokens) * 95)) : 0}px`
+                  height: `${barHeight(day.coworkTokens)}px`
+                }"
+              />
+              <div
+                class="bar-segment legacy-segment"
+                :style="{
+                  height: `${barHeight(day.legacyTokens)}px`
                 }"
               />
               <!-- 当天无数据时的占位小底线 -->
@@ -320,8 +367,14 @@ watch(usageDays, () => {
 
 .usage-metric-cards {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .usage-metric-cards {
+    grid-template-columns: 1fr;
+  }
 }
 
 .metric-card {
@@ -332,6 +385,13 @@ watch(usageDays, () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.highlight-card {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--primary, #d97757) 10%, transparent), transparent 70%),
+    var(--surface);
+  border-color: color-mix(in srgb, var(--primary, #d97757) 34%, var(--border));
 }
 
 .metric-title {
@@ -350,6 +410,46 @@ watch(usageDays, () => {
   font-size: 12px;
   font-weight: 400;
   color: var(--text-subtle);
+}
+
+.mode-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.mode-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mode-item strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.data-note {
+  margin: -8px 0 0;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 .usage-chart-card {
@@ -402,6 +502,10 @@ watch(usageDays, () => {
   background: #2f7d5d;
 }
 
+.legacy-box {
+  background: #8a8f98;
+}
+
 .histogram-wrapper {
   height: 140px;
   display: flex;
@@ -450,6 +554,17 @@ watch(usageDays, () => {
 
 .cowork-segment {
   background: #d97757;
+}
+
+.legacy-segment {
+  background: #8a8f98;
+}
+
+.bar-empty-dot {
+  width: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border);
 }
 
 .date-label {

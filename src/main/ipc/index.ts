@@ -70,7 +70,8 @@ const SendPayloadSchema = z
       .max(MAX_IMAGES_PER_MESSAGE, '一次最多发送 8 张图片')
       .optional(),
     providerId: z.string().optional(),
-    model: z.string().optional()
+    model: z.string().optional(),
+    viewMode: z.enum(['cowork', 'code']).optional()
   })
   // 允许「只发图不发字」，但两者不能同时为空
   .refine((value) => value.content.trim().length > 0 || (value.images?.length ?? 0) > 0, {

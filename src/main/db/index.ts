@@ -194,6 +194,11 @@ const MIGRATIONS: Migration[] = [
       // v6：上下文轮间摘要缓存（覆盖到哪个 messageId + 摘要正文）
       version: 6,
       sql: `ALTER TABLE conversations ADD COLUMN summary_json TEXT;`
+    },
+    {
+      // v7：记录消息发送时的协同 / 代码模式，避免统计时用“是否绑定目录”猜模式
+      version: 7,
+      sql: `ALTER TABLE messages ADD COLUMN usage_mode TEXT;`
     }
   ]
 

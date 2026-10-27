@@ -775,7 +775,8 @@ export const useChatStore = defineStore('chat', () => {
         content: text,
         ...(attachments.length > 0 ? { images: attachments } : {}),
         providerId: selectedProviderId.value || undefined,
-        model: selectedModel.value || undefined
+        model: selectedModel.value || undefined,
+        viewMode: viewMode.value
       })
       // 先乐观占位：主进程很快会下发 run_start 或 run_queued 覆盖它
       setRun(conversationId, {

@@ -84,7 +84,8 @@ export async function runAgentLoop(
       blocks: [],
       status: 'streaming',
       providerId: resolved.providerId,
-      model: resolved.model
+      model: resolved.model,
+      usageMode: userMessage.usageMode ?? null
     })
 
     emit({

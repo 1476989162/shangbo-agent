@@ -571,7 +571,8 @@ export class AgentRuntime {
       parentId,
       role: 'user',
       blocks,
-      status
+      status,
+      usageMode: payload.viewMode ?? null
     })
     // 忙时延迟抢叶子：A 跑中连发 B 时，B 落库不再立即抢 activeLeaf，
     // 否则 A 后续读历史会把还没回答的 B 读进来。真正的挂载在开跑时修正。
