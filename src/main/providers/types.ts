@@ -1,5 +1,40 @@
 import type { ContentBlock, ProviderKind, Usage } from '../../shared/types'
 
+/**
+ * 网关侧按 User-Agent 认客户端（Magpie 路由页显示 Codex/node 即按此区分）。
+ * 收成常量：各 adapter 统一引用，用户在供应商“自定义请求头”里仍可覆盖。
+ */
+export const SHANGBO_AGENT_NAME = 'shangbo-agent'
+
+/** 默认 UA：shangbo-agent/<版本号>拿不到版本时退化为纯名。 */
+export function shangboUserAgent(): string {
+  try {
+    const req = new Function(
+      'return typeof require !== "undefined" ? require : undefined'
+    )() as ((id: string) => { app?: { getVersion?: () => string } }) | undefined
+    const v = req?.('electron')?.app?.getVersion?.()
+    if (v) return `${SHANGBO_AGENT_NAME}/${v}`
+  } catch {
+    // 无 Electron 环境（单测）时用纯名
+  }
+  return SHANGBO_AGENT_NAME
+}
+
+/** 合并默认 UA 与自定义头：用户自定义的 user-agent 优先（大小写不敏感）。 */
+export function withAgentHeaders(custom?: Record<string, string>): Record<string, string> {
+  const merged: Record<string, string> = { 'user-agent': shangboUserAgent() }
+  if (!custom) return merged
+  for (const [k, v] of Object.entries(custom)) {
+    if (k.toLowerCase() === 'user-agent') {
+      delete merged['user-agent']
+      merged[k] = v
+    } else {
+      merged[k] = v
+    }
+  }
+  return merged
+}
+
 /** 与具体厂商无关的对话消息。 */
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'

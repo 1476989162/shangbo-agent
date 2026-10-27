@@ -22,3 +22,13 @@ export const REVIEW_PLAYBOOK = `
 3. 分级输出：按严重/建议分级，每条写清文件位置、问题一句话、改法一句话，不铺垫。
 4. 见好就收：覆盖完指定模块即输出；没指定模块时先给全仓风险面概览，再问用户深入哪块，不要地毯式遍历。
 5. 只查不修：除非用户明确说修，否则不写文件。`
+
+
+/** 网关联调避坑：Magpie按UA认客户端，Windows禁tail/head，改完必重启。 */
+export const GATEWAY_PLAYBOOK = [
+  "【网关联调】",
+  "1.认名:node即旧包缺名先看是否2个Agent同时在发",
+  "2.定量:UA收敛到types.ts withAgentHeaders三通道统一引用",
+  "3.必重启:改完dev重发一句话再刷新网关",
+  "4.Windows:只用PowerShell/node不许tail/head读中文一次读全"
+].join("\n");

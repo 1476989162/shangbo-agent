@@ -1,6 +1,7 @@
 import { ProviderHttpError, readSse } from './sse'
 import {
   textOf,
+  withAgentHeaders,
   type CompletionRequest,
   type LLMMessage,
   type ProviderAdapter,
@@ -155,13 +156,11 @@ export const anthropicAdapter: ProviderAdapter = {
         'content-type': 'application/json',
         'x-api-key': context.apiKey,
         'anthropic-version': ANTHROPIC_VERSION,
-        // 供应商自定义头（如经企业代理转发时需要的追踪头）可覆盖默认值
-        ...(context.headers ?? {})
+        ...withAgentHeaders(context.headers)
       },
       body: JSON.stringify(body),
       signal: context.signal
     })
-
     if (!response.ok || !response.body) {
       throw new ProviderHttpError(
         response.status,
@@ -258,7 +257,7 @@ export const anthropicAdapter: ProviderAdapter = {
       headers: {
         'x-api-key': context.apiKey,
         'anthropic-version': ANTHROPIC_VERSION,
-        ...(context.headers ?? {})
+        ...withAgentHeaders(context.headers)
       },
       signal: context.signal
     })

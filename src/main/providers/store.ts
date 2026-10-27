@@ -176,6 +176,14 @@ export function ensureDefaultProviders(): void {
       priority: 40
     },
     {
+      name: 'Magpie 网关',
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:34254/v1',
+      models: ['trae-cn/deepseek-v4.1-flash-max'],
+      enabled: false,
+      priority: 5
+    },
+    {
       name: 'Ollama 本地',
       kind: 'openai-compatible',
       baseUrl: 'http://localhost:11434/v1',

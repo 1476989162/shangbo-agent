@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { ProviderHttpError, readSse } from './sse'
 import {
   textOf,
+  withAgentHeaders,
   type CompletionRequest,
   type LLMMessage,
   type ProviderAdapter,
@@ -220,12 +221,11 @@ export const openAiResponsesAdapter: ProviderAdapter = {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${context.apiKey}`,
-        ...(context.headers ?? {})
+        ...withAgentHeaders(context.headers)
       },
       body: JSON.stringify(body),
       signal: context.signal
     })
-
     if (!response.ok || !response.body) {
       throw new ProviderHttpError(
         response.status,
@@ -485,7 +485,10 @@ export const openAiResponsesAdapter: ProviderAdapter = {
     // 获取模型列表时，baseUrl 若含有 /responses 路径则去除后访问 /models
     const cleanBase = context.baseUrl.replace(/\/responses\/?$/, '')
     const response = await fetch(joinUrl(cleanBase, '/models'), {
-      headers: { authorization: `Bearer ${context.apiKey}`, ...(context.headers ?? {}) },
+      headers: {
+        authorization: `Bearer ${context.apiKey}`,
+        ...withAgentHeaders(context.headers)
+      },
       signal: context.signal
     })
     if (!response.ok) {

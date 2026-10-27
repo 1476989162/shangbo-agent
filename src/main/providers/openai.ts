@@ -3,6 +3,7 @@ import { ProviderHttpError, readSse } from './sse'
 import { isResponsesModel, openAiResponsesAdapter } from './responses'
 import {
   textOf,
+  withAgentHeaders,
   type CompletionRequest,
   type LLMMessage,
   type ProviderAdapter,
@@ -149,13 +150,11 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${context.apiKey}`,
-        // 供应商自定义头（如 x-opencode-session）可覆盖默认值
-        ...(context.headers ?? {})
+        ...withAgentHeaders(context.headers)
       },
       body: JSON.stringify(body),
       signal: context.signal
     })
-
     if (!response.ok || !response.body) {
       throw new ProviderHttpError(
         response.status,
@@ -246,7 +245,10 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
 
   async listModels(context: ProviderContext): Promise<string[]> {
     const response = await fetch(joinUrl(context.baseUrl, '/models'), {
-      headers: { authorization: `Bearer ${context.apiKey}`, ...(context.headers ?? {}) },
+      headers: {
+        authorization: `Bearer ${context.apiKey}`,
+        ...withAgentHeaders(context.headers)
+      },
       signal: context.signal
     })
     if (!response.ok) {
