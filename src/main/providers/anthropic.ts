@@ -130,25 +130,56 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+const CACHE_CONTROL = { type: 'ephemeral' } as const
+
+/**
+ * 给消息序列的「倒数第二条 user 消息」最后一个块加 cache_control（滚动缓存）。
+ *
+ * 只对倒数第二条生效：最后一条 user 消息是本次新增内容，缓存它收益低；
+ * 倒数第二条及其之前的整段历史是稳定前缀，适合复用。
+ * 原地修改传入的数组即可，调用方每次请求都会重新构造 messages。
+ */
+function markRollingCachePoint(messages: AnthropicMessage[]): void {
+  const userIndexes: number[] = []
+  messages.forEach((message, index) => {
+    if (message.role === 'user') userIndexes.push(index)
+  })
+  if (userIndexes.length < 2) return
+  const target = messages[userIndexes[userIndexes.length - 2]]
+  const lastBlock = target.content[target.content.length - 1]
+  if (lastBlock) lastBlock.cache_control = CACHE_CONTROL
+}
+
 export const anthropicAdapter: ProviderAdapter = {
   kind: 'anthropic',
 
   async *stream(request: CompletionRequest, context: ProviderContext): AsyncGenerator<StreamChunk> {
+    const promptCache = request.promptCache !== false
+    const messages = toAnthropicMessages(request.messages)
     const body: Record<string, unknown> = {
       model: request.model,
       max_tokens: request.maxTokens ?? 8192,
       stream: true,
-      messages: toAnthropicMessages(request.messages)
+      messages
     }
-    if (request.system) body.system = request.system
+    if (request.system) {
+      // system 用数组形式才能挂 cache_control；关闭缓存时仍用数组保持线制一致
+      body.system = promptCache
+        ? [{ type: 'text', text: request.system, cache_control: CACHE_CONTROL }]
+        : [{ type: 'text', text: request.system }]
+    }
     if (request.temperature !== undefined) body.temperature = request.temperature
     if (request.tools && request.tools.length > 0) {
-      body.tools = request.tools.map((tool) => ({
+      const tools = request.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         input_schema: tool.parameters
-      }))
+      })) as Record<string, unknown>[]
+      // 工具定义通常整轮不变，给最后一项挂缓存点覆盖全部工具
+      if (promptCache) tools[tools.length - 1].cache_control = CACHE_CONTROL
+      body.tools = tools
     }
+    if (promptCache) markRollingCachePoint(messages)
 
     const response = await fetch(joinUrl(context.baseUrl, '/v1/messages'), {
       method: 'POST',
@@ -174,6 +205,7 @@ export const anthropicAdapter: ProviderAdapter = {
     let promptTokens = 0
     let completionTokens = 0
     let cacheReadTokens: number | undefined
+    let cacheWriteTokens: number | undefined
     let stopReason = 'stop'
     let sawUsage = false
 
@@ -194,6 +226,7 @@ export const anthropicAdapter: ProviderAdapter = {
       if (payload.type === 'message_start') {
         promptTokens = payload.message?.usage?.input_tokens ?? 0
         cacheReadTokens = payload.message?.usage?.cache_read_input_tokens
+        cacheWriteTokens = payload.message?.usage?.cache_creation_input_tokens
         completionTokens = payload.message?.usage?.output_tokens ?? 0
         sawUsage = true
         continue
@@ -228,6 +261,12 @@ export const anthropicAdapter: ProviderAdapter = {
           completionTokens = payload.usage.output_tokens
           sawUsage = true
         }
+        if (payload.usage?.cache_creation_input_tokens !== undefined) {
+          cacheWriteTokens = payload.usage.cache_creation_input_tokens
+        }
+        if (payload.usage?.cache_read_input_tokens !== undefined) {
+          cacheReadTokens = payload.usage.cache_read_input_tokens
+        }
         if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason
         continue
       }
@@ -246,6 +285,7 @@ export const anthropicAdapter: ProviderAdapter = {
     if (sawUsage) {
       const usage: Usage = { promptTokens, completionTokens }
       if (cacheReadTokens !== undefined) usage.cacheReadTokens = cacheReadTokens
+      if (cacheWriteTokens !== undefined) usage.cacheWriteTokens = cacheWriteTokens
       yield { type: 'usage', usage }
     }
 

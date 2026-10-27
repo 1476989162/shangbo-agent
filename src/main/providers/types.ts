@@ -60,6 +60,11 @@ export interface CompletionRequest {
    * 各 adapter 按自家线制转发，不支持的家族必须忽略——严格网关会对未知参数 400。
    */
   reasoningEffort?: string
+  /**
+   * 是否启用供应商级提示词缓存（目前仅 Anthropic 使用）。
+   * 部分兼容网关不支持 cache_control，需要能整体关掉。
+   */
+  promptCache?: boolean
 }
 
 export type StreamChunk =

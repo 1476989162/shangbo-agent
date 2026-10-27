@@ -57,6 +57,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 自更新：是否自动检查、发现后是否自动下载。安装永远需要用户确认。
   'app.update.check': z.boolean(),
   'app.update.autoDownload': z.boolean(),
+  // Anthropic 提示词缓存：部分兼容网关不支持 cache_control，需要能关掉
+  'provider.anthropic.promptCache': z.boolean(),
   // 文本
   'agent.instructions': z.string().max(20_000, '通用指导过长'),
   'agent.effort': z.string().max(50),

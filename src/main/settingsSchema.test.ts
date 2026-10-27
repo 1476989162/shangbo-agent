@@ -14,6 +14,8 @@ describe('设置写入白名单 (parseSettingValue)', () => {
     expect(() => parseSettingValue('agent.readOnly', 'yes')).toThrow()
     expect(parseSettingValue('agent.readOnly', false)).toBe(false)
     expect(parseSettingValue('agent.computerUse', true)).toBe(true)
+    expect(parseSettingValue('provider.anthropic.promptCache', false)).toBe(false)
+    expect(() => parseSettingValue('provider.anthropic.promptCache', 'off')).toThrow()
   })
 
   it('数字键超出业务范围抛错', () => {

@@ -1041,6 +1041,8 @@ export class AgentRuntime {
         let stopReason = 'stop'
         const firstByteTimeoutRaw = getSetting<number>('providers.firstByteTimeoutMs', 180_000)
         const firstByteTimeoutMs = resolveFirstByteTimeoutMs(firstByteTimeoutRaw)
+        // Anthropic 提示词缓存默认开启；兼容网关不支持时可在设置里关掉
+        const promptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
         for await (const chunk of streamWithFallback(
           {
             model: resolved.model,
@@ -1048,7 +1050,8 @@ export class AgentRuntime {
             messages,
             tools: offeredSchemas,
             maxTokens: resolvedEffort.maxTokens,
-            reasoningEffort: resolvedEffort.reasoningEffort
+            reasoningEffort: resolvedEffort.reasoningEffort,
+            promptCache
           },
           controller.signal,
           resolved.providerId,
@@ -1249,6 +1252,7 @@ export class AgentRuntime {
           let contStop = 'stop'
           // 续写沿用实际服务模型的档位映射，避免降级后用错上限。
           const contEffort = resolveEffort(servedModel, effort)
+            const contPromptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
           for await (const chunk of streamWithFallback(
             {
               model: servedModel,
@@ -1256,7 +1260,8 @@ export class AgentRuntime {
               messages: [...contextNow.messages, ...toLLMMessages(inMemoryNow)],
               tools: offeredSchemas,
               maxTokens: contEffort.maxTokens,
-              reasoningEffort: contEffort.reasoningEffort
+                reasoningEffort: contEffort.reasoningEffort,
+                promptCache: contPromptCache
             },
             controller.signal,
             servedProviderId
