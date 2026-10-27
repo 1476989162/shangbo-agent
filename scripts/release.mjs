@@ -35,12 +35,16 @@ console.log(`[release] 版本 v${version} 开始`)
 sh('npm run typecheck')
 sh('npm test -- --run')
 
-// 2. 打包到工作区外（避开 release/win-unpacked 被索引器锁死）
+// 2. 重新生成 out/ 后再打包。electron-builder 只消费现成构建产物，
+// 不跑 build 会把上一次开发或旧版本的 out/ 原样打进安装包。
+sh('npm run build')
+
+// 3. 打包到工作区外（避开 release/win-unpacked 被索引器锁死）
 const outDir = join(tmpdir(), `shangbo-rel-${version.replaceAll('.', '')}`)
 mkdirSync(outDir, { recursive: true })
 sh(`npx electron-builder --win --config.directories.output=${outDir}`)
 
-// 3. 验三件套
+// 4. 验三件套
 const exe = `shangbo-agent-setup-${version}.exe`
 const blockmap = `${exe}.blockmap`
 for (const f of [exe, blockmap, 'latest.yml']) {
@@ -53,7 +57,7 @@ if (!latest.includes(`version: ${version}`) || !latest.includes(`path: ${exe}`))
   fail('latest.yml 版本/文件名与目标不一致')
 }
 
-// 4. 拷回 release/
+// 5. 拷回 release/
 mkdirSync('release', { recursive: true })
 copyFileSync(join(outDir, exe), join('release', exe))
 copyFileSync(join(outDir, blockmap), join('release', blockmap))
@@ -61,7 +65,7 @@ copyFileSync(join(outDir, 'latest.yml'), join('release', 'latest.yml'))
 copyFileSync(join(outDir, 'latest.yml'), join('release', `latest-${version}.yml`))
 console.log('[release] 已拷回 release/')
 
-// 5. git 提交检查：工作区必须干净（构建产物/忽略目录除外）
+// 6. git 提交检查：工作区必须干净（构建产物/忽略目录除外）
 const status = execSync('git status --porcelain', { encoding: 'utf8' }).trim()
 const dirty = status
   .split('\n')
@@ -86,7 +90,7 @@ if (dirty.length) {
   fail('先提交代码再打 tag，避免 tag 与代码错位')
 }
 
-// 6. 打 tag
+// 7. 打 tag
 const tag = `v${version}`
 const tagExists = spawnSync('git', ['rev-parse', tag], { stdio: 'ignore' }).status === 0
 if (!tagExists) {
@@ -96,7 +100,7 @@ if (!tagExists) {
 }
 sh(`git push origin ${tag}`)
 
-// 7. gh 发布（三件套一起传，缺 latest.yml 自动更新 404）
+// 8. gh 发布（三件套一起传，缺 latest.yml 自动更新 404）
 const notesFile = existsSync(`outputs/release-${tag}.md`) ? `outputs/release-${tag}.md` : `CHANGELOG.md`
 const relExists = spawnSync('gh', ['release', 'view', tag], { stdio: 'ignore' }).status === 0
 if (relExists) {
