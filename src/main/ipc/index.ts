@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { z } from 'zod'
 import { IPC } from '../../shared/ipc'
-import { eventBus } from '../events/bus'
+import { bridgeEventsToWindow } from '../events/bus'
 import { remoteService } from '../remote/service'
 import { listRemoteAudit } from '../remote/audit'
 import * as repo from '../db/repo'
@@ -99,9 +99,7 @@ let desktopBridgeDisposer: (() => void) | null = null
 
 function ensureDesktopBridge(): void {
   if (desktopBridgeDisposer) return
-  desktopBridgeDisposer = eventBus.subscribe((event) => {
-    broadcast(event)
-  })
+  desktopBridgeDisposer = bridgeEventsToWindow(broadcast)
 }
 
 export function registerIpcHandlers(): void {
@@ -194,7 +192,9 @@ export function registerIpcHandlers(): void {
 
     return agentRuntime.send(
       { ...parsed, images: images.length > 0 ? images : undefined },
-      agentRuntime.withBus(broadcast)
+      // 事件只走总线：withBus 会 publish，桌面桥接订阅者负责 broadcast。
+      // 若这里再传 broadcast，同一事件会被发给窗口两次，导致流式文本重复。
+      agentRuntime.withBus(() => {})
     )
   })
 
@@ -223,7 +223,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageId: string) =>
-    agentRuntime.regenerate(assistantMessageId, agentRuntime.withBus(broadcast))
+    agentRuntime.regenerate(assistantMessageId, agentRuntime.withBus(() => {}))
   )
 
   /* 供应商 -------------------------------------------------------- */

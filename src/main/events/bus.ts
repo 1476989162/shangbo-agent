@@ -40,3 +40,14 @@ class EventBus {
 }
 
 export const eventBus = new EventBus()
+
+/**
+ * 桌面窗口的事件投递入口：订阅总线，把每个事件原样交给 deliver。
+ *
+ * 约定：AgentRuntime 的 emit 闭包必须是空操作（见 withBus），
+ * 投递只走这里。若 emit 也直接投递，同一事件会到达窗口两次，
+ * 界面的流式文本就会重复（「你好你好」）。
+ */
+export function bridgeEventsToWindow(deliver: EventSubscriber): () => void {
+  return eventBus.subscribe((event) => deliver(event))
+}

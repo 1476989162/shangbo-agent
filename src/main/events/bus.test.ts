@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { eventBus } from './bus'
+import { bridgeEventsToWindow, eventBus } from './bus'
 import type { AgentEvent } from '../../shared/types'
 
 /* 事件总线：publish/subscribe，订阅者异常隔离。 */
@@ -57,5 +57,26 @@ describe('事件总线 (eventBus)', () => {
     expect(viaBus).toEqual([event])
     const spy = vi.fn()
     void spy
+  })
+
+  it('桌面窗口每个事件只投递一次：总线桥接 + send 的 emit 不能同时发到窗口', async () => {
+    // 回归测试：ipc/index.ts 曾把 broadcast 既作为 withBus 的 emit，又作为总线桥接，
+    // 每个 text_delta 被发到窗口两次，界面出现「你好你好」式的结巴重复。
+    // 这里用生产代码里的同一个 bridgeEventsToWindow 与 withBus，锁定正确接线。
+    const { AgentRuntime } = await import('../agent/runtime')
+    const runtime = new AgentRuntime()
+    const delivered: AgentEvent[] = []
+    bridgeEventsToWindow((e) => delivered.push(e))
+    // 生产代码（ipc/index.ts 的 chat:send / regenerate）传入的 emit 必须是空操作
+    const emit = runtime.withBus(() => {})
+    const event: AgentEvent = {
+      type: 'text_delta',
+      runId: 'r1',
+      conversationId: 'c1',
+      messageId: 'm1',
+      text: '你好'
+    }
+    emit(event)
+    expect(delivered).toEqual([event])
   })
 })
