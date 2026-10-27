@@ -1,9 +1,14 @@
 import { exec } from 'node:child_process'
+import { createReadStream } from 'node:fs'
 import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { app } from 'electron'
 import { z } from 'zod'
+import { createGlobFilesTool } from './globFiles'
+import { createMultiPatchFileTool } from './multiPatch'
+import { createTodoWriteTool } from './todo'
 import {
   clickAt,
   pressKey,
@@ -303,6 +308,8 @@ const claudeStatus: ToolDefinition = {
 
 export interface ToolContext {
   conversationId: string
+  /** 当前回合 id；todo_write 用它隔离同一会话内的不同运行。 */
+  runId: string
   /**
    * 对话绑定的项目目录。相对路径基于它解析；未绑定时相对路径基于应用启动目录。
    * run_command 也把它作为默认工作目录。
@@ -311,11 +318,18 @@ export interface ToolContext {
   signal: AbortSignal
 }
 
+/** 工具模块之间共享的最小能力接口，避免互相 import index 形成循环依赖。 */
+export interface ToolHost {
+  resolveUserPath(context: ToolContext, path: string): string
+  guardPrivatePath(target: string): void
+  truncate(text: string): string
+}
+
 /**
  * 解析用户/模型给出的路径：绝对路径原样使用；
  * 相对路径优先基于对话的项目目录，未绑定时退回进程当前目录。
  */
-function resolveUserPath(context: ToolContext, path: string): string {
+export function resolveUserPath(context: ToolContext, path: string): string {
   if (isAbsolute(path)) return path
   return context.workingDirectory ? resolve(context.workingDirectory, path) : resolve(path)
 }
@@ -342,12 +356,12 @@ export interface ToolDefinition {
 /** 单次工具输出上限，避免一次目录列举就把上下文撑爆。 */
 const MAX_OUTPUT_CHARS = 16_000
 
-function truncate(text: string): string {
+export function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text
   return `${text.slice(0, MAX_OUTPUT_CHARS)}\n\n…（输出过长已截断，共 ${text.length} 字符）`
 }
 
-function describeError(error: unknown): string {
+export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -374,7 +388,7 @@ function safeUserDataPath(): string | null {
 
 const PRIVATE_FILE_PREFIXES = ['secrets.json', 'shangbo-agent.db']
 
-function guardPrivatePath(target: string): void {
+export function guardPrivatePath(target: string): void {
   const normalized = resolve(target).toLowerCase()
   // 文件名兜底：无 app 环境或路径不在 userData 下时，命中私有文件名同样拦截
   const base = basename(normalized)
@@ -403,6 +417,12 @@ function guardPrivatePath(target: string): void {
       )
     }
   }
+}
+
+const toolHost: ToolHost = {
+  resolveUserPath,
+  guardPrivatePath,
+  truncate
 }
 
 /* ------------------------------------------------------------------ */
@@ -477,23 +497,28 @@ const listDirectory: ToolDefinition = {
 
 const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: '读取文本文件的内容。支持相对路径（基于当前项目目录）与绝对路径。',
+  description:
+    '读取文本文件的内容。支持相对路径（基于当前项目目录）与绝对路径；可按字节分段，也可按行读取并返回行号。',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string', description: '文件路径，相对路径基于项目目录解析' },
       maxBytes: { type: 'integer', description: '最多读取的字节数，默认 262144' },
-      offsetBytes: { type: 'integer', description: '从第几个字节开始读，默认 0，用于分段读大文件' }
+      offsetBytes: { type: 'integer', description: '从第几个字节开始读，默认 0，用于分段读大文件' },
+      startLine: { type: 'integer', description: '起始行号（从 1 开始），与 endLine 配合按行读取' },
+      endLine: { type: 'integer', description: '结束行号（含），与 startLine 配合按行读取' }
     },
     required: ['path']
   },
   requiresApproval: false,
   async execute(input, context) {
-    const { path, maxBytes, offsetBytes } = z
+    const { path, maxBytes, offsetBytes, startLine, endLine } = z
       .object({
         path: z.string().min(1),
         maxBytes: z.number().int().positive().optional(),
-        offsetBytes: z.number().int().min(0).optional()
+        offsetBytes: z.number().int().min(0).optional(),
+        startLine: z.number().int().min(1).optional(),
+        endLine: z.number().int().min(1).optional()
       })
       .parse(input)
 
@@ -504,6 +529,41 @@ const readFileTool: ToolDefinition = {
       if (st.isDirectory()) throw new Error(`路径 ${target} 是目录不是文件：要列内容请用 list_directory，要读文件请传具体文件路径。`);
     } catch (e) {
       if (e instanceof Error && /是目录不是文件/.test(e.message)) throw e;
+    }
+    if (startLine !== undefined || endLine !== undefined) {
+      if (offsetBytes !== undefined || maxBytes !== undefined) {
+        throw new Error('startLine/endLine 不能与 offsetBytes/maxBytes 同时使用，请选择按行或按字节其中一种方式。')
+      }
+      const start = startLine ?? 1
+      const end = endLine ?? Number.MAX_SAFE_INTEGER
+      if (end < start) throw new Error('endLine 必须大于或等于 startLine。')
+      const lines: string[] = []
+      let currentLine = 0
+      let actualEnd = start - 1
+      const stream = createReadStream(target, { encoding: 'utf8' })
+      const reader = createInterface({ input: stream, crlfDelay: Infinity })
+      try {
+        // 流式按行扫描：只保留请求范围，超大文件也不会整份读入内存。
+        for await (const line of reader) {
+          if (context.signal.aborted) throw new Error('操作已取消')
+          currentLine++
+          if (line.includes('\0')) {
+            return `${target}：二进制文件，不提供文本内容。`
+          }
+          if (currentLine < start) continue
+          lines.push(`${currentLine}: ${line}`)
+          actualEnd = currentLine
+          if (currentLine >= end) break
+        }
+        if (start > currentLine) {
+          throw new Error(`startLine ${start} 超出文件行数 ${currentLine}。`)
+        }
+        const notice = currentLine < end ? '\n\n…（已返回至文件末尾）' : ''
+        return truncate(`${target}（第 ${start}-${actualEnd} 行）：\n\n${lines.join('\n')}${notice}`)
+      } finally {
+        reader.close()
+        stream.destroy()
+      }
     }
     const limit = maxBytes ?? 262_144
     const offset = offsetBytes ?? 0
@@ -633,6 +693,10 @@ const patchFileTool: ToolDefinition = {
     return `已成功对 ${target} 进行局部精确补丁更新。`
   }
 }
+
+const globFilesTool = createGlobFilesTool(toolHost)
+const multiPatchFileTool = createMultiPatchFileTool(toolHost)
+const todoWriteTool = createTodoWriteTool()
 
 /**
  * Freebuff 级系统命令安全审计与护栏规则库
@@ -1068,8 +1132,11 @@ const definitions: ToolDefinition[] = [
   listDirectory,
   readFileTool,
   searchFiles,
+  globFilesTool,
   writeFileTool,
   patchFileTool,
+  multiPatchFileTool,
+  todoWriteTool,
   runCommand,
   qoderAsk,
   qoderStatus,
@@ -1087,7 +1154,13 @@ const definitions: ToolDefinition[] = [
 const byName = new Map(definitions.map((tool) => [tool.name, tool]))
 
 /** 只读复查模式下开放的工具：全部免审批，模型看不到写与执行能力。 */
-const READ_ONLY_TOOL_NAMES = new Set(['get_current_time', 'list_directory', 'read_file', 'search_files'])
+const READ_ONLY_TOOL_NAMES = new Set([
+  'get_current_time',
+  'list_directory',
+  'read_file',
+  'search_files',
+  'glob_files'
+])
 
 export const toolRegistry = {
   all(): ToolDefinition[] {

@@ -300,6 +300,13 @@ export interface AgentSendRequest extends Omit<SendPayload, 'images'> {
   images?: StoredImage[]
 }
 
+/** 模型维护的任务清单项；todo_write 每次提交完整清单覆盖旧值。 */
+export interface TodoItem {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 export type AgentEvent =
   | {
       type: 'run_start'
@@ -419,6 +426,13 @@ export type AgentEvent =
       /** 前面还有几个回合在等（含正在跑的那个） */
       position: number
       userMessage: Message
+    }
+  | {
+      type: 'todo_update'
+      runId: string
+      conversationId: string
+      messageId: string
+      items: TodoItem[]
     }
 
 export interface ApprovalDecision {

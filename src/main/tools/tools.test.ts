@@ -110,13 +110,13 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
 
   it('run_command 触碰私有数据时直接抛错且不执行', async () => {
     const tool = toolRegistry.get('run_command')!
-    const ctx = { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+    const ctx = { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
     await expect(tool.execute({ command: 'type secrets.json' }, ctx)).rejects.toThrow('禁止访问应用私有数据')
   })
 
   it('A-3 绕过一：cwd 设为 userData 本身 + 通配符读密钥，被拦', async () => {
     const tool = toolRegistry.get('run_command')!
-    const ctx = { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+    const ctx = { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
     await expect(
       tool.execute({ command: 'type secret*', cwd: 'C:\\UserData\\shangbo-agent' }, ctx)
     ).rejects.toThrow('禁止访问应用私有数据')
@@ -128,7 +128,7 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
 
   it('A-3 绕过二：命令里用环境变量/通配符拼私有路径，被拦', async () => {
     const tool = toolRegistry.get('run_command')!
-    const ctx = { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+    const ctx = { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
     await expect(
       tool.execute({ command: 'type %APPDATA%\\shangbo-agent\\secr*' }, ctx)
     ).rejects.toThrow('禁止访问应用私有数据')
@@ -153,7 +153,7 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
 
   it('A-1 工具层：CRITICAL 硬拦截兜底，HIGH 不在工具层拦（交给审批）', async () => {
     const tool = toolRegistry.get('run_command')!
-    const ctx = { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+    const ctx = { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
     // CRITICAL：无论调用方是否审计过，工具层自保直接拦
     await expect(tool.execute({ command: 'rm -rf /' }, ctx)).rejects.toThrow('Freebuff')
     // HIGH：工具层放行（会真正走到 exec，本机没有 DROP 命令而失败，但不是被安全规则拦下）
@@ -166,7 +166,7 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
 describe('guardPrivatePath 私有目录保护', () => {
   it('拦截 SECRETS.JSON 大小写变体与 .tmp/.bak 后缀', async () => {
     const tool = toolRegistry.get('read_file')!
-    const ctx = { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+    const ctx = { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
     await expect(tool.execute({ path: 'C:/x/SECRETS.JSON' }, ctx)).rejects.toThrow('禁止访问应用私有数据')
     await expect(tool.execute({ path: '/tmp/secrets.json.tmp' }, ctx)).rejects.toThrow('禁止访问应用私有数据')
     await expect(tool.execute({ path: '/tmp/shangbo-agent.db-wal' }, ctx)).rejects.toThrow('禁止访问应用私有数据')
@@ -183,11 +183,63 @@ describe('read_file 分段读的多字节字符边界', () => {
       const tool = toolRegistry.get('read_file')!
       const res = (await tool.execute(
         { path: file, offsetBytes: 1, maxBytes: 11 },
-        { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal }
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
       )) as string
       expect(res).toContain('好世界')
       expect(res).toContain('残缺字节')
       expect(res).not.toContain('你')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('read_file 按行读取', () => {
+  it('返回带 1-based 行号的指定行范围', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-lines-test-'))
+    try {
+      const file = join(dir, 'lines.txt')
+      await writeFile(file, 'first\nsecond\nthird\nfourth', 'utf8')
+      const tool = toolRegistry.get('read_file')!
+      const res = (await tool.execute(
+        { path: file, startLine: 2, endLine: 3 },
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      )) as string
+      expect(res).toContain('2: second')
+      expect(res).toContain('3: third')
+      expect(res).not.toContain('1: first')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('结束行超出文件末尾时截到实际最后一行并提示', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-lines-end-'))
+    try {
+      const file = join(dir, 'short.txt')
+      await writeFile(file, 'one\ntwo', 'utf8')
+      const tool = toolRegistry.get('read_file')!
+      const res = (await tool.execute(
+        { path: file, startLine: 2, endLine: 9 },
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      )) as string
+      expect(res).toContain('2: two')
+      expect(res).toContain('已返回至文件末尾')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('非法范围与混用字节参数时明确报错', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-lines-bad-'))
+    try {
+      const file = join(dir, 'bad.txt')
+      await writeFile(file, 'only', 'utf8')
+      const tool = toolRegistry.get('read_file')!
+      const ctx = { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      await expect(tool.execute({ path: file, startLine: 3, endLine: 2 }, ctx)).rejects.toThrow('endLine')
+      await expect(tool.execute({ path: file, startLine: 1, offsetBytes: 0 }, ctx)).rejects.toThrow('不能')
+      await expect(tool.execute({ path: file, startLine: 3 }, ctx)).rejects.toThrow('超出文件行数')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -215,6 +267,7 @@ describe('Cursor / Cline 级代码补丁工具 (patch_file)', () => {
         },
         {
           conversationId: 'test',
+          runId: 'r',
           workingDirectory: dir,
           signal: new AbortController().signal
         }
@@ -238,7 +291,7 @@ describe('Cursor / Cline 级代码补丁工具 (patch_file)', () => {
       const tool = toolRegistry.get('patch_file')!
       await tool.execute(
         { path: testFile, targetContent: 'TARGET', replacementContent: replacement },
-        { conversationId: 'test', workingDirectory: dir, signal: new AbortController().signal }
+        { conversationId: 'test', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
       )
       const updated = await readFile(testFile, 'utf8')
       expect(updated).toBe(`before\n${replacement}\nlate`)
@@ -260,7 +313,7 @@ describe('文件工具容错（CRLF归一/目录误传）', () => {
       const tool = toolRegistry.get('patch_file')!;
       const res = (await tool.execute(
         { path: f, targetContent: 'line2 old', replacementContent: 'line2 new' },
-        { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal }
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
       )) as string;
       expect(res).toContain('局部精确补丁更新');
       const updated = await (await import('node:fs/promises')).readFile(f, 'utf8');
@@ -279,7 +332,7 @@ describe('文件工具容错（CRLF归一/目录误传）', () => {
     try {
       await (await import('node:fs/promises')).writeFile(f, 'x', 'utf8');
       const tool = toolRegistry.get('list_directory')!;
-      await expect(tool.execute({ path: f }, { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是文件不是目录');
+      await expect(tool.execute({ path: f }, { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是文件不是目录');
     } finally {
       await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true });
     }
@@ -292,7 +345,7 @@ describe('文件工具容错（CRLF归一/目录误传）', () => {
     const dir = await mkdtemp(join(tmpdir(), 'shangbo-isdir-'));
     try {
       const tool = toolRegistry.get('read_file')!;
-      await expect(tool.execute({ path: dir }, { conversationId: 't', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是目录不是文件');
+      await expect(tool.execute({ path: dir }, { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal })).rejects.toThrow('是目录不是文件');
     } finally {
       await (await import('node:fs/promises')).rm(dir, { recursive: true, force: true });
     }
@@ -307,12 +360,165 @@ describe('search_files 行号与截断标记', () => {
       const tool = toolRegistry.get('search_files')!
       const res = (await tool.execute(
         { content: '关键词', path: dir },
-        { conversationId: 't', workingDirectory: null, signal: new AbortController().signal }
+        { conversationId: 't', runId: 'r', workingDirectory: null, signal: new AbortController().signal }
       )) as string
       expect(res).toContain('a.txt:2:')
       expect(res).toContain('关键词')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('glob_files 文件匹配', () => {
+  it('按模式返回相对路径，并自动忽略 node_modules/.git/out/dist', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-glob-test-'))
+    try {
+      await writeFile(join(dir, 'a.ts'), '', 'utf8')
+      await import('node:fs/promises').then(({ mkdir }) =>
+        mkdir(join(dir, 'src'), { recursive: true })
+      )
+      await writeFile(join(dir, 'src', 'b.ts'), '', 'utf8')
+      for (const ignored of ['node_modules', '.git', 'out', 'dist']) {
+        await import('node:fs/promises').then(({ mkdir }) =>
+          mkdir(join(dir, ignored), { recursive: true })
+        )
+        await writeFile(join(dir, ignored, 'hidden.ts'), '', 'utf8')
+      }
+      const tool = toolRegistry.get('glob_files')!
+      const res = (await tool.execute(
+        { pattern: '**/*.ts' },
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      )) as string
+      expect(res).toContain('a.ts')
+      expect(res).toContain('src/b.ts')
+      expect(res).not.toContain('node_modules')
+      expect(res).not.toContain('.git')
+      expect(res).not.toContain('out/hidden.ts')
+      expect(res).not.toContain('dist/hidden.ts')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('无匹配时给出明确空结果，目录误传时友好报错', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-glob-empty-'))
+    try {
+      const tool = toolRegistry.get('glob_files')!
+      const ctx = { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      const res = (await tool.execute({ pattern: '**/*.nope' }, ctx)) as string
+      expect(res).toContain('未找到')
+      await writeFile(join(dir, 'file.txt'), '', 'utf8')
+      await expect(tool.execute({ pattern: '**/*.txt', path: join(dir, 'file.txt') }, ctx)).rejects.toThrow('是文件不是目录')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('multi_patch_file 原子多补丁', () => {
+  it('多处替换全部成功且只写一次最终结果', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-multi-patch-'))
+    try {
+      const file = join(dir, 'code.txt')
+      await writeFile(file, 'const a = 1\nconst b = 2\n', 'utf8')
+      const tool = toolRegistry.get('multi_patch_file')!
+      const res = await tool.execute(
+        {
+          path: file,
+          replacements: [
+            { targetContent: 'a = 1', replacementContent: 'a = 10' },
+            { targetContent: 'b = 2', replacementContent: 'b = 20' }
+          ]
+        },
+        { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+      )
+      expect(res).toContain('2 处')
+      expect(await readFile(file, 'utf8')).toBe('const a = 10\nconst b = 20\n')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('任一处匹配不到时整体失败，文件保持原样', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-multi-patch-fail-'))
+    try {
+      const file = join(dir, 'code.txt')
+      const original = 'alpha\nbeta\ngamma\n'
+      await writeFile(file, original, 'utf8')
+      const tool = toolRegistry.get('multi_patch_file')!
+      await expect(
+        tool.execute(
+          {
+            path: file,
+            replacements: [
+              { targetContent: 'alpha', replacementContent: 'ALPHA' },
+              { targetContent: 'missing', replacementContent: 'never' }
+            ]
+          },
+          { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+        )
+      ).rejects.toThrow('第 2 处')
+      expect(await readFile(file, 'utf8')).toBe(original)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('匹配不唯一时整体失败，文件保持原样', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-multi-patch-ambiguous-'))
+    try {
+      const file = join(dir, 'dupe.txt')
+      const original = 'same\nsame\n'
+      await writeFile(file, original, 'utf8')
+      const tool = toolRegistry.get('multi_patch_file')!
+      await expect(
+        tool.execute(
+          { path: file, replacements: [{ targetContent: 'same', replacementContent: 'x' }] },
+          { conversationId: 't', runId: 'r', workingDirectory: dir, signal: new AbortController().signal }
+        )
+      ).rejects.toThrow('匹配到 2 个位置')
+      expect(await readFile(file, 'utf8')).toBe(original)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('todo_write 任务清单', () => {
+  it('按 runId 保存完整清单，并覆盖旧状态', async () => {
+    const { clearTodoItems, getTodoItems } = await import('./todo')
+    const tool = toolRegistry.get('todo_write')!
+    const ctx = { conversationId: 't', runId: 'run-a', workingDirectory: null, signal: new AbortController().signal }
+    const first = await tool.execute(
+      {
+        todos: [
+          { id: '1', content: '读取代码', status: 'in_progress' },
+          { id: '2', content: '补测试', status: 'pending' }
+        ]
+      },
+      ctx
+    )
+    expect(first).toContain('0/2')
+    expect(getTodoItems('run-a')).toHaveLength(2)
+    expect(getTodoItems('run-b')).toHaveLength(0)
+
+    await tool.execute(
+      { todos: [{ id: '1', content: '读取代码', status: 'completed' }] },
+      ctx
+    )
+    expect(getTodoItems('run-a')).toEqual([
+      { id: '1', content: '读取代码', status: 'completed' }
+    ])
+    clearTodoItems('run-a')
+  })
+
+  it('非法状态被拒绝，空清单表示清空任务', async () => {
+    const tool = toolRegistry.get('todo_write')!
+    const ctx = { conversationId: 't', runId: 'run-bad', workingDirectory: null, signal: new AbortController().signal }
+    await expect(
+      tool.execute({ todos: [{ id: '1', content: 'x', status: 'unknown' }] }, ctx)
+    ).rejects.toThrow()
+    await expect(tool.execute({ todos: [] }, ctx)).resolves.toBeTruthy()
   })
 })

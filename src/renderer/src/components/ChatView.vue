@@ -856,6 +856,29 @@ const suggestions = [
     <!-- 底部操作与通知区域 -->
     <div class="chat-footer">
       <div class="chat-column">
+        <!-- 模型维护的任务清单：简单列表，完成后逐项划线 -->
+        <div v-if="store.todoItems.length > 0" class="todo-panel">
+          <div class="todo-panel-head">
+            <span>任务清单</span>
+            <span class="todo-panel-count">
+              {{ store.todoItems.filter((item) => item.status === 'completed').length }}/{{ store.todoItems.length }}
+            </span>
+          </div>
+          <ul class="todo-list">
+            <li
+              v-for="item in store.todoItems"
+              :key="item.id"
+              class="todo-item"
+              :class="item.status"
+            >
+              <span class="todo-status" aria-hidden="true">
+                {{ item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '◌' : '○' }}
+              </span>
+              <span class="todo-content">{{ item.content }}</span>
+            </li>
+          </ul>
+        </div>
+
         <!-- 工具审批卡片 (整合 Freebuff 级安全审计与护栏) -->
         <div v-if="store.approval" class="approval" :class="{ 'critical-security-card': isSecurityCriticalApproval }">
           <div class="approval-head">
@@ -2653,6 +2676,67 @@ const suggestions = [
 }
 
 /* 通知条样式 */
+.todo-panel {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.todo-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.todo-panel-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.todo-status {
+  flex: none;
+  width: 14px;
+  color: var(--text-subtle);
+  text-align: center;
+}
+
+.todo-item.in_progress .todo-status {
+  color: var(--accent);
+}
+
+.todo-item.completed .todo-status {
+  color: var(--success, #2f9e62);
+}
+
+.todo-item.completed .todo-content {
+  color: var(--text-subtle);
+  text-decoration: line-through;
+}
+
 .approval {
   margin-bottom: 12px;
   padding: 12px;

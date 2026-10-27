@@ -7,7 +7,8 @@ import type {
   Conversation,
   ImageAttachment,
   Message,
-  Provider
+  Provider,
+  TodoItem
 } from '@shared/types'
 
 export interface ApprovalRequest {
@@ -100,6 +101,11 @@ export const useChatStore = defineStore('chat', () => {
   const lastError = ref<string | null>(null)
   const switchNotice = ref<SwitchNotice | null>(null)
   const retryInfo = ref<RetryInfo | null>(null)
+  /** 会话 id → 最近一次任务清单；切会话后仍能看到后台会话的进度。 */
+  const todosByConversation = ref<Record<string, TodoItem[]>>({})
+  const todoItems = computed(() =>
+    activeConversationId.value ? todosByConversation.value[activeConversationId.value] ?? [] : []
+  )
 
   const activeRunId = computed(
     () => (activeConversationId.value ? (runsByConversation.value[activeConversationId.value]?.runId ?? null) : null)
@@ -428,6 +434,8 @@ export const useChatStore = defineStore('chat', () => {
           void refreshConversations()
           break
         }
+        case 'todo_update':
+          break
         case 'run_error':
         case 'message_done':
           void refreshConversations()
@@ -540,6 +548,15 @@ export const useChatStore = defineStore('chat', () => {
       case 'usage': {
         const message = findMessage(event.messageId)
         if (message) message.usage = event.usage
+        break
+      }
+
+      case 'todo_update': {
+        // 按 conversationId 保存，后台会话的任务进度切回来后仍可见。
+        todosByConversation.value = {
+          ...todosByConversation.value,
+          [event.conversationId]: event.items
+        }
         break
       }
 
@@ -993,6 +1010,7 @@ export const useChatStore = defineStore('chat', () => {
     lastError,
     switchNotice,
     retryInfo,
+    todoItems,
     isStreaming,
     activeConversation,
     viewMode,

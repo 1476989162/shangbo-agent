@@ -8,6 +8,7 @@ import log from 'electron-log/main'
 import * as repo from '../db/repo'
 import { getSetting, setSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
+import { clearTodoItems, getTodoItems } from '../tools/todo'
 import { canonicalParamString } from '../../shared/remote'
 import { eventBus, type EventSubscriber } from '../events/bus'
 import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
@@ -251,6 +252,7 @@ export class AgentRuntime {
     if (active?.watchdog) clearTimeout(active.watchdog)
     if (!this.runs.has(runId)) return
     this.runs.delete(runId)
+    clearTodoItems(runId)
     // 推进队列前先记下还剩几项，这样 run_end 里的 queued 是「不含本轮」的准确值
     const queued = this.queueLength(conversationId)
     this.advanceQueue(conversationId)
@@ -1608,9 +1610,19 @@ export class AgentRuntime {
     try {
       const raw = await tool.execute(call.input, {
         conversationId,
+        runId,
         workingDirectory,
         signal: controller.signal
       })
+      if (call.name === 'todo_write') {
+        emit({
+          type: 'todo_update',
+          runId,
+          conversationId,
+          messageId,
+          items: getTodoItems(runId)
+        })
+      }
       if (typeof raw === 'string') return { content: raw, isError: false }
       return { content: raw.content, isError: raw.isError, image: raw.image }
     } catch (error) {
