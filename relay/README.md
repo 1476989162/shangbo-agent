@@ -43,6 +43,20 @@ RELAY_ALLOWED_DESKTOPS='3652-AC6F-1A8E-5B97' docker compose up -d
 cd relay && node scripts/verify-only-me.mjs
 ```
 
+线上中转自检（不修改任何数据，只读探测）：
+
+```bash
+# 探测线上是否仍接受匿名注册
+node relay/scripts/probe-online.mjs
+
+# 验证准入密钥：正确密钥能注册、错误/无密钥被拒
+# 密钥从环境变量读取，不要写在命令行里（会被 shell 历史记录）
+RELAY_KEY='你的密钥' node relay/scripts/verify-access-key.mjs
+
+# 验证资源上限
+node relay/scripts/probe-limits.mjs
+```
+
 预期输出：
 
 ```
