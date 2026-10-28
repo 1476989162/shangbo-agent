@@ -184,6 +184,37 @@ const suggestions = [
   '检查 Git 提交状态与分支变更情况',
   '整理最近待办需求，生成一份 Markdown 任务计划表'
 ]
+
+const modeLabel = computed(() => {
+  if (store.agentMode === 'auto') return '智能模式'
+  if (store.agentMode === 'wish') return '许愿模式'
+  if (store.agentMode === 'builder') return '建造者'
+  return '问答模式'
+})
+
+const autonomyLabel = computed(() => {
+  if (store.autonomy === 'strict') return '严格确认'
+  if (store.autonomy === 'trusted') return '完全信任'
+  return '智能自治'
+})
+
+const capabilities = [
+  {
+    glyph: '◉',
+    title: '懂你说什么',
+    desc: '把一句话还原成目标、约束与验收标准，能推断的不再反问。'
+  },
+  {
+    glyph: '◆',
+    title: '少问多做',
+    desc: '工作区内自主读写与验证；只有不可逆操作和外部副作用才停下来。'
+  },
+  {
+    glyph: '✦',
+    title: '红线不越',
+    desc: '格式化磁盘永久拒绝；删 .git、删库必须你本人逐次确认。'
+  }
+]
 </script>
 
 <template>
@@ -214,6 +245,13 @@ const suggestions = [
       </div>
 
       <div class="header-actions">
+        <span class="header-mode-pill" :title="`当前模式：${modeLabel}；执行自治：${autonomyLabel}`">
+          <span class="header-mode-dot" />
+          {{ modeLabel }}
+          <span class="header-mode-sep">·</span>
+          <span class="header-autonomy">{{ autonomyLabel }}</span>
+        </span>
+
         <span v-if="exportHint" class="export-hint subtle">{{ exportHint }}</span>
 
         <button
@@ -243,9 +281,34 @@ const suggestions = [
       <div class="chat-column">
         <!-- 欢迎仪表盘 (对话为空时展示) -->
         <section v-if="path.length === 0" class="dashboard-welcome">
-          <div class="welcome-banner">
-            <img :src="logoImg" class="welcome-brand-logo" alt="尚搏 Logo" />
-            <h2 class="welcome-heading">欢迎回来，{{ store.userName }}</h2>
+          <div class="welcome-hero">
+            <div class="hero-halo" aria-hidden="true" />
+            <span class="taiji-ring hero-mark">
+              <img :src="logoImg" class="welcome-brand-logo" alt="尚搏" />
+            </span>
+            <div class="hero-copy">
+              <p class="hero-eyebrow">SHANGBO AGENT · 数智太极</p>
+              <h2 class="hero-title brand-serif">欢迎回来，{{ store.userName }}</h2>
+              <p class="hero-sub">
+                说人话就行。我会自己判断该聊、该查还是该动手；不确定的地方按最合理的默认值继续，
+                最后把假设交代清楚。
+              </p>
+              <div class="hero-tags">
+                <span>自然语言理解</span>
+                <span>自主执行</span>
+                <span>安全红线</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="capability-grid">
+            <div v-for="item in capabilities" :key="item.title" class="capability-card">
+              <span class="capability-glyph">{{ item.glyph }}</span>
+              <div class="capability-copy">
+                <h3>{{ item.title }}</h3>
+                <p>{{ item.desc }}</p>
+              </div>
+            </div>
           </div>
 
           <!-- 最近会话列表 -->
@@ -285,14 +348,17 @@ const suggestions = [
 
           <!-- 快速灵感建议条目 -->
           <div class="quick-suggestions">
-            <div
-              v-for="(item, index) in suggestions"
-              :key="index"
-              class="suggestion-chip"
-              @click="applySuggestion(item)"
-            >
-              <span class="chip-spark">✦</span>
-              <span class="chip-text">{{ item }}</span>
+            <h3 class="section-title">从这里开始</h3>
+            <div class="suggestion-grid">
+              <div
+                v-for="(item, index) in suggestions"
+                :key="index"
+                class="suggestion-chip"
+                @click="applySuggestion(item)"
+              >
+                <span class="chip-spark">✦</span>
+                <span class="chip-text">{{ item }}</span>
+              </div>
             </div>
           </div>
         </section>
@@ -460,29 +526,141 @@ const suggestions = [
 .dashboard-welcome {
   display: flex;
   flex-direction: column;
-  padding: 40px 0 20px;
-  gap: 32px;
+  padding: 34px 0 20px;
+  gap: 26px;
 }
 
-.welcome-banner {
+.welcome-hero {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 26px 26px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--gold-2) 7%, var(--bg-elevated)), var(--bg-elevated) 46%),
+    var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
 }
 
-.coral-asterisk {
+.hero-halo {
+  position: absolute;
+  top: -120px;
+  right: -80px;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--gold-2) 16%, transparent), transparent 66%);
+  pointer-events: none;
+}
+
+.hero-mark {
+  width: 58px;
+  height: 58px;
+  flex: none;
+  margin-top: 2px;
+}
+
+.hero-copy {
+  position: relative;
+  min-width: 0;
+}
+
+.hero-eyebrow {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--accent-strong);
+  text-transform: uppercase;
+}
+
+.hero-title {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.hero-sub {
+  margin: 8px 0 0;
+  max-width: 560px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-muted);
+}
+
+.hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.hero-tags span {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: var(--radius-full);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--gold-2) 26%, transparent);
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.capability-card {
+  display: flex;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.capability-card:hover {
+  border-color: color-mix(in srgb, var(--gold-2) 38%, var(--border));
+  transform: translateY(-1px);
+}
+
+.capability-glyph {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 26px;
+  height: 26px;
   flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
 }
 
-.welcome-heading {
-  margin: 0;
-  font-size: 22px;
+.capability-copy h3 {
+  margin: 0 0 3px;
+  font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: -0.3px;
   color: var(--text);
+}
+
+.capability-copy p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+
+.welcome-brand-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
 }
 
 .sessions-section {
@@ -598,19 +776,26 @@ const suggestions = [
 .quick-suggestions {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 8px;
 }
 
 .suggestion-chip {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 12px 13px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--text);
   cursor: pointer;
   transition: all 0.12s ease;
@@ -618,11 +803,13 @@ const suggestions = [
 
 .suggestion-chip:hover {
   background: var(--surface-hover);
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--gold-2) 42%, var(--border));
 }
 
 .chip-spark {
   color: var(--accent);
+  flex: none;
+  line-height: 1.5;
 }
 
 /* 现代工程输入胶囊 */
@@ -638,11 +825,40 @@ const suggestions = [
   text-align: center;
 }
 
-/* 尚搏企业官方 Logo 样式 */
-.welcome-brand-logo {
-  width: 32px;
-  height: 32px;
-  object-fit: contain;
-  border-radius: 6px;
-  flex-shrink: 0;
-}</style>
+/* 顶栏模式徽标 */
+.header-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  white-space: nowrap;
+}
+
+.header-mode-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 16%, transparent);
+}
+
+.header-mode-sep {
+  color: var(--text-subtle);
+}
+
+.header-autonomy {
+  color: var(--accent-strong);
+}
+
+@media (max-width: 900px) {
+  .capability-grid,
+  .suggestion-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

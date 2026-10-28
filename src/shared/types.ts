@@ -10,11 +10,20 @@ export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'aborte
 
 /**
  * Agent 工作模式：
+ * - auto：智能模式，按本轮自然语言自动判定为 chat / builder / wish；
  * - chat：只讨论，不主动落盘；
- * - builder：常规建造者，危险操作逐次审批；
+ * - builder：常规建造者，工作区内安全操作按自治等级放行；
  * - wish：许愿模式，在工作区内自动执行、自动验证，系统级不可逆操作仍然硬拒绝。
  */
-export type AgentMode = 'chat' | 'builder' | 'wish'
+export type AgentMode = 'auto' | 'chat' | 'builder' | 'wish'
+
+/**
+ * 自治等级：决定「哪些操作可以不经人工确认」。
+ * - strict：所有写操作与命令都确认；
+ * - balanced：工作区内的读写与安全命令自动放行，其余确认；
+ * - trusted：常规软风险操作自动放行，硬红线仍必须人工确认。
+ */
+export type AutonomyLevel = 'strict' | 'balanced' | 'trusted'
 
 /** 侧边栏的协同 / 代码视图模式；用于统计时区分用户实际选择的工作方式。 */
 export type UsageMode = 'cowork' | 'code'
@@ -378,6 +387,13 @@ export type AgentEvent =
       name: string
       input: unknown
       reason: string
+      /**
+       * critical：硬红线（删 .git / 删库 / 无 WHERE 删除 / 强制推送等），
+       * 必须人工逐次确认，任何自动放行与「始终允许」都不生效。
+       */
+      severity?: 'normal' | 'critical'
+      /** 该审批是否允许被自治等级自动放行；硬红线恒为 false。 */
+      autoApprovable?: boolean
     }
   | {
       type: 'subagent_start'

@@ -17,6 +17,8 @@ interface PendingApproval {
   input: unknown
   paramHash: string
   reason: string
+  severity: 'normal' | 'critical'
+  autoApprovable: boolean
   createdAt: number
   settle: (approved: boolean) => void
 }
@@ -31,6 +33,8 @@ export interface PendingApprovalSnapshot {
   input: unknown
   paramHash: string
   reason: string
+  severity: 'normal' | 'critical'
+  autoApprovable: boolean
   createdAt: number
   expiresAt: number
   remainingMs: number
@@ -81,6 +85,8 @@ export class ApprovalBroker {
         input: pending.input,
         paramHash: pending.paramHash,
         reason: pending.reason,
+        severity: pending.severity,
+        autoApprovable: pending.autoApprovable,
         createdAt: pending.createdAt,
         expiresAt: pending.createdAt + APPROVAL_TIMEOUT_MS,
         remainingMs
@@ -112,13 +118,20 @@ export class ApprovalBroker {
     conversationId: string,
     messageId: string,
     call: { id: string; name: string; input: unknown },
-    tool: { name: string; approvalReason?: string },
+    tool: {
+      name: string
+      approvalReason?: string
+      severity?: 'normal' | 'critical'
+      autoApprovable?: boolean
+    },
     emit: ApprovalEmitter,
     controller: AbortController
   ): Promise<ApprovalDecision> {
     const key = `${runId}:${call.id}`
     const paramHash = ApprovalBroker.paramHashOf(call.input)
     const reason = tool.approvalReason ?? '该操作会修改你的本机环境。'
+    const severity = tool.severity ?? 'normal'
+    const autoApprovable = tool.autoApprovable !== false && severity !== 'critical'
 
     emit({
       type: 'approval_required',
@@ -128,7 +141,9 @@ export class ApprovalBroker {
       toolUseId: call.id,
       name: call.name,
       input: call.input,
-      reason
+      reason,
+      severity,
+      autoApprovable
     })
 
     return new Promise<ApprovalDecision>((resolve) => {
@@ -154,6 +169,8 @@ export class ApprovalBroker {
         input: call.input,
         paramHash,
         reason,
+        severity,
+        autoApprovable,
         createdAt: Date.now(),
         settle
       })

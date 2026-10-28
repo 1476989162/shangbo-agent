@@ -317,6 +317,7 @@ const app = createApp({
           </div>
           <div v-if="approvals.length === 0" class="m-empty">暂无待审批</div>
           <div v-for="a in approvals" :key="a.runId + ':' + a.toolUseId" class="m-approval">
+            <div v-if="a.severity === 'critical'" class="m-appr-critical">安全红线 · 必须本人确认</div>
             <div class="m-appr-name">{{ a.toolName }}</div>
             <div class="m-appr-reason">{{ a.reason }}</div>
             <div class="m-appr-input">{{ JSON.stringify(a.input).slice(0, 200) }}</div>
@@ -345,7 +346,7 @@ const app = createApp({
     </section>
     <div v-if="confirmHigh" class="m-modal-mask">
       <div class="m-modal">
-        <h3>高危操作二次确认</h3>
+        <h3>{{ confirmHigh.a.severity === 'critical' ? '安全红线 · 二次确认' : '高危操作二次确认' }}</h3>
         <p>{{ confirmHigh.a.toolName }}：{{ confirmHigh.a.reason }}</p>
         <p class="m-appr-input">{{ JSON.stringify(confirmHigh.a.input).slice(0, 300) }}</p>
         <div class="m-appr-row">

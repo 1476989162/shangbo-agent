@@ -119,7 +119,7 @@ export function registerIpcHandlers(): void {
             title?: string
             workingDir?: string | null
             projectId?: string | null
-            mode?: 'chat' | 'builder' | 'wish' | null
+            mode?: 'auto' | 'chat' | 'builder' | 'wish' | null
           }
         | undefined
     ) => {
@@ -166,7 +166,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.conversationSetMode, (_event, conversationId: unknown, mode: unknown) => {
     const id = z.string().min(1).parse(conversationId)
-    const parsed = z.enum(['chat', 'builder', 'wish']).nullable().parse(mode)
+    const parsed = z.enum(['auto', 'chat', 'builder', 'wish']).nullable().parse(mode)
     repo.updateConversation(id, { mode: parsed })
     return repo.getConversation(id)
   })
@@ -351,6 +351,27 @@ export function registerIpcHandlers(): void {
       username: process.env.USERNAME || process.env.USER || 'Administrator',
       ...getInstallInfo()
     }
+  })
+
+  ipcMain.handle(IPC.appWindowTheme, (_event, theme: unknown) => {
+    const parsed = z.enum(['light', 'dark']).parse(theme)
+    const colors =
+      parsed === 'dark'
+        ? { background: '#131110', symbol: '#F1EBDF' }
+        : { background: '#FBFAF6', symbol: '#1D1B18' }
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.setBackgroundColor(colors.background)
+      try {
+        win.setTitleBarOverlay({
+          color: colors.background,
+          symbolColor: colors.symbol,
+          height: 40
+        })
+      } catch {
+        // 非 Windows 或未启用 overlay 时忽略
+      }
+    }
+    return true
   })
 
   ipcMain.handle(IPC.appGitBranch, async (_event, dir: unknown) => {

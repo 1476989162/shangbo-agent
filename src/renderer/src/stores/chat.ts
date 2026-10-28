@@ -1,8 +1,10 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { shouldAutoApproveApproval } from '../components/approvalPresentation'
 import type {
   AgentMode,
   AgentEvent,
+  AutonomyLevel,
   ContentBlock,
   Conversation,
   ImageAttachment,
@@ -17,6 +19,9 @@ export interface ApprovalRequest {
   name: string
   input: unknown
   reason: string
+  /** critical：硬红线，必须人工逐次确认，不允许“始终允许”。 */
+  severity: 'normal' | 'critical'
+  autoApprovable: boolean
 }
 
 /** 跨供应商降级通知：告诉用户实际回复来自哪家供应商/模型以及原因。 */
@@ -131,8 +136,37 @@ export const useChatStore = defineStore('chat', () => {
   const userName = ref('Administrator')
   const currentBranch = ref('main')
   const worktreeEnabled = ref(false)
-  /** 许愿模式的免审批开关；与主进程 agent.wish.autoApproveWorkspace 同源。 */
-  const bypassPermissions = ref(true)
+  /**
+   * 自治等级（主进程持久化）：决定工作区内/常规软风险操作是否免确认。
+   * 硬红线（删 .git、删库、格式化磁盘）不受它影响，永远人工确认或直接拒绝。
+   */
+  const autonomy = ref<AutonomyLevel>('balanced')
+
+  async function setAutonomy(level: AutonomyLevel): Promise<void> {
+    autonomy.value = level
+    await window.shangbo.settings.set('agent.autonomy', level)
+  }
+
+  function cycleAutonomy(): void {
+    const order: AutonomyLevel[] = ['strict', 'balanced', 'trusted']
+    const next = order[(order.indexOf(autonomy.value) + 1) % order.length]
+    void setAutonomy(next)
+  }
+
+  /**
+   * 渲染层「自动同意常规审批」开关。
+   * 只对普通审批生效；主进程标记为 critical 的硬红线永远弹窗，不受此开关影响。
+   */
+  const autoApproveSoft = ref(false)
+
+  async function setAutoApproveSoft(value: boolean): Promise<void> {
+    autoApproveSoft.value = value
+    await window.shangbo.settings.set('agent.autoApproveSoft', value)
+  }
+
+  function toggleAutoApproveSoft(): void {
+    void setAutoApproveSoft(!autoApproveSoft.value)
+  }
   const collapsedProjects = ref<Record<string, boolean>>({})
 
   // 思考强度 (Effort)
@@ -143,8 +177,8 @@ export const useChatStore = defineStore('chat', () => {
     await window.shangbo.settings.set('agent.effort', level)
   }
 
-  // TRAE 工作流：双模式 (问答 Chat vs 建造者 Builder)
-  const agentMode = ref<AgentMode>('builder')
+  // TRAE 工作流：智能模式（自动判定）/ 问答 / 建造者 / 许愿
+  const agentMode = ref<AgentMode>('auto')
 
   async function setAgentMode(mode: AgentMode): Promise<void> {
     agentMode.value = mode
@@ -160,7 +194,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function cycleAgentMode(): void {
-    const order: AgentMode[] = ['builder', 'wish', 'chat']
+    const order: AgentMode[] = ['auto', 'builder', 'wish', 'chat']
     const next = order[(order.indexOf(agentMode.value) + 1) % order.length]
     void setAgentMode(next)
   }
@@ -526,7 +560,9 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       case 'approval_required': {
-        if (bypassPermissions.value) {
+        const severity = event.severity ?? 'normal'
+        // 自动同意开关只放行普通审批；critical 硬红线始终展示给你。
+        if (shouldAutoApproveApproval({ severity }, autoApproveSoft.value)) {
           void window.shangbo.chat.approve({
             runId: event.runId,
             toolUseId: event.toolUseId,
@@ -540,7 +576,9 @@ export const useChatStore = defineStore('chat', () => {
           toolUseId: event.toolUseId,
           name: event.name,
           input: event.input,
-          reason: event.reason
+          reason: event.reason,
+          severity,
+          autoApprovable: event.autoApprovable ?? severity !== 'critical'
         }
         break
       }
@@ -976,6 +1014,9 @@ export const useChatStore = defineStore('chat', () => {
       if (effort) effortLevel.value = effort
       const mode = settings['agent.mode'] as AgentMode | undefined
       if (mode) agentMode.value = mode
+      const savedAutonomy = settings['agent.autonomy'] as AutonomyLevel | undefined
+      if (savedAutonomy) autonomy.value = savedAutonomy
+      autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
       const savedHidden = settings['chat.hiddenModels'] as string[] | undefined
       if (Array.isArray(savedHidden)) hiddenModels.value = savedHidden
     } catch {
@@ -1019,7 +1060,12 @@ export const useChatStore = defineStore('chat', () => {
     userName,
     currentBranch,
     worktreeEnabled,
-    bypassPermissions,
+    autonomy,
+    setAutonomy,
+    cycleAutonomy,
+    autoApproveSoft,
+    setAutoApproveSoft,
+    toggleAutoApproveSoft,
     collapsedProjects,
     effortLevel,
     agentMode,

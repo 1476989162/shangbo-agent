@@ -1,45 +1,58 @@
 /* ------------------------------------------------------------------
-   设计令牌
-   观感目标：克制的暖灰底 + 充足留白 + 极少量强调色。
-   两套主题都通过 [data-theme] 切换，不使用 prefers-color-scheme，
-   避免与应用内的显式选择冲突。
+   设计令牌 · 金石墨韵
+   取自「数智太极 · 东方天圆」：宣纸白、曜石黑、古铜金。
+   金色只用于强调与焦点，大面积仍是低饱和的纸/墨层次，
+   避免把专业工具做成节庆皮肤。
    ------------------------------------------------------------------ */
 
 :root {
-  --bg: #faf9f7;
+  --bg: #fbfaf6;
   --bg-elevated: #ffffff;
-  --surface: #f4f2ee;
-  --surface-hover: #ece9e3;
-  --sidebar-bg: #f0eee9;
+  --surface: #f3f0e9;
+  --surface-hover: #eae5db;
+  --sidebar-bg: #f7f4ed;
 
-  --text: #1f1e1d;
-  --text-muted: #6b6a67;
-  --text-subtle: #918e88;
+  --text: #1d1b18;
+  --text-muted: #6a655c;
+  --text-subtle: #969083;
 
-  --border: #e6e3dc;
-  --border-strong: #d5d1c8;
+  --border: #e5dfd3;
+  --border-strong: #d2c9b8;
 
-  --accent: #c96442;
-  --accent-hover: #b4553a;
-  --accent-soft: #f8ede8;
+  /* accent 是“可读的金”：小字号文本/链接用它；填充用 gold-* */
+  --accent: #8a6520;
+  --accent-hover: #6f5119;
+  --accent-soft: #f5eedc;
+  --accent-strong: #6f5119;
   --accent-contrast: #ffffff;
+  --primary: var(--accent);
 
-  --danger: #b93b2c;
-  --danger-soft: #fbeceb;
-  --success: #2f7d5d;
+  --gold-1: #f3e3b8;
+  --gold-2: #c9a227;
+  --gold-3: #8a6520;
+  --gold-gradient: linear-gradient(135deg, var(--gold-1), var(--gold-2) 48%, var(--gold-3));
+  --gold-line: color-mix(in srgb, var(--gold-2) 55%, transparent);
+  --gold-glow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 16%, transparent);
+
+  --ink-soft: #2a2620;
+  --danger: #b23a2e;
+  --danger-soft: #fbedeb;
+  --success: #2e7a5c;
   --success-soft: #eaf3ee;
 
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
+  --radius-sm: 7px;
+  --radius: 11px;
+  --radius-lg: 16px;
   --radius-full: 999px;
 
-  --shadow-sm: 0 1px 2px rgba(31, 30, 29, 0.06);
-  --shadow-md: 0 8px 24px rgba(31, 30, 29, 0.1);
-  --shadow-lg: 0 20px 48px rgba(31, 30, 29, 0.16);
+  --shadow-sm: 0 1px 2px rgba(45, 36, 22, 0.06);
+  --shadow-md: 0 10px 28px rgba(45, 36, 22, 0.1);
+  --shadow-lg: 0 24px 56px rgba(45, 36, 22, 0.16);
 
   --font-sans: 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', Roboto,
     'Helvetica Neue', sans-serif;
+  --font-serif: 'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', Georgia,
+    serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, Consolas, 'Courier New', monospace;
 
   --text-xs: 12px;
@@ -49,37 +62,47 @@
   --text-xl: 20px;
 
   --titlebar-height: 40px;
-  --sidebar-width: 264px;
-  --content-max: 760px;
+  --sidebar-width: 272px;
+  --content-max: 780px;
 }
 
 :root[data-theme='dark'] {
-  --bg: #1f1f1d;
-  --bg-elevated: #262624;
-  --surface: #2c2c2a;
-  --surface-hover: #353532;
-  --sidebar-bg: #1a1a18;
+  --bg: #131110;
+  --bg-elevated: #1b1815;
+  --surface: #241f19;
+  --surface-hover: #2e2820;
+  --sidebar-bg: #100e0c;
 
-  --text: #ecebe7;
-  --text-muted: #a5a29b;
-  --text-subtle: #7d7b75;
+  --text: #f1ebdf;
+  --text-muted: #aba294;
+  --text-subtle: #7e7568;
 
-  --border: #35342f;
-  --border-strong: #46443e;
+  --border: #332c23;
+  --border-strong: #4a4032;
 
-  --accent: #d97757;
-  --accent-hover: #e08869;
-  --accent-soft: #3a2b24;
-  --accent-contrast: #1f1f1d;
+  --accent: #d8b36a;
+  --accent-hover: #e7c987;
+  --accent-soft: #2c2417;
+  --accent-strong: #e7c987;
+  --accent-contrast: #1a1408;
+  --primary: var(--accent);
 
-  --danger: #e06b5d;
-  --danger-soft: #3a2521;
+  --gold-1: #f7e6bb;
+  --gold-2: #d8b36a;
+  --gold-3: #9a7530;
+  --gold-gradient: linear-gradient(135deg, var(--gold-1), var(--gold-2) 48%, var(--gold-3));
+  --gold-line: color-mix(in srgb, var(--gold-2) 45%, transparent);
+  --gold-glow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 18%, transparent);
+
+  --ink-soft: #f1ebdf;
+  --danger: #e07a6a;
+  --danger-soft: #35211d;
   --success: #5aab86;
   --success-soft: #23302a;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.34);
+  --shadow-md: 0 10px 30px rgba(0, 0, 0, 0.44);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.6);
 }
 
 /* ------------------------------------------------------------------ */
@@ -107,6 +130,14 @@ body {
   overflow: hidden;
 }
 
+/* 宣纸的极轻纹理：只在浅色主题出现，深色保持纯曜石 */
+:root[data-theme='light'] body {
+  background-image:
+    radial-gradient(1200px 600px at 12% -10%, rgba(201, 162, 39, 0.055), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(138, 101, 32, 0.035), transparent 55%);
+  background-attachment: fixed;
+}
+
 button {
   font-family: inherit;
   font-size: inherit;
@@ -125,7 +156,13 @@ select {
 }
 
 ::selection {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--gold-2) 26%, transparent);
+  color: var(--text);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--gold-2) 72%, transparent);
+  outline-offset: 2px;
 }
 
 /* 细窄滚动条，避免抢视觉焦点 */
@@ -135,7 +172,7 @@ select {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
+  background: color-mix(in srgb, var(--border-strong) 72%, var(--gold-2));
   border: 3px solid transparent;
   background-clip: content-box;
   border-radius: var(--radius-full);
@@ -166,12 +203,14 @@ select {
   background: var(--bg-elevated);
   color: var(--text);
   font-size: var(--text-sm);
-  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease,
+    opacity 0.12s ease;
   white-space: nowrap;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--surface-hover);
+  border-color: var(--border-strong);
 }
 
 .btn:disabled {
@@ -180,14 +219,18 @@ select {
 }
 
 .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--gold-gradient);
+  border-color: color-mix(in srgb, var(--gold-3) 70%, transparent);
   color: var(--accent-contrast);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: var(--gold-gradient);
+  border-color: var(--gold-3);
+  filter: brightness(1.04);
+  box-shadow: 0 4px 14px rgba(138, 101, 32, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .btn-ghost {
@@ -216,8 +259,8 @@ select {
 
 .input:focus,
 .textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: color-mix(in srgb, var(--gold-2) 72%, var(--border));
+  box-shadow: var(--gold-glow);
 }
 
 .field {
@@ -306,7 +349,7 @@ select {
 }
 
 .markdown a {
-  color: var(--accent);
+  color: var(--accent-strong);
   text-decoration: none;
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -389,4 +432,57 @@ select {
   color: var(--text-subtle);
   text-transform: lowercase;
   pointer-events: none;
+}
+/* ------------------------------------------------------------------
+   品牌基础件：东方天圆的圆环、金线、衬线标题
+   ------------------------------------------------------------------ */
+
+.brand-serif {
+  font-family: var(--font-serif);
+  letter-spacing: 0.02em;
+}
+
+.gold-text {
+  background: var(--gold-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gold-hairline {
+  height: 1px;
+  border: none;
+  background: linear-gradient(90deg, transparent, var(--gold-line), transparent);
+}
+
+/* 太极圆环：用两段锥形渐变模拟双鱼，不依赖图片，随主题变色 */
+.taiji-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  background:
+    conic-gradient(
+      from 210deg,
+      color-mix(in srgb, var(--gold-2) 78%, transparent) 0deg 168deg,
+      transparent 168deg 180deg,
+      color-mix(in srgb, var(--gold-2) 26%, transparent) 180deg 348deg,
+      transparent 348deg 360deg
+    );
+  padding: 1px;
+}
+
+.taiji-ring::before {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--gold-2) 22%, transparent);
+  pointer-events: none;
+}
+
+.taiji-ring > * {
+  border-radius: inherit;
+  background: var(--bg-elevated);
 }

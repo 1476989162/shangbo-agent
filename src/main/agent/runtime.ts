@@ -20,8 +20,10 @@ import { mcpManager, parseMcpToolName } from '../mcp/manager'
 import { deleteImageFile } from '../storage/images'
 import type {
   AgentEvent,
+  AgentMode,
   AgentSendRequest,
   ApprovalDecision,
+  AutonomyLevel,
   ContentBlock,
   ContextStatics,
   Conversation,
@@ -34,6 +36,8 @@ import {
 } from './commandGuard'
 import { ApprovalBroker, type PendingApprovalSnapshot } from './approvals'
 import { isWishAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
+import { classifyIntent } from './intent'
+import { classifyToolCall, isAutoAllowed } from './safety'
 import { runAgentLoop } from './agentLoop'
 import type { ToolOutcome } from './toolOutcome'
 import {
@@ -86,6 +90,12 @@ export class AgentRuntime {
   private queues = new Map<string, QueuedRun[]>()
   /** 会话 id → 中途指导（steer）：排队消息转指导后暂存，主循环每轮开跑前取走拼进系统提示。 */
   private steeringNotes = new Map<string, string[]>()
+  /**
+   * runId → 本轮实际生效的模式。
+   * auto 模式的判定发生在回合开始，工具审批必须复用同一个结果，
+   * 否则会出现「提示词按许愿跑、审批却按建造者拦」的分裂。
+   */
+  private runModes = new Map<string, AgentMode>()
 
   /**
    * 事件总线订阅（阶段1/阶段3共用）。
@@ -137,8 +147,12 @@ export class AgentRuntime {
   private finishRun(runId: string, conversationId: string, emit: Emitter): void {
     const active = this.runs.get(runId)
     if (active?.watchdog) clearTimeout(active.watchdog)
-    if (!this.runs.has(runId)) return
+    if (!this.runs.has(runId)) {
+      this.runModes.delete(runId)
+      return
+    }
     this.runs.delete(runId)
+    this.runModes.delete(runId)
     clearTodoItems(runId)
     // 推进队列前先记下还剩几项，这样 run_end 里的 queued 是「不含本轮」的准确值
     const queued = this.queueLength(conversationId)
@@ -680,6 +694,23 @@ export class AgentRuntime {
     emit: Emitter,
     controller: AbortController
   ): Promise<void> {
+    // 模式判定只做一次：主循环与工具审批共用，避免两边各判一套。
+    const triggerText = userMessage.blocks
+      .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('')
+    const intent = classifyIntent(triggerText)
+    const effectiveMode = resolveAgentMode(
+      conversation.mode,
+      {
+        wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
+        autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
+        defaultMode: getSetting<string>('agent.mode', 'auto')
+      },
+      intent
+    )
+    this.runModes.set(runId, effectiveMode)
+
     await runAgentLoop(
       {
         git: (args, cwd) => this.git(args, cwd),
@@ -732,7 +763,8 @@ export class AgentRuntime {
       userMessage,
       target,
       emit,
-      controller
+      controller,
+      { effectiveMode }
     )
   }
 
@@ -786,7 +818,7 @@ export class AgentRuntime {
     }
     // MCP 远端工具：mcp__服务__工具，走服务进程转发。
     if (call.name.startsWith('mcp__')) {
-      if (this.isWishMode(conversationId)) {
+      if (this.isWishMode(runId, conversationId)) {
         return {
           content: '许愿模式只使用本地工作区工具，不调用外部 MCP 服务。',
           isError: true
@@ -810,15 +842,24 @@ export class AgentRuntime {
     if (
       getSetting<boolean>('agent.readOnly', false) &&
       tool.requiresApproval &&
-      !this.isWishMode(conversationId)
+      !this.isWishMode(runId, conversationId)
     ) {
       return { content: '当前是只读复查模式，不执行写入与命令操作。如需修改请先关闭只读模式。', isError: true }
     }
 
-    // Freebuff 安全护栏审计，按严重程度分级：
-    // - CRITICAL（擦盘/格式化）直接拒绝、不弹窗——工具层自保同样硬拦，
-    //   用户批准了也执行不了，先问再拒只会自相矛盾；
-    // - HIGH（删库/注册表等）弹窗征求确认，批准后放行（工具层不拦）。
+    // 安全分级：先判硬红线，再决定是否走审批。
+    // 自治等级只影响「软风险」是否自动放行；hard / blocked 永远不受影响。
+    const autonomy = getSetting<AutonomyLevel>('agent.autonomy', 'balanced')
+    const verdict = classifyToolCall(call.name, call.input, { workingDirectory, autonomy })
+    if (verdict.tier === 'blocked') {
+      return {
+        content: `已拒绝未执行：${verdict.reason ?? '命中安全红线，任何模式下都不会执行。'}`,
+        isError: true
+      }
+    }
+
+    // Freebuff 安全护栏审计：补充 safety 未覆盖的系统凭据读取等场景。
+    // CRITICAL 直接拒绝；HIGH 按 critical 审批处理（不允许“始终允许”绕过）。
     let securityConfirmReason = ''
     if (call.name === 'run_command' && typeof (call.input as Record<string, unknown>)?.command === 'string') {
       const audit = auditCommandSecurity(String((call.input as Record<string, unknown>).command))
@@ -833,22 +874,30 @@ export class AgentRuntime {
       }
     }
 
-    const needsApproval =
-      (tool.requiresApproval && !this.isAutoApproved(call.name)) || Boolean(securityConfirmReason)
-    const wishAutoApproved = this.isWishAutoApproved(
-      call.name,
-      call.input,
-      conversationId,
-      workingDirectory
-    )
-    if (needsApproval && !wishAutoApproved) {
-      // 无人值守时许愿模式不弹窗：高危系统操作与未知外部能力直接拒绝，
-      // 避免任务在审批超时里空转 5 分钟，也避免把审批误当成“默认同意”。
-      if (this.isWishMode(conversationId)) {
+    const critical = verdict.tier === 'hard' || Boolean(securityConfirmReason)
+    let needsApproval: boolean
+    if (critical) {
+      // 硬红线：无论永久放行名单、许愿模式、自治等级如何设置，都必须人工逐次确认。
+      needsApproval = true
+    } else if (isAutoAllowed(verdict, autonomy)) {
+      needsApproval = false
+    } else if (this.isAutoApproved(call.name)) {
+      needsApproval = false
+    } else {
+      needsApproval = tool.requiresApproval
+    }
+
+    const wishAutoApproved =
+      !critical &&
+      this.isWishAutoApproved(runId, call.name, call.input, conversationId, workingDirectory)
+    if (needsApproval && wishAutoApproved) needsApproval = false
+
+    if (needsApproval) {
+      // 无人值守时许愿模式不为软风险弹窗：直接拒绝，避免空转 5 分钟。
+      // 但硬红线例外——宁可停下来等人，也不能默认放行删库/删 .git。
+      if (this.isWishMode(runId, conversationId) && !critical) {
         return {
-          content: securityConfirmReason
-            ? `许愿模式拒绝未执行：${securityConfirmReason}`
-            : `许愿模式不允许调用未授权的工具 ${call.name}。请改用工作区内的本地读写、补丁或命令工具。`,
+          content: `许愿模式不允许调用未授权的工具 ${call.name}。请改用工作区内的本地读写、补丁或命令工具。`,
           isError: true
         }
       }
@@ -859,7 +908,9 @@ export class AgentRuntime {
         call,
         {
           name: tool.name,
-          approvalReason: securityConfirmReason || tool.approvalReason
+          approvalReason: securityConfirmReason || verdict.reason || tool.approvalReason,
+          severity: critical ? 'critical' : 'normal',
+          autoApprovable: verdict.autoApprovable
         },
         emit,
         controller
@@ -1036,7 +1087,12 @@ export class AgentRuntime {
     conversationId: string,
     messageId: string,
     call: { id: string; name: string; input: unknown },
-    tool: { name: string; approvalReason?: string },
+    tool: {
+      name: string
+      approvalReason?: string
+      severity?: 'normal' | 'critical'
+      autoApprovable?: boolean
+    },
     emit: Emitter,
     controller: AbortController
   ): Promise<ApprovalDecision> {
@@ -1047,12 +1103,15 @@ export class AgentRuntime {
     return this.approvalBroker.isAutoApproved(toolName)
   }
 
-  private isWishMode(conversationId: string): boolean {
+  private isWishMode(runId: string, conversationId: string): boolean {
+    // 优先用本轮已判定的模式：auto 模式在开跑时已确定，审批必须复用。
+    const effective = this.runModes.get(runId)
+    if (effective) return effective === 'wish' && getSetting<boolean>('agent.wish.enabled', true)
     const conversation = repo.getConversation(conversationId)
     return isWishModeActive(conversation?.mode ?? null, {
       wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
       autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
-      defaultMode: getSetting<string>('agent.mode', 'builder')
+      defaultMode: getSetting<string>('agent.mode', 'auto')
     })
   }
 
@@ -1061,8 +1120,10 @@ export class AgentRuntime {
    *
    * 这不是无限制放行：只对读写类工具与工作区内的命令生效；密钥库、数据库、
    * 工作区外绝对路径、目录穿越与环境变量逃逸仍会落回审批或直接被工具层拒绝。
+   * 硬红线（删 .git / 删库 / 擦盘）在调用本函数之前已被拦截，永远不会走到这里。
    */
   private isWishAutoApproved(
+    runId: string,
     toolName: string,
     input: unknown,
     conversationId: string,
@@ -1071,7 +1132,7 @@ export class AgentRuntime {
     return isWishAutoApproved(
       toolName,
       input,
-      this.isWishMode(conversationId),
+      this.isWishMode(runId, conversationId),
       getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
       workingDirectory
     )

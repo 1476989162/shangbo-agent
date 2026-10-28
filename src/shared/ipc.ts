@@ -34,6 +34,7 @@ export const IPC = {
   appInfo: 'app:info',
   appContextStatics: 'app:contextStatics',
   appGitBranch: 'git:branch',
+  appWindowTheme: 'app:windowTheme',
   windowHide: 'window:hide',
   windowQuit: 'window:quit',
 

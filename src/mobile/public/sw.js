@@ -1,5 +1,5 @@
 // 离线壳：缓存应用外壳，业务数据不缓存（永远走网络，保证审批实时性）。
-const CACHE = 'shangbo-remote-v2'
+const CACHE = 'shangbo-remote-v3'
 // 版本化 JS 不在安装时预缓存；改为首次请求时缓存，升级后不会继续命中旧配对逻辑。
 const SHELL = ['./', './index.html', './manifest.webmanifest']
 

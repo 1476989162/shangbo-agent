@@ -12,5 +12,6 @@ release-*/
 python/__pycache__/
 python/.venv/
 .workbuddy/
+.workbuddy-ai/
 outputs/
 .vitest/

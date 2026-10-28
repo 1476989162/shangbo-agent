@@ -50,20 +50,32 @@ function openTab(tab: string): void {
 
 <template>
   <aside class="sidebar">
-    <!-- 顶部导航控制条：折叠侧边栏、前进后退、模式切换 -->
+    <!-- 品牌区：数智太极 · 东方天圆 -->
+    <div class="brand-bar">
+      <div class="brand-lockup">
+        <span class="taiji-ring brand-mark">
+          <img :src="logoImg" alt="尚搏" />
+        </span>
+        <div class="brand-copy">
+          <div class="brand-title brand-serif">尚搏 Agent</div>
+          <div class="brand-sub">数智太极 · 东方天圆</div>
+        </div>
+      </div>
+      <button
+        class="nav-btn icon-only brand-collapse"
+        title="折叠侧边栏"
+        @click="store.sidebarCollapsed = !store.sidebarCollapsed"
+      >
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.3" />
+          <line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- 顶部导航控制条：前进后退、模式切换 -->
     <header class="sidebar-top">
       <div class="nav-controls">
-        <button
-          class="nav-btn icon-only"
-          title="折叠侧边栏"
-          @click="store.sidebarCollapsed = !store.sidebarCollapsed"
-        >
-          <!-- 侧边栏折叠图标 [|] -->
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-            <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.3" />
-            <line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" stroke-width="1.3" />
-          </svg>
-        </button>
         <button
           class="nav-btn icon-only"
           :disabled="!store.canGoBack"
@@ -397,15 +409,71 @@ function openTab(tab: string): void {
   position: relative;
 }
 
+/* 品牌区 */
+.brand-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 14px 8px;
+  flex: none;
+  -webkit-app-region: drag;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold-2) 34%, transparent);
+}
+
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.brand-sub {
+  margin-top: 1px;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+.brand-collapse {
+  -webkit-app-region: no-drag;
+  flex: none;
+}
+
 /* 顶部栏 */
 .sidebar-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  padding: 2px 12px 8px;
   gap: 8px;
   flex: none;
-  -webkit-app-region: drag;
 }
 
 .nav-controls {
@@ -466,8 +534,8 @@ function openTab(tab: string): void {
 
 .mode-btn.active {
   background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  color: var(--accent-strong);
+  box-shadow: 0 1px 3px rgba(45, 36, 22, 0.1), inset 0 0 0 1px color-mix(in srgb, var(--gold-2) 22%, transparent);
 }
 
 /* 快捷操作项 */
@@ -681,10 +749,11 @@ function openTab(tab: string): void {
 }
 
 .tree-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 6px 8px 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 12.5px;
@@ -700,6 +769,17 @@ function openTab(tab: string): void {
   background: var(--surface);
   box-shadow: inset 0 0 0 1px var(--border);
   font-weight: 500;
+}
+
+.tree-item.active::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: var(--gold-gradient);
 }
 
 .bullet {

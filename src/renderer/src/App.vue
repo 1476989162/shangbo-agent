@@ -23,6 +23,7 @@ const media = window.matchMedia('(prefers-color-scheme: dark)')
 function applyTheme(): void {
   const resolved = theme.value === 'system' ? (media.matches ? 'dark' : 'light') : theme.value
   applyThemeValue(resolved)
+  void window.shangbo.app.setWindowTheme(resolved)
 }
 
 function onSystemThemeChange(): void {

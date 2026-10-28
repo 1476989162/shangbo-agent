@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path'
-import type { Conversation } from '../../shared/types'
+import type { AgentMode, Conversation } from '../../shared/types'
+import type { IntentResult } from './intent'
 import {
   commandStaysInsideWorkspace,
   isPathAutoApprovable,
@@ -14,20 +15,37 @@ export interface WishModeSettings {
   defaultMode: string
 }
 
-/** 许愿模式是否生效：总开关关闭时，已标记为 wish 的会话也按建造者处理。 */
+/**
+ * 会话实际生效的模式。
+ *
+ * `auto` 是智能模式：按本轮自然语言判定 chat / builder / wish。
+ * 判定结果由 runtime 传入，保证「主循环看到的模式」与「工具放行用的模式」
+ * 是同一个，不会出现提示词说许愿、审批却按建造者走的分裂。
+ */
 export function resolveAgentMode(
   conversationMode: Conversation['mode'],
-  settings: WishModeSettings
-): string {
-  if (conversationMode === 'wish' && !settings.wishEnabled) return 'builder'
-  return conversationMode ?? settings.defaultMode
+  settings: WishModeSettings,
+  intent?: IntentResult | null
+): AgentMode {
+  const declared = conversationMode ?? settings.defaultMode
+  let resolved: AgentMode
+  if (declared === 'auto') {
+    resolved = intent?.mode ?? 'builder'
+  } else if (declared === 'chat' || declared === 'builder' || declared === 'wish') {
+    resolved = declared
+  } else {
+    resolved = 'builder'
+  }
+  if (resolved === 'wish' && !settings.wishEnabled) return 'builder'
+  return resolved
 }
 
 export function isWishModeActive(
   conversationMode: Conversation['mode'],
-  settings: WishModeSettings
+  settings: WishModeSettings,
+  intent?: IntentResult | null
 ): boolean {
-  return settings.wishEnabled && resolveAgentMode(conversationMode, settings) === 'wish'
+  return settings.wishEnabled && resolveAgentMode(conversationMode, settings, intent) === 'wish'
 }
 
 /**

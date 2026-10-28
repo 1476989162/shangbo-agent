@@ -15,7 +15,11 @@ const emit = defineEmits<{
 }>()
 
 const isSecurityCriticalApproval = computed(() => {
-  return isCriticalApproval(props.approval.reason || '')
+  return props.approval.severity === 'critical' || isCriticalApproval(props.approval.reason || '')
+})
+
+const canAlwaysAllow = computed(() => {
+  return !isSecurityCriticalApproval.value && props.approval.autoApprovable
 })
 
 function prettyJson(value: unknown): string {
@@ -27,7 +31,7 @@ function prettyJson(value: unknown): string {
   <div class="approval" :class="{ 'critical-security-card': isSecurityCriticalApproval }">
     <div class="approval-head">
       <span class="approval-badge" :class="{ 'critical-badge': isSecurityCriticalApproval }">
-        {{ isSecurityCriticalApproval ? '🛡️ Freebuff 安全护栏高危拦截' : '需要操作确认' }}
+        {{ isSecurityCriticalApproval ? '安全红线 · 必须人工确认' : '需要操作确认' }}
       </span>
       <span class="mono approval-tool">{{ approval.name }}</span>
     </div>
@@ -44,7 +48,7 @@ function prettyJson(value: unknown): string {
         {{ isSecurityCriticalApproval ? '我已知晓风险，仍执行一次' : '允许这一次' }}
       </button>
       <button
-        v-if="!isSecurityCriticalApproval"
+        v-if="canAlwaysAllow"
         class="btn"
         @click="emit('decide', true, true)"
       >

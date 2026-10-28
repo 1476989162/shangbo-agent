@@ -423,13 +423,32 @@ const hiddenModelsCount = computed(() => {
 })
 
 const modeTitle = computed(() => {
+  if (store.agentMode === 'auto') {
+    return '【智能模式】按你的自然语言自动判断该问答、动手还是自动交付；不确定处按默认值继续。点击切换模式'
+  }
   if (store.agentMode === 'wish') {
     return '【许愿模式】只描述目标与验收，Agent 在工作区内自动改、跑、修、验。点击切换到问答模式'
   }
   if (store.agentMode === 'builder') {
-    return '【建造者模式】常规工程构建，敏感操作逐次确认。点击切换到许愿模式'
+    return '【建造者模式】常规工程构建，工作区内按自治等级放行。点击切换到许愿模式'
   }
-  return '【问答模式】只讨论方案，不主动落盘。点击切换到建造者模式'
+  return '【问答模式】只讨论方案，不主动落盘。点击切换到智能模式'
+})
+
+const autonomyLabel = computed(() => {
+  if (store.autonomy === 'strict') return '严格确认'
+  if (store.autonomy === 'trusted') return '完全信任'
+  return '智能自治'
+})
+
+const autonomyTitle = computed(() => {
+  if (store.autonomy === 'strict') {
+    return '严格确认：所有写入与命令都弹窗。硬红线（删 .git / 删库 / 格式化磁盘）始终人工确认。点击切换'
+  }
+  if (store.autonomy === 'trusted') {
+    return '完全信任：常规软风险操作自动放行；硬红线仍然必须人工确认。点击切换'
+  }
+  return '智能自治：工作区内读写与安全命令自动放行，工作区外与外部进程仍需确认；硬红线始终人工确认。点击切换'
 })
 
 const effortOptions = [
@@ -514,15 +533,31 @@ defineExpose({ editMessage, setDraft })
                 隔离分支
               </label>
 
-              <!-- 工作模式：问答 / 建造者 / 许愿 -->
+              <!-- 工作模式：智能 / 建造者 / 许愿 / 问答 -->
               <button
                 class="context-tag mode-tag"
                 :class="`mode-${store.agentMode}`"
                 :title="modeTitle"
                 @click="store.cycleAgentMode()"
               >
-                <span class="mode-icon">{{ store.agentMode === 'builder' ? '🏗️' : store.agentMode === 'wish' ? '✨' : '💬' }}</span>
-                <span class="mode-name">{{ store.agentMode === 'builder' ? '建造者模式' : store.agentMode === 'wish' ? '许愿模式' : '问答模式' }}</span>
+                <span class="mode-icon">{{
+                  store.agentMode === 'auto'
+                    ? '◉'
+                    : store.agentMode === 'builder'
+                      ? '◆'
+                      : store.agentMode === 'wish'
+                        ? '✦'
+                        : '○'
+                }}</span>
+                <span class="mode-name">{{
+                  store.agentMode === 'auto'
+                    ? '智能模式'
+                    : store.agentMode === 'builder'
+                      ? '建造者'
+                      : store.agentMode === 'wish'
+                        ? '许愿模式'
+                        : '问答模式'
+                }}</span>
               </button>
             </div>
 
@@ -571,7 +606,13 @@ defineExpose({ editMessage, setDraft })
               v-model="draft"
               class="composer-textarea"
               rows="1"
-              :placeholder="store.agentMode === 'wish' ? '许下愿望：说清目标、验收标准与项目目录；Agent 会自己改、跑、修、验…' : '输入任务或提出问题，按 / 可使用常用命令… 也可直接 Ctrl+V 粘贴截图'"
+              :placeholder="
+                store.agentMode === 'wish'
+                  ? '许下愿望：说清目标与验收标准，Agent 会自己改、跑、修、验…'
+                  : store.agentMode === 'auto'
+                    ? '直接说你要什么，我会自己判断该聊、该查还是该动手…（Ctrl+V 可粘贴截图）'
+                    : '输入任务或提出问题，按 / 可使用常用命令… 也可直接 Ctrl+V 粘贴截图'
+              "
               @input="autoGrow"
               @keydown="onKeydown"
               @paste="onPaste"
@@ -581,18 +622,39 @@ defineExpose({ editMessage, setDraft })
 
             <!-- 输入卡片底栏：左侧权限模式 + 右侧模型药丸、思考强度与发送 -->
             <div class="composer-toolbar">
-              <!-- 左侧：权限模式开关 -->
+              <!-- 左侧：安全自治等级 -->
               <div class="perm-control">
                 <button
                   class="perm-btn"
-                  :class="{ active: store.bypassPermissions }"
-                  @click="store.agentMode === 'wish' ? store.cycleAgentMode() : (store.bypassPermissions = !store.bypassPermissions)"
-                  :title="store.agentMode === 'wish' ? '许愿模式自动放行工作区内操作；不可逆系统操作仍会被拒绝。点击切换模式' : store.bypassPermissions ? '已开启直接放行模式（不弹出安全确认）' : '已开启手动审批模式（敏感操作前提示确认）'"
+                  :class="`autonomy-${store.autonomy}`"
+                  :title="autonomyTitle"
+                  @click="store.cycleAutonomy()"
                 >
-                  <span class="perm-label">
-                    {{ store.agentMode === 'wish' ? '许愿自动执行' : store.bypassPermissions ? '直接放行模式' : '安全确认模式' }}
-                  </span>
-                  <span class="perm-plus">+</span>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 1.8l5 2v4.1c0 3-2 5.3-5 6.3-3-1-5-3.3-5-6.3V3.8l5-2z"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                      stroke-linejoin="round"
+                    />
+                    <path d="M5.8 8l1.5 1.5L10.4 6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <span class="perm-label">{{ autonomyLabel }}</span>
+                </button>
+
+                <!-- 自动同意常规审批：硬红线不受影响 -->
+                <button
+                  class="perm-btn auto-approve-btn"
+                  :class="{ active: store.autoApproveSoft }"
+                  :title="
+                    store.autoApproveSoft
+                      ? '已开启自动同意常规审批（删 .git、删库、格式化磁盘等硬红线仍会弹窗）。点击关闭'
+                      : '自动同意常规审批：普通审批不再打断你；硬红线仍必须你本人确认。点击开启'
+                  "
+                  @click="store.toggleAutoApproveSoft()"
+                >
+                  <span class="auto-approve-dot" />
+                  <span class="perm-label">自动同意</span>
                 </button>
               </div>
 
@@ -1107,15 +1169,15 @@ defineExpose({ editMessage, setDraft })
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
-  padding: 12px 14px 10px;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 6px 22px rgba(45, 36, 22, 0.07);
+  padding: 13px 15px 11px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .composer-card:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 4px 20px rgba(217, 119, 87, 0.15);
+  border-color: color-mix(in srgb, var(--gold-2) 68%, var(--border));
+  box-shadow: var(--gold-glow), 0 8px 26px rgba(45, 36, 22, 0.08);
 }
 
 /* 生成中的排队提示 */
@@ -1280,11 +1342,12 @@ defineExpose({ editMessage, setDraft })
 .perm-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
   color: var(--text-muted);
-  padding: 3px 6px;
-  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
   transition: all 0.12s ease;
 }
 
@@ -1293,9 +1356,38 @@ defineExpose({ editMessage, setDraft })
   color: var(--text);
 }
 
-.perm-btn.active {
+.perm-btn.autonomy-balanced {
   color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   font-weight: 500;
+}
+
+.perm-btn.autonomy-trusted {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  font-weight: 500;
+}
+
+.auto-approve-btn.active {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  font-weight: 500;
+}
+
+.auto-approve-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.auto-approve-btn.active .auto-approve-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .perm-plus {
@@ -1360,9 +1452,9 @@ defineExpose({ editMessage, setDraft })
 
 .context-badge:hover,
 .context-badge.active {
-  background: var(--primary, #d97757);
+  background: var(--primary);
   color: #ffffff;
-  border-color: var(--primary, #d97757);
+  border-color: var(--primary);
 }
 
 .context-badge.active .context-mini-bar {
@@ -1616,7 +1708,7 @@ defineExpose({ editMessage, setDraft })
 
 .model-search-box:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
 .model-search-box .search-icon {
@@ -1656,7 +1748,7 @@ defineExpose({ editMessage, setDraft })
   padding: 3px 12px;
   font-size: 10.5px;
   color: var(--accent);
-  background: rgba(217, 119, 87, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   margin-bottom: 4px;
 }
 
@@ -1702,7 +1794,7 @@ defineExpose({ editMessage, setDraft })
 .model-option.selected {
   font-weight: 600;
   color: var(--accent);
-  background: rgba(217, 119, 87, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .model-option.is-hidden-opt {
@@ -1805,12 +1897,14 @@ defineExpose({ editMessage, setDraft })
 }
 
 .send-btn {
-  background: var(--accent);
-  color: #fff;
+  background: var(--gold-gradient);
+  color: var(--accent-contrast);
+  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .send-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  filter: brightness(1.05);
+  box-shadow: 0 4px 14px rgba(138, 101, 32, 0.28);
 }
 
 .send-btn:disabled {
@@ -1837,32 +1931,40 @@ defineExpose({ editMessage, setDraft })
   transition: all 0.15s ease;
 }
 
+.mode-tag.mode-auto {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--accent-strong, var(--accent));
+  font-weight: 600;
+}
+
 .mode-tag.mode-builder {
-  background: rgba(37, 99, 235, 0.08);
-  border-color: #2563eb;
-  color: #2563eb;
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
   font-weight: 600;
 }
 
 .mode-tag.mode-chat {
-  background: rgba(16, 185, 129, 0.08);
-  border-color: #10b981;
-  color: #10b981;
-  font-weight: 600;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .mode-tag.mode-wish {
-  background: linear-gradient(135deg, rgba(217, 119, 87, 0.14), rgba(245, 158, 11, 0.12));
-  border-color: #d97757;
-  color: #b45309;
+  background: linear-gradient(135deg, var(--accent-soft), color-mix(in srgb, var(--accent) 18%, transparent));
+  border-color: var(--accent);
+  color: var(--accent-strong, var(--accent));
   font-weight: 700;
-  box-shadow: 0 0 0 1px rgba(217, 119, 87, 0.12);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .mascot-brand-img {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   object-fit: contain;
-  border-radius: 4px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold-2) 30%, transparent);
 }
 /* ========================================================
    上下文窗口浮层 (对标图 2 样式)
@@ -1930,9 +2032,9 @@ defineExpose({ editMessage, setDraft })
 }
 
 .cw-cap-pill.active {
-  background: #2563eb;
-  color: #ffffff;
-  border-color: #2563eb;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
   font-weight: 600;
 }
 
@@ -1985,19 +2087,19 @@ defineExpose({ editMessage, setDraft })
 
 /* 颜色对应图 2 (media_1790326705999.png) */
 .seg-mcp {
-  background-color: #2563eb;
+  background-color: #8a6520;
 }
 .seg-system-tools {
-  background-color: #ea580c;
+  background-color: #b58133;
 }
 .seg-skills {
-  background-color: #10b981;
+  background-color: #2e7a5c;
 }
 .seg-prompt {
-  background-color: #f59e0b;
+  background-color: #c9a227;
 }
 .seg-memory {
-  background-color: #ec4899;
+  background-color: #7a5c3e;
 }
 .seg-messages {
   background-color: #15803d;
@@ -2155,7 +2257,7 @@ defineExpose({ editMessage, setDraft })
   background: none;
   border: none;
   font-size: 11.5px;
-  color: var(--primary, #d97757);
+  color: var(--primary);
   cursor: pointer;
   padding: 4px 6px;
   border-radius: var(--radius-sm);

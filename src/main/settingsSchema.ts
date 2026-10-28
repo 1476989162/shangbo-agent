@@ -41,6 +41,10 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 布尔开关
   'agent.computerUse': z.boolean(),
   'agent.readOnly': z.boolean(),
+  // 自治等级：strict 全确认 / balanced 工作区自治 / trusted 软风险自治；硬红线不受影响
+  'agent.autonomy': z.enum(['strict', 'balanced', 'trusted']),
+  // 渲染层自动同意普通审批（硬红线 critical 永不自动同意），默认关闭
+  'agent.autoApproveSoft': z.boolean(),
   // 轮间摘要默认关闭：开启后调用当前模型生成摘要，会产生额外请求
   'agent.context.summarize': z.boolean(),
   'agent.wish.enabled': z.boolean(),

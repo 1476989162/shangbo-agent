@@ -325,7 +325,7 @@ watch(usageDays, () => {
 }
 
 .submodal-input:focus {
-  border-color: var(--primary, #d97757);
+  border-color: var(--primary);
   outline: none;
 }
 
@@ -389,9 +389,9 @@ watch(usageDays, () => {
 
 .highlight-card {
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--primary, #d97757) 10%, transparent), transparent 70%),
+    linear-gradient(135deg, color-mix(in srgb, var(--primary) 10%, transparent), transparent 70%),
     var(--surface);
-  border-color: color-mix(in srgb, var(--primary, #d97757) 34%, var(--border));
+  border-color: color-mix(in srgb, var(--primary) 34%, var(--border));
 }
 
 .metric-title {
@@ -495,7 +495,7 @@ watch(usageDays, () => {
 }
 
 .cowork-box {
-  background: #d97757;
+  background: var(--accent);
 }
 
 .code-box {
@@ -553,7 +553,7 @@ watch(usageDays, () => {
 }
 
 .cowork-segment {
-  background: #d97757;
+  background: var(--accent);
 }
 
 .legacy-segment {

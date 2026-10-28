@@ -67,6 +67,7 @@ const api: ShangboApi = {
     info: () => ipcRenderer.invoke(IPC.appInfo),
     contextStatics: () => ipcRenderer.invoke(IPC.appContextStatics),
     getGitBranch: (dir: string | null) => ipcRenderer.invoke(IPC.appGitBranch, dir),
+    setWindowTheme: (theme: 'light' | 'dark') => ipcRenderer.invoke(IPC.appWindowTheme, theme),
     hideWindow: () => ipcRenderer.invoke(IPC.windowHide),
     quit: () => ipcRenderer.invoke(IPC.windowQuit)
   },

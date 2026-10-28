@@ -20,8 +20,10 @@ import type {
 } from '../../shared/types'
 import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
+import { buildTaskContract, classifyIntent, matchTaskPlaybook } from './intent'
 import { listLessons, markLessonsUsed } from '../autonomous/store'
 import { resolveAgentMode } from './wishMode'
+import type { AgentMode } from '../../shared/types'
 import type { ToolOutcome } from './toolOutcome'
 import {
   appendBlock,
@@ -70,7 +72,9 @@ export async function runAgentLoop(
   userMessage: Message,
   target: { providerId?: string | null; model?: string | null },
   emit: LoopEmitter,
-  controller: AbortController
+  controller: AbortController,
+  /** runtime 已按自然语言判定好的模式；缺省时按会话声明与意图兜底。 */
+  options?: { effectiveMode?: AgentMode }
 ): Promise<void> {
     const resolved = resolveTarget(
       target.providerId,
@@ -145,11 +149,42 @@ export async function runAgentLoop(
     if (plugins.includes('security-guidance')) pluginDirectives.push('注意密钥/SQL注入/命令拼接风险。')
     if (plugins.includes('github')) pluginDirectives.push('GitHub 操作优先用本机 gh。')
 
-    const agentMode = resolveAgentMode(conversation.mode, {
-      wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
-      autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
-      defaultMode: getSetting<string>('agent.mode', 'builder')
-    })
+    const triggerText = textOf(userMessage.blocks)
+    const intent = classifyIntent(triggerText)
+    // resolveAgentMode 保证返回具体模式（auto 已在此展开），这里的收窄只是类型表达。
+    const agentMode = (
+      options?.effectiveMode && options.effectiveMode !== 'auto'
+        ? options.effectiveMode
+        : resolveAgentMode(
+            conversation.mode,
+            {
+              wishEnabled: getSetting<boolean>('agent.wish.enabled', true),
+              autoApproveWorkspace: getSetting<boolean>('agent.wish.autoApproveWorkspace', true),
+              defaultMode: getSetting<string>('agent.mode', 'auto')
+            },
+            intent
+          )
+    ) as Exclude<AgentMode, 'auto'>
+
+    // 用户确认过的长期背景：只在开关打开时注入，且限条数/字数，避免污染上下文。
+    const globalInstructions = getSetting<string>('cowork.globalInstructions', '').trim()
+    if (globalInstructions) {
+      system += `\n\n【全局协作约定】\n${globalInstructions.slice(0, 4000)}`
+    }
+    if (getSetting<boolean>('cowork.useMemory', false)) {
+      const memories = getSetting<{ title?: unknown; desc?: unknown }[]>('cowork.memories', [])
+      const lines = memories
+        .slice(0, 8)
+        .map((item) => {
+          const title = typeof item.title === 'string' ? item.title.trim() : ''
+          const desc = typeof item.desc === 'string' ? item.desc.trim() : ''
+          return title && desc ? `- ${title}：${desc}` : ''
+        })
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 2400)
+      if (lines) system += `\n\n【长期记忆（用户已确认的背景，可作为默认前提）】\n${lines}`
+    }
 
     // 许愿闭环：把当前分支的真实 diff 作为“改动证据”注入，避免模型只凭记忆总结。
     if (
@@ -163,9 +198,9 @@ export async function runAgentLoop(
       }
     }
     if (agentMode === 'builder') {
-      system += '\n\n【建造者】改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。'
+      system += '\n\n【建造者】直接动手：改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。'
     } else if (agentMode === 'chat') {
-      system += '\n\n【问答】给思路和核心片段即可。'
+      system += '\n\n【问答】给结论和核心片段即可，不要为了显得勤快而改文件。'
     } else if (agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)) {
       const acceptance = getSetting<string>('agent.wish.acceptance', '').trim()
       const verifyCommand = getSetting<string>('agent.wish.verifyCommand', '').trim()
@@ -177,11 +212,28 @@ export async function runAgentLoop(
         acceptance ? `默认验收标准：${acceptance}` : '',
         verifyCommand ? `默认验收命令：${verifyCommand}` : '',
         '最终必须输出：改动摘要、实际执行的验证命令与结果、剩余风险、回滚方式。',
-        '硬边界：只改当前工作区；不读取密钥库/会话数据库；不执行擦盘、格式化、删系统目录等不可逆操作。'
+        '硬边界：只改当前工作区；不读取密钥库/会话数据库；删 .git、删库、清表、格式化磁盘一律停下来等人工确认。'
       ]
         .filter(Boolean)
         .join('\n')
-      const lessons = listLessons({ projectPath: conversation.workingDir, limit: 12 })
+    }
+
+    // 任务契约：把自然语言压成目标/验收/提问边界，是“少问多做”的主要抓手。
+    // 寒暄/极短问答不注入，避免每句“你好”都背一段契约。
+    const substantive = triggerText.trim().length >= 8 || intent.wantsAction
+    const contract = substantive
+      ? buildTaskContract(triggerText, agentMode, { workingDirectory: conversation.workingDir })
+      : ''
+    if (contract) system += `\n\n${contract}`
+    const taskPlaybook = substantive ? matchTaskPlaybook(triggerText, agentMode) : ''
+    if (taskPlaybook) system += taskPlaybook
+
+    // 项目经验对所有模式都注入：建造者同样需要知道上次是怎么验证通过的。
+    if (conversation.workingDir) {
+      const lessons = listLessons({
+        projectPath: conversation.workingDir,
+        limit: agentMode === 'wish' ? 12 : 6
+      })
       if (lessons.length > 0) {
         system += `\n\n【已验证的项目经验（优先复用）】\n${lessons
           .map((lesson, index) => `${index + 1}. ${lesson.title}\n${lesson.content}`)
@@ -192,8 +244,7 @@ export async function runAgentLoop(
     if (pluginDirectives.length > 0) system += `\n已启用技能：${pluginDirectives.join(' ')}`
 
     // 方法论注入：本轮是复查任务才给打法，平时不打扰。
-    const triggerMessage = repo.getMessage(userMessage.id)
-    if (triggerMessage && matchReviewIntent(textOf(triggerMessage.blocks))) {
+    if (matchReviewIntent(triggerText)) {
       system += REVIEW_PLAYBOOK
     }
 

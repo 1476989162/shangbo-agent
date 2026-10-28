@@ -1,13 +1,13 @@
 /* 尚搏远程 PWA 样式：深色，拇指可达。 */
 :root {
   color-scheme: dark;
-  --bg: #0f0f12;
-  --panel: #17171c;
-  --border: #2a2a33;
-  --text: #e8e8ec;
-  --sub: #9a9aa5;
-  --primary: #4f7cff;
-  --danger: #e5484d;
+  --bg: #131110;
+  --panel: #1b1815;
+  --border: #332c23;
+  --text: #f1ebdf;
+  --sub: #aba294;
+  --primary: #d8b36a;
+  --danger: #e07a6a;
 }
 * { box-sizing: border-box; }
 body {
@@ -50,7 +50,7 @@ body {
   background: var(--panel);
   color: var(--text);
 }
-.m-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.m-btn.primary { background: linear-gradient(135deg, #f3e3b8, #c9a227 48%, #8a6520); border-color: #8a6520; color: #1a1408; font-weight: 600; }
 .m-btn.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
 .m-btn.small { padding: 4px 10px; font-size: 12px; }
 .m-main { flex: 1; display: flex; flex-direction: column; }
@@ -67,6 +67,7 @@ body {
 .m-conv.active { outline: 1px solid var(--primary); }
 .m-empty { color: var(--sub); padding: 8px 0; font-size: 12px; }
 .m-approval { border: 1px solid var(--danger); border-radius: 8px; padding: 10px; margin: 8px 0; }
+.m-appr-critical { display: inline-block; margin-bottom: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(224, 122, 106, 0.16); color: #f0a08f; font-size: 11px; font-weight: 700; }
 .m-appr-name { font-weight: 700; }
 .m-appr-reason { color: var(--sub); font-size: 12px; margin: 4px 0; }
 .m-appr-input { font-family: monospace; font-size: 11px; color: var(--sub); word-break: break-all; }
@@ -74,7 +75,7 @@ body {
 .m-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .m-msgs { flex: 1; overflow-y: auto; padding: 12px; }
 .m-msg { margin: 8px 0; padding: 10px; border-radius: 10px; background: var(--panel); }
-.m-msg.role-user { background: #1c2a55; }
+.m-msg.role-user { background: #2c2417; border: 1px solid rgba(201, 162, 39, 0.28); }
 .m-text { white-space: pre-wrap; word-break: break-word; }
 .m-tool { color: var(--sub); font-size: 12px; }
 .m-result { font-size: 12px; color: var(--sub); white-space: pre-wrap; }

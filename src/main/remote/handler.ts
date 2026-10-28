@@ -146,6 +146,8 @@ export async function handleRemoteRequest(
           input: a.input,
           reason: a.reason,
           paramHash: a.paramHash,
+          severity: a.severity,
+          autoApprovable: a.autoApprovable,
           createdAt: a.createdAt,
           expiresAt: a.expiresAt,
           remainingMs: Math.max(0, a.expiresAt - now)

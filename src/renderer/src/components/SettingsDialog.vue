@@ -58,20 +58,15 @@ const autoScreenshot = ref(true)
 // ========================================================
 // 协同 Cowork 模式设置状态 (对标图 4)
 // ========================================================
-const coworkFilesPath = ref('G:\\尚搏Agent\\workspace')
-const trustedFolders = ref<string[]>([
-  'G:\\尚搏Agent',
-  'C:\\Users\\Administrator\\.gemini\\antigravity\\brain'
-])
+const coworkFilesPath = ref('')
+const trustedFolders = ref<string[]>([])
 const showTrustedFoldersModal = ref(false)
 
-const globalInstructions = ref(
-  '所有代码一律采用生产级 TypeScript 严格类型与规范；中文为主交互；关键系统改动需提供清晰对比与回溯说明。'
-)
+const globalInstructions = ref('')
 const showGlobalInstructionsModal = ref(false)
 const editingGlobalInstructions = ref('')
 
-const useMemory = ref(true)
+const useMemory = ref(false)
 interface MemoryRecord {
   id: string
   title: string
@@ -79,26 +74,7 @@ interface MemoryRecord {
   date: string
 }
 
-const memoryItems = ref<MemoryRecord[]>([
-  {
-    id: 'mem-1',
-    title: 'Xiaozhi-server',
-    desc: "The user's xiaozhi (小智) AI voice-assistant server deployment — SSH access, service layout, config paths, and the config-web admin tool",
-    date: '2026-09-24'
-  },
-  {
-    id: 'mem-2',
-    title: '尚搏企业研发工作区架构',
-    desc: '本项目为生产级 TypeScript 5.7 + Electron + Vue 3 桌面 Agent 平台，main/providers/localGateway 统管全部模型网关与工具调用。',
-    date: '2026-09-25'
-  },
-  {
-    id: 'mem-3',
-    title: '对话与代码生成偏好',
-    desc: '系统交互全面中文化，保持单测 100% 绿色通过，保证本地 SQLite Token 统计真实性。',
-    date: '2026-09-25'
-  }
-])
+const memoryItems = ref<MemoryRecord[]>([])
 
 const showAddMemoryModal = ref(false)
 const newMemoryForm = ref({ title: '', desc: '' })
@@ -110,6 +86,34 @@ const chatFont = ref('default')
 const reduceMotion = ref(false)
 const notifyOnCompletion = ref(true)
 const readOnlyReview = ref(false)
+const autonomyLevel = ref<'strict' | 'balanced' | 'trusted'>('balanced')
+const autoApproveSoft = ref(false)
+
+async function toggleAutoApproveSoft(value: boolean): Promise<void> {
+  autoApproveSoft.value = value
+  await store.setAutoApproveSoft(value)
+  feedback.value = {
+    ok: true,
+    message: value
+      ? '已开启自动同意常规审批；删 .git、删库、格式化磁盘等硬红线仍会弹窗。'
+      : '已关闭自动同意常规审批，所有审批都会先问你。'
+  }
+}
+
+async function setAutonomyLevel(level: 'strict' | 'balanced' | 'trusted'): Promise<void> {
+  autonomyLevel.value = level
+  // 走 store 写入：输入区徽标与设置页必须同时变化，避免两处显示不一致。
+  await store.setAutonomy(level)
+  feedback.value = {
+    ok: true,
+    message:
+      level === 'strict'
+        ? '已切换为严格确认：所有写入与命令都会先问你。'
+        : level === 'trusted'
+          ? '已切换为完全信任：常规软风险操作自动放行，硬红线仍必须人工确认。'
+          : '已切换为智能自治：工作区内安全操作自动放行，硬红线仍必须人工确认。'
+  }
+}
 
 // 许愿模式
 const wishEnabled = ref(true)
@@ -374,6 +378,9 @@ async function load(): Promise<void> {
   reduceMotion.value = (settings['agent.reduceMotion'] as boolean) ?? false
   notifyOnCompletion.value = (settings['agent.notifyCompletion'] as boolean) ?? true
   readOnlyReview.value = (settings['agent.readOnly'] as boolean) ?? false
+  autonomyLevel.value =
+    (settings['agent.autonomy'] as 'strict' | 'balanced' | 'trusted') ?? 'balanced'
+  autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
   wishEnabled.value = (settings['agent.wish.enabled'] as boolean) ?? true
   wishAutoApproveWorkspace.value =
     (settings['agent.wish.autoApproveWorkspace'] as boolean) ?? true
@@ -1438,6 +1445,63 @@ async function toggleAutoScreenshot(): Promise<void> {
           <!-- Agent 执行与安全策略 (步数上限已移除：循环到模型收手为止，防打转只靠行为保险丝) -->
           <div class="section-block">
             <h3 class="pane-title">执行与安全策略 (Execution & Safety)</h3>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">执行自治等级 (Autonomy)</span>
+                <span class="row-sub">
+                  决定 Agent 执行时还要不要反复问你。智能自治只放行工作区内的读写与安全命令；硬红线永远不受影响。
+                </span>
+              </div>
+              <div class="segmented-control">
+                <button
+                  class="seg-btn text-seg"
+                  :class="{ active: autonomyLevel === 'strict' }"
+                  @click="setAutonomyLevel('strict')"
+                >
+                  严格确认
+                </button>
+                <button
+                  class="seg-btn text-seg"
+                  :class="{ active: autonomyLevel === 'balanced' }"
+                  @click="setAutonomyLevel('balanced')"
+                >
+                  智能自治
+                </button>
+                <button
+                  class="seg-btn text-seg"
+                  :class="{ active: autonomyLevel === 'trusted' }"
+                  @click="setAutonomyLevel('trusted')"
+                >
+                  完全信任
+                </button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">自动同意常规审批 (Auto-approve routine approvals)</span>
+                <span class="row-sub">
+                  开启后，工作区外写入、外部 MCP / CLI、键鼠操作等普通审批会自动同意；删 .git、删库、格式化磁盘等硬红线仍然必须你本人逐次确认。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input
+                  v-model="autoApproveSoft"
+                  type="checkbox"
+                  @change="toggleAutoApproveSoft(autoApproveSoft)"
+                />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="safety-redline">
+              <strong>安全红线（任何等级都不能自动放行）</strong>
+              <span>
+                磁盘格式化 / 分区 / 擦盘：永久拒绝执行；删除 .git 仓库、删库 / 清表 / 无 WHERE 的
+                DELETE、删除数据库文件、强制推送 / 硬重置：必须你本人逐次确认。许愿模式与「始终允许」都不能绕过。
+              </span>
+            </div>
 
             <div class="setting-row">
               <div class="row-text">
@@ -2910,6 +2974,25 @@ async function toggleAutoScreenshot(): Promise<void> {
   gap: 14px;
 }
 
+.safety-redline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border));
+  background: var(--danger-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.safety-redline strong {
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .divider {
   height: 1px;
   background: var(--border);
@@ -3025,20 +3108,24 @@ async function toggleAutoScreenshot(): Promise<void> {
 .segmented-control {
   display: inline-flex;
   align-items: center;
+  flex: none;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 2px;
   gap: 2px;
+  white-space: nowrap;
 }
 
 .seg-btn {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   padding: 5px 8px;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
+  white-space: nowrap;
   transition: all 0.12s ease;
 }
 
@@ -3048,8 +3135,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .seg-btn.active {
   background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  color: var(--accent-strong);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), inset 0 0 0 1px color-mix(in srgb, var(--gold-2) 20%, transparent);
 }
 
 .text-seg {
@@ -3338,8 +3425,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .model-vis-chip.checked {
-  background: rgba(217, 119, 87, 0.08);
-  border-color: rgba(217, 119, 87, 0.4);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   color: var(--text);
 }
 
@@ -3554,8 +3641,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .plugin-icon-box.active {
   color: var(--accent);
-  background: rgba(217, 119, 87, 0.1);
-  border-color: rgba(217, 119, 87, 0.3);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .plugin-body {
@@ -3662,8 +3749,8 @@ async function toggleAutoScreenshot(): Promise<void> {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  background: rgba(217, 119, 87, 0.06);
-  border: 1px dashed rgba(217, 119, 87, 0.3);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent) 30%, transparent);
   border-radius: var(--radius);
   margin-top: 4px;
 }
@@ -4259,7 +4346,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .cowork-path-badge {
-  color: var(--primary, #d97757);
+  color: var(--primary);
   background: var(--surface);
   border: 1px solid var(--border);
   padding: 2px 6px;
@@ -4408,14 +4495,14 @@ async function toggleAutoScreenshot(): Promise<void> {
   border-radius: 6px;
   padding: 7px 14px;
   font-size: 12px;
-  color: var(--primary, #d97757);
+  color: var(--primary);
   cursor: pointer;
   transition: all 0.12s ease;
 }
 
 .btn-add-memory:hover {
   background: var(--surface-hover);
-  border-color: var(--primary, #d97757);
+  border-color: var(--primary);
 }
 
 /* ========================================================
@@ -4537,7 +4624,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .submodal-textarea:focus,
 .submodal-input:focus {
-  border-color: var(--primary, #d97757);
+  border-color: var(--primary);
   outline: none;
 }
 
@@ -4647,10 +4734,10 @@ async function toggleAutoScreenshot(): Promise<void> {
   padding: 24px 26px;
   overflow: hidden;
   border-radius: 16px;
-  border: 1px solid rgba(217, 119, 87, 0.24);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
   background:
     radial-gradient(circle at 88% 18%, rgba(245, 158, 11, 0.18), transparent 38%),
-    linear-gradient(135deg, rgba(217, 119, 87, 0.11), rgba(247, 247, 248, 0.4));
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 11%, transparent), rgba(247, 247, 248, 0.4));
 }
 
 .lessons-hero {
@@ -4668,7 +4755,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 .wish-kicker {
   display: block;
   margin-bottom: 7px;
-  color: #b45309;
+  color: var(--accent-strong);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 10px;
   font-weight: 700;
@@ -4697,7 +4784,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .wish-hero-mark {
   flex: none;
-  color: #d97757;
+  color: var(--accent);
   font-size: 70px;
   line-height: 1;
   opacity: 0.3;
@@ -4777,7 +4864,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .wish-empty-icon {
-  color: #d97757;
+  color: var(--accent);
   font-size: 34px;
 }
 
@@ -4813,7 +4900,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .wish-task-card:hover {
-  border-color: rgba(217, 119, 87, 0.45);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   transform: translateY(-1px);
 }
 
@@ -4869,14 +4956,14 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .wish-status-pill.status-running {
-  color: #b45309;
+  color: var(--accent-strong);
   background: rgba(245, 158, 11, 0.1);
   border-color: rgba(245, 158, 11, 0.25);
 }
 
 .wish-cycle {
-  color: #b45309;
-  background: rgba(217, 119, 87, 0.08);
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .wish-task-prompt {

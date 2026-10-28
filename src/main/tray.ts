@@ -34,9 +34,10 @@ function buildTrayIcon(remoteOn: boolean): Electron.NativeImage {
         buffer[offset + 1] = 0xcc // G
         buffer[offset + 2] = 0x22 // R
       } else {
-        buffer[offset] = 0x78 // B
-        buffer[offset + 1] = 0xdc // G
-        buffer[offset + 2] = 0x0f // R
+        // 常驻：品牌古铜金 #D4AF37（B=0x37 G=0xAF R=0xD4）
+        buffer[offset] = 0x37 // B
+        buffer[offset + 1] = 0xaf // G
+        buffer[offset + 2] = 0xd4 // R
       }
       buffer[offset + 3] = alpha
     }

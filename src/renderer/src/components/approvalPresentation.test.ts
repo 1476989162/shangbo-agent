@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatApprovalInput,
-  isSecurityCriticalApproval
+  isSecurityCriticalApproval,
+  shouldAutoApproveApproval
 } from './approvalPresentation'
 
 describe('approvalPresentation', () => {
@@ -10,6 +11,13 @@ describe('approvalPresentation', () => {
     expect(isSecurityCriticalApproval('触碰安全护栏')).toBe(true)
     expect(isSecurityCriticalApproval('越过安全红线')).toBe(true)
     expect(isSecurityCriticalApproval('普通命令需要确认')).toBe(false)
+  })
+
+  it('自动同意开关只放行普通审批，硬红线始终拦截', () => {
+    expect(shouldAutoApproveApproval({ severity: 'normal' }, false)).toBe(false)
+    expect(shouldAutoApproveApproval({ severity: 'normal' }, true)).toBe(true)
+    expect(shouldAutoApproveApproval({ severity: 'critical' }, true)).toBe(false)
+    expect(shouldAutoApproveApproval({}, true)).toBe(true)
   })
 
   it('以可读 JSON 展示审批参数', () => {

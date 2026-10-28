@@ -679,6 +679,12 @@ async function copy(): Promise<void> {
   border: 1px solid var(--border);
 }
 
+.message-user .bubble {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--gold-2) 30%, var(--border));
+  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.05);
+}
+
 .user-text {
   margin: 0;
   white-space: pre-wrap;
@@ -839,9 +845,9 @@ async function copy(): Promise<void> {
   width: 23px;
   height: 23px;
   border-radius: 7px;
-  color: #b45309;
-  background: linear-gradient(135deg, rgba(217, 119, 87, 0.16), rgba(245, 158, 11, 0.1));
-  border: 1px solid rgba(217, 119, 87, 0.24);
+  color: var(--accent-strong);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent), rgba(245, 158, 11, 0.1));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
   font-size: 13px;
 }
 
@@ -882,7 +888,7 @@ async function copy(): Promise<void> {
 }
 
 .assistant-state.running {
-  color: #b45309;
+  color: var(--accent-strong);
 }
 
 .assistant-state.failed {
@@ -964,9 +970,9 @@ async function copy(): Promise<void> {
 }
 
 .tool-activity.write .activity-glyph {
-  color: #b45309;
-  border-color: rgba(217, 119, 87, 0.3);
-  background: rgba(217, 119, 87, 0.08);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .tool-activity.command .activity-glyph {
@@ -977,9 +983,9 @@ async function copy(): Promise<void> {
 
 .tool-activity.agent .activity-glyph,
 .tool-activity.computer .activity-glyph {
-  color: #2563eb;
-  border-color: rgba(37, 99, 235, 0.25);
-  background: rgba(37, 99, 235, 0.07);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .activity-title {
@@ -1012,7 +1018,7 @@ async function copy(): Promise<void> {
 }
 
 .activity-status.running {
-  color: #b45309;
+  color: var(--accent-strong);
   background: rgba(245, 158, 11, 0.1);
 }
 
@@ -1366,7 +1372,7 @@ async function copy(): Promise<void> {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  color: #b45309;
+  color: var(--accent-strong);
   margin-bottom: 6px;
 }
 

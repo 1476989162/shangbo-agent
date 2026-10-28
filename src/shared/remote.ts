@@ -106,6 +106,9 @@ export const PendingApprovalSchema = z.object({
   input: z.unknown(),
   reason: z.string(),
   paramHash: z.string(),
+  /** critical：硬红线，手机端需明确提示；缺省按普通审批。 */
+  severity: z.enum(['normal', 'critical']).optional(),
+  autoApprovable: z.boolean().optional(),
   createdAt: z.number(),
   expiresAt: z.number(),
   remainingMs: z.number()

@@ -74,12 +74,12 @@ export function createMainWindow(): BrowserWindow {
     minHeight: 620,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: '#F7F7F8',
+    backgroundColor: '#FBFAF6',
     icon: join(__dirname, '../../resources/icon.png'),
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#F7F7F8',
-      symbolColor: '#171717',
+      color: '#FBFAF6',
+      symbolColor: '#1D1B18',
       height: 40
     },
     webPreferences: {
