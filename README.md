@@ -73,6 +73,14 @@ npm run release -- 0.3.1   # 校验→打包到Temp→验sha→拷回release→�
 npx electron-builder --win --config.directories.output=C:/Users/<你>/AppData/Local/Temp/shangbo-rel
 ```
 
+若打包停在 `unpacking default Electron distribution` 长时间不动（部分 Windows 环境解压官方 zip 会卡住），可先手动解压 Electron 缓存，再用 `ELECTRON_DIST` 指向该目录：
+
+```bash
+ELECTRON_DIST=C:/Users/<你>/AppData/Local/Temp/electron-dist-44 npm run release -- 0.7.0
+```
+
+`scripts/release.mjs` 会自动把 `ELECTRON_DIST` 转成 `--config.electronDist`。
+
 0.2.1 及更早版本没有 `app-update.yml`，不会自动更新，需要手动装一次新安装包。
 
 ## 环境要求

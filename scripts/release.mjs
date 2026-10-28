@@ -40,9 +40,13 @@ sh('npm test -- --run')
 sh('npm run build')
 
 // 3. 打包到工作区外（避开 release/win-unpacked 被索引器锁死）
-const outDir = join(tmpdir(), `shangbo-rel-${version.replaceAll('.', '')}`)
+// 某些 Windows 环境下 electron-builder 解压官方 Electron zip 会长时间卡住；
+// 可用 ELECTRON_DIST 指向已解压的 Electron 分发目录绕开这一步。
+const outDir = join(tmpdir(), `shangbo-rel-${version.replaceAll('.', '')}-${Date.now()}`)
 mkdirSync(outDir, { recursive: true })
-sh(`npx electron-builder --win --config.directories.output=${outDir}`)
+const electronDist = process.env.ELECTRON_DIST?.trim()
+const electronDistArg = electronDist ? ` --config.electronDist="${electronDist}"` : ''
+sh(`npx electron-builder --win${electronDistArg} --config.directories.output=${outDir}`)
 
 // 4. 验三件套
 const exe = `shangbo-agent-setup-${version}.exe`
