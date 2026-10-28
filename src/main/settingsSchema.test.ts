@@ -75,6 +75,19 @@ describe('设置写入白名单 (parseSettingValue)', () => {
     }
   })
 
+  it('许愿模式 MCP 键：布尔与字符串数组可写，类型不符被拒', () => {
+    expect(parseSettingValue('agent.wish.allowMcp', true)).toBe(true)
+    expect(() => parseSettingValue('agent.wish.allowMcp', 'yes')).toThrow()
+    expect(parseSettingValue('agent.wish.mcpAutoApproveServers', ['playwright'])).toEqual([
+      'playwright'
+    ])
+    expect(parseSettingValue('agent.wish.mcpAutoApproveServers', [])).toEqual([])
+    expect(() => parseSettingValue('agent.wish.mcpAutoApproveServers', 'playwright')).toThrow()
+    expect(() =>
+      parseSettingValue('agent.wish.mcpAutoApproveServers', ['x'.repeat(101)])
+    ).toThrow()
+  })
+
   it('中转准入密钥：字符串可写、长度受限、非字符串被拒', () => {
     expect(parseSettingValue('remote.accessKey', 'abc123')).toBe('abc123')
     expect(parseSettingValue('remote.accessKey', '')).toBe('')

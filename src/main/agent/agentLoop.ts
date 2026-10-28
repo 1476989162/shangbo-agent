@@ -204,6 +204,7 @@ export async function runAgentLoop(
     } else if (agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)) {
       const acceptance = getSetting<string>('agent.wish.acceptance', '').trim()
       const verifyCommand = getSetting<string>('agent.wish.verifyCommand', '').trim()
+      const wishAllowMcp = getSetting<boolean>('agent.wish.allowMcp', true)
       system += [
         '',
         '【许愿模式】你是自动交付者，不是咨询顾问。',
@@ -211,12 +212,14 @@ export async function runAgentLoop(
         '不得声称“应该可以”或把验证留给用户。没有真实验证证据就不能宣布完成。',
         acceptance ? `默认验收标准：${acceptance}` : '',
         verifyCommand ? `默认验收命令：${verifyCommand}` : '',
+        wishAllowMcp
+          ? '外部 MCP 工具（mcp__服务__工具）可用：浏览器自动化、抓网页、检索文档、记忆库等；它们已按服务放行，直接调用即可，不要因为“不是本地工具”而放弃。'
+          : '外部 MCP 工具已关闭：只能用工作区内的本地读写、补丁与命令工具。',
         '最终必须输出：改动摘要、实际执行的验证命令与结果、剩余风险、回滚方式。',
         '硬边界：只改当前工作区；不读取密钥库/会话数据库；删 .git、删库、清表、格式化磁盘一律停下来等人工确认。'
       ]
         .filter(Boolean)
-        .join('\n')
-    }
+        .join('\n')    }
 
     // 任务契约：把自然语言压成目标/验收/提问边界，是“少问多做”的主要抓手。
     // 寒暄/极短问答不注入，避免每句“你好”都背一段契约。

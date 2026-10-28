@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { isWishAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
+import { isWishAutoApproved, isWishMcpAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
 
 const settings = {
   wishEnabled: true,
@@ -74,5 +74,28 @@ describe('许愿模式工作区免审批', () => {
     expect(isWishAutoApproved('read_file', { path: 'a.ts' }, false, true, dir)).toBe(false)
     expect(isWishAutoApproved('read_file', { path: 'a.ts' }, true, false, dir)).toBe(false)
     expect(isWishAutoApproved('read_file', { path: 'a.ts' }, true, true, null)).toBe(false)
+  })
+})
+
+describe('许愿模式 MCP 免审批', () => {
+  it('许愿模式未开启或 MCP 总开关关闭时不放行', () => {
+    expect(isWishMcpAutoApproved('mcp__playwright__browser_navigate', false, true, [])).toBe(false)
+    expect(isWishMcpAutoApproved('mcp__playwright__browser_navigate', true, false, [])).toBe(false)
+  })
+
+  it('非 MCP 工具名一律不放行', () => {
+    expect(isWishMcpAutoApproved('run_command', true, true, [])).toBe(false)
+    expect(isWishMcpAutoApproved('mcp__broken', true, true, [])).toBe(false)
+  })
+
+  it('白名单为空时所有已启用服务免审批', () => {
+    expect(isWishMcpAutoApproved('mcp__playwright__browser_navigate', true, true, [])).toBe(true)
+    expect(isWishMcpAutoApproved('mcp__chrome-devtools__take_screenshot', true, true, [])).toBe(true)
+  })
+
+  it('白名单非空时只放行列出的服务', () => {
+    const allow = ['playwright']
+    expect(isWishMcpAutoApproved('mcp__playwright__browser_navigate', true, true, allow)).toBe(true)
+    expect(isWishMcpAutoApproved('mcp__memory__read_graph', true, true, allow)).toBe(false)
   })
 })

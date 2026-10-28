@@ -35,7 +35,7 @@ import {
   commandStaysInsideWorkspace
 } from './commandGuard'
 import { ApprovalBroker, type PendingApprovalSnapshot } from './approvals'
-import { isWishAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
+import { isWishAutoApproved, isWishMcpAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
 import { classifyIntent } from './intent'
 import { classifyToolCall, isAutoAllowed } from './safety'
 import { runAgentLoop } from './agentLoop'
@@ -818,9 +818,11 @@ export class AgentRuntime {
     }
     // MCP 远端工具：mcp__服务__工具，走服务进程转发。
     if (call.name.startsWith('mcp__')) {
-      if (this.isWishMode(runId, conversationId)) {
+      // 许愿模式默认允许调用 MCP（设置 agent.wish.allowMcp，默认开）；
+      // 是否免审批由服务级白名单决定，见 invokeMcpTool。
+      if (this.isWishMode(runId, conversationId) && !getSetting<boolean>('agent.wish.allowMcp', true)) {
         return {
-          content: '许愿模式只使用本地工作区工具，不调用外部 MCP 服务。',
+          content: '许愿模式已关闭外部 MCP 调用（设置 → 许愿模式 → 允许调用 MCP）。',
           isError: true
         }
       }
@@ -949,6 +951,9 @@ export class AgentRuntime {
   /**
    * MCP 远端工具执行：默认需用户确认（外部进程能力未知），确认一次后可用
    * 「总是允许」按工具永久放行，走同一套审批流。
+   *
+   * 许愿模式是无人值守的自动交付模式：这里不弹窗等 5 分钟，而是按服务白名单
+   * 直接放行或直接拒绝，避免空转。
    */
   private async invokeMcpTool(
     runId: string,
@@ -958,13 +963,31 @@ export class AgentRuntime {
     emit: Emitter,
     controller: AbortController
   ): Promise<{ content: string; isError: boolean }> {
-    if (getSetting<boolean>('agent.readOnly', false)) {
+    const wishActive = this.isWishMode(runId, conversationId)
+    if (getSetting<boolean>('agent.readOnly', false) && !wishActive) {
       return { content: '当前是只读复查模式，不调用外部 MCP 服务。', isError: true }
     }
     const parsed = parseMcpToolName(call.name)
     if (!parsed) return { content: `未知 MCP 工具：${call.name}`, isError: true }
 
-    if (!this.isAutoApproved(call.name)) {
+    // 免审批路径：永久放行名单，或许愿模式下的服务级白名单。
+    const autoApprovedServers = getSetting<string[]>('agent.wish.mcpAutoApproveServers', [])
+    const wishMcpAuto = isWishMcpAutoApproved(
+      call.name,
+      wishActive,
+      getSetting<boolean>('agent.wish.allowMcp', true),
+      autoApprovedServers
+    )
+    if (!this.isAutoApproved(call.name) && !wishMcpAuto) {
+      if (wishActive) {
+        // 无人值守：不弹窗空转，直接拒绝并给出可执行的下一步。
+        return {
+          content:
+            `许愿模式未放行 MCP 服务 ${parsed.serverId}（工具 ${call.name}）。` +
+            '请在 设置 → 许愿模式 → MCP 免审批服务 中勾选该服务，或切回建造者模式逐次确认。',
+          isError: true
+        }
+      }
       const decision = await this.requestApproval(
         runId,
         conversationId,
@@ -985,8 +1008,7 @@ export class AgentRuntime {
     return mcpManager.callTool(parsed.serverId, parsed.toolName, call.input, controller.signal)
   }
 
-  /** git 直调（worktree 隔离用），失败返回 null 由调用方回落原地跑。 */
-  private async git(args: string[], cwd: string): Promise<string | null> {
+  /** git 直调（worktree 隔离用），失败返回 null 由调用方回落原地跑。 */  private async git(args: string[], cwd: string): Promise<string | null> {
     try {
       const { stdout } = await execFileAsync('git', args, { cwd, windowsHide: true, timeout: 30_000 })
       return String(stdout ?? '').trim()

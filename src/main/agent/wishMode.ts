@@ -86,3 +86,35 @@ export function isWishAutoApproved(
 
   return false
 }
+
+/** 从 `mcp__服务__工具` 取服务 id；非法命名返回 null（与 manager 同规则，但不引入其依赖）。 */
+export function mcpServerIdOf(toolName: string): string | null {
+  if (!toolName.startsWith('mcp__')) return null
+  const parts = toolName.slice('mcp__'.length).split('__')
+  if (parts.length < 2 || !parts[0] || parts.slice(1).some((p) => !p)) return null
+  return parts[0]
+}
+
+/**
+ * 许愿模式下 MCP 工具能否免审批。
+ *
+ * 与本地工具的区别：MCP 的能力边界由外部服务进程决定，无法按「路径在工作区内」判断，
+ * 只能按服务粒度白名单放行。
+ *
+ * - allowMcp 关闭：许愿模式完全不调 MCP（回到旧行为）。
+ * - autoApproveServers 为空：全部已启用服务免审批。许愿模式按无人值守设计，
+ *   弹窗只会空转 5 分钟后按拒绝处理，等价于「不能用」；要逐个确认请切回建造者模式。
+ * - autoApproveServers 非空：只有列出的服务免审批，其余服务直接拒绝并提示。
+ */
+export function isWishMcpAutoApproved(
+  toolName: string,
+  wishActive: boolean,
+  allowMcp: boolean,
+  autoApproveServers: readonly string[]
+): boolean {
+  if (!wishActive || !allowMcp) return false
+  const serverId = mcpServerIdOf(toolName)
+  if (!serverId) return false
+  if (autoApproveServers.length === 0) return true
+  return autoApproveServers.includes(serverId)
+}

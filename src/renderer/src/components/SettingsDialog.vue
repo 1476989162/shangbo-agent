@@ -118,6 +118,8 @@ async function setAutonomyLevel(level: 'strict' | 'balanced' | 'trusted'): Promi
 // 许愿模式
 const wishEnabled = ref(true)
 const wishAutoApproveWorkspace = ref(true)
+const wishAllowMcp = ref(true)
+const wishMcpAutoApproveServers = ref<string[]>([])
 const wishAutoVerify = ref(true)
 const wishEvolve = ref(true)
 const wishAcceptance = ref('')
@@ -384,6 +386,9 @@ async function load(): Promise<void> {
   wishEnabled.value = (settings['agent.wish.enabled'] as boolean) ?? true
   wishAutoApproveWorkspace.value =
     (settings['agent.wish.autoApproveWorkspace'] as boolean) ?? true
+  wishAllowMcp.value = (settings['agent.wish.allowMcp'] as boolean) ?? true
+  wishMcpAutoApproveServers.value =
+    (settings['agent.wish.mcpAutoApproveServers'] as string[]) ?? []
   wishAutoVerify.value = (settings['agent.wish.autoVerify'] as boolean) ?? true
   wishEvolve.value = (settings['agent.wish.evolve'] as boolean) ?? true
   wishAcceptance.value = (settings['agent.wish.acceptance'] as string) ?? ''
@@ -565,6 +570,11 @@ async function saveWishSettings(): Promise<void> {
   await window.shangbo.settings.set(
     'agent.wish.autoApproveWorkspace',
     wishAutoApproveWorkspace.value
+  )
+  await window.shangbo.settings.set('agent.wish.allowMcp', wishAllowMcp.value)
+  await window.shangbo.settings.set(
+    'agent.wish.mcpAutoApproveServers',
+    wishMcpAutoApproveServers.value
   )
   await window.shangbo.settings.set('agent.wish.autoVerify', wishAutoVerify.value)
   await window.shangbo.settings.set('agent.wish.evolve', wishEvolve.value)
@@ -1584,6 +1594,47 @@ async function toggleAutoScreenshot(): Promise<void> {
                   @change="saveWishSettings"
                 />
                 <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">允许调用 MCP</span>
+                <span class="row-sub">
+                  许愿模式可直接使用已启用的外部 MCP 服务（浏览器自动化、抓网页、检索文档、记忆库等）；关闭后回到“只用本地工作区工具”。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input v-model="wishAllowMcp" type="checkbox" @change="saveWishSettings" />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div v-if="wishAllowMcp" class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">MCP 免审批服务</span>
+                <span class="row-sub">
+                  不勾选＝所有已启用服务免审批（许愿模式无人值守，弹窗只会超时后按拒绝处理）；勾选后只有列出的服务放行，其余服务会被直接拒绝。
+                </span>
+              </div>
+            </div>
+            <div v-if="wishAllowMcp" class="wish-mcp-picks">
+              <div v-if="mcpServers.length === 0" class="servers-subtle">
+                未读取到 MCP 服务清单，请到「连接器 → MCP」刷新。
+              </div>
+              <label
+                v-for="server in mcpServers.filter((s) => s.enabled)"
+                :key="server.id"
+                class="wish-mcp-pick"
+              >
+                <input
+                  v-model="wishMcpAutoApproveServers"
+                  type="checkbox"
+                  :value="server.id"
+                  @change="saveWishSettings"
+                />
+                <span>{{ server.name }}</span>
+                <span class="servers-subtle">{{ server.toolCount }} 工具</span>
               </label>
             </div>
 
@@ -4833,8 +4884,24 @@ async function toggleAutoScreenshot(): Promise<void> {
   font-size: 11px;
 }
 
-.wish-toolbar {
+/* 许愿模式 MCP 免审批服务勾选 */
+.wish-mcp-picks {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 4px 0 10px;
+}
+
+.wish-mcp-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.wish-toolbar {  display: flex;
   align-items: center;
   gap: 8px;
 }

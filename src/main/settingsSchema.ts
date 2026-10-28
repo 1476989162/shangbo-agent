@@ -49,6 +49,10 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.context.summarize': z.boolean(),
   'agent.wish.enabled': z.boolean(),
   'agent.wish.autoApproveWorkspace': z.boolean(),
+  // 许愿模式是否允许调用外部 MCP 服务：关闭时回到「只使用本地工作区工具」。
+  'agent.wish.allowMcp': z.boolean(),
+  // 许愿模式下免审批的 MCP 服务 id 白名单（不含 mcp__ 前缀与工具名）。
+  'agent.wish.mcpAutoApproveServers': z.array(z.string().max(100)).max(100),
   'agent.wish.autoVerify': z.boolean(),
   'agent.wish.evolve': z.boolean(),
   'agent.wish.verifyRetries': z.number().int().min(0).max(10),
