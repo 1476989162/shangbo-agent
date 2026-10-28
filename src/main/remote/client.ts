@@ -28,6 +28,12 @@ export interface PairingHello {
 export interface RemoteClientOptions {
   relayUrl: string
   deviceToken: string | null
+  /** 中转准入密钥（中转设了 RELAY_ACCESS_KEY 时必填，否则注册被拒）。 */
+  accessKey?: string
+  /** 本机身份公钥与指纹；中转白名单模式下用它证明"这台桌面就是我"。 */
+  getIdentity: () => { publicKeyB64: string; fingerprint: string } | null
+  /** 对中转挑战签名（Ed25519）。 */
+  signChallenge: (challenge: string, publicKeyB64: string) => string
   getSession: () => { cipher: SessionCipher; deviceId: string } | null
   handlerContext: () => RemoteHandlerContext
   onStatus: (status: RemoteStatus, detail?: string) => void
@@ -71,6 +77,16 @@ export class RemoteClient {
 
   get statusEnabled(): boolean {
     return this.enabled
+  }
+
+  /** 当前配置的中转地址（service 用来判断是否需要重建客户端）。 */
+  relayUrl(): string {
+    return (this.opts.relayUrl ?? '').trim()
+  }
+
+  /** 当前配置的准入密钥。 */
+  accessKey(): string {
+    return (this.opts.accessKey ?? '').trim()
   }
 
   /** 开关：关闭时立即断开且不再重连，不产生任何外网连接。 */
@@ -191,10 +207,30 @@ export class RemoteClient {
   private async register(): Promise<void> {
     try {
       const deviceToken = this.deviceToken
-      const data = (await this.sendControl('register-desktop', deviceToken ? { deviceToken } : {})) as {
-        roomId: string
-        deviceToken?: string
+      const accessKey = (this.opts.accessKey ?? '').trim()
+      // 身份公钥随注册一起上报：中转的白名单里存的就是它。
+      const identity = this.opts.getIdentity()
+      const base: Record<string, unknown> = {
+        ...(deviceToken ? { deviceToken } : {}),
+        ...(accessKey ? { accessKey } : {}),
+        ...(identity ? { pubKey: identity.publicKeyB64 } : {})
       }
+      let data = (await this.sendControl('register-desktop', base)) as {
+        roomId?: string
+        deviceToken?: string
+        challenge?: string
+      }
+      // 中转要求身份签名（白名单模式）：拿挑战 → 签名 → 重发注册
+      if (data?.challenge) {
+        if (!identity) throw new Error('身份密钥缺失，无法响应中转挑战')
+        const signature = this.opts.signChallenge(data.challenge, identity.publicKeyB64)
+        data = (await this.sendControl('register-desktop', {
+          ...base,
+          challenge: data.challenge,
+          signature
+        })) as { roomId?: string; deviceToken?: string }
+      }
+      if (!data?.roomId) throw new Error('注册未返回房间')
       if (data.deviceToken) {
         // 首次注册返回的 token 必须落盘，否则桌面重启会新建 room，已配对手机全部失联。
         this.deviceToken = data.deviceToken
@@ -210,6 +246,26 @@ export class RemoteClient {
       // 上线即下发待审批快照（手机可能错过 approval_required）
       await this.pushPendingApprovals()
     } catch (error) {
+      // 中转拒绝准入：不是网络问题，重试也没用，直接给出可操作的提示。
+      if (error instanceof Error && error.message.includes('access denied')) {
+        this.stopped = true
+        this.setStatus('banned', '中转准入密钥错误：请核对设置里的准入密钥')
+        log.warn('[remote] 中转拒绝了准入密钥，已停止重连')
+        return
+      }
+      // 身份不在中转白名单：同样重试无意义，提示用户把指纹加到服务器。
+      if (
+        error instanceof Error &&
+        (error.message.includes('desktop not allowed') ||
+          error.message.includes('bad signature') ||
+          error.message.includes('challenge expired'))
+      ) {
+        this.stopped = true
+        const fp = this.opts.getIdentity()?.fingerprint ?? '未生成'
+        this.setStatus('banned', `中转拒绝本机身份（指纹 ${fp}），请把该指纹加入中转白名单`)
+        log.warn('[remote] 中转拒绝了本机身份，已停止重连')
+        return
+      }
       // 中转重启后内存中的 room 会丢失；清掉失效 token，换一个新 room 重新上线。
       if (
         this.deviceToken &&

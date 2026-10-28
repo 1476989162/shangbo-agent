@@ -6,4 +6,15 @@ services:
     environment:
       - RELAY_PORT=8787
       - RELAY_HOST=0.0.0.0
+      # 准入密钥：可选。留空且未设白名单时，该中转对任何拿到地址的人开放。
+      # 桌面端「设置 → 手机远程 → 中转准入密钥」要填同一个值。
+      - RELAY_ACCESS_KEY=${RELAY_ACCESS_KEY:-}
+      # 身份白名单（推荐）：只有名单内的桌面能连。填桌面设置页显示的本机身份指纹，
+      # 多个用逗号分隔，也可填完整公钥。设置后"除了我谁都用不了"。
+      - RELAY_ALLOWED_DESKTOPS=${RELAY_ALLOWED_DESKTOPS:-}
+      # 设为 1 时，白名单与准入密钥必须同时满足
+      - RELAY_REQUIRE_ACCESS_KEY=${RELAY_REQUIRE_ACCESS_KEY:-}
+      # 资源上限：防止公网循环注册把内存吃光
+      - RELAY_MAX_ROOMS=${RELAY_MAX_ROOMS:-5000}
+      - RELAY_MAX_CONNECTIONS=${RELAY_MAX_CONNECTIONS:-2000}
     restart: unless-stopped

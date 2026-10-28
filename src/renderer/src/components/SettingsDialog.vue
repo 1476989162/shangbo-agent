@@ -171,10 +171,12 @@ interface RemoteDevice {
 }
 const remoteEnabled = ref(false)
 const remoteRelayUrl = ref('')
+const remoteAccessKey = ref('')
 const remoteApprovalPolicy = ref<'allow-all' | 'confirm-high' | 'read-only'>('allow-all')
 const remoteStatusText = ref('未开启')
 const remotePairing = ref<{ qrText: string; code: string; expiresAt: number; fingerprint: string } | null>(null)
 const remoteDevices = ref<RemoteDevice[]>([])
+const remoteIdentityFp = ref('')
 const remoteBusy = ref(false)
 /** 配对二维码画布：生成配对码后绘制 qrText，手机扫码直达配对页。 */
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
@@ -193,6 +195,12 @@ async function loadRemote(): Promise<void> {
   } catch {
     remoteDevices.value = []
   }
+  try {
+    // 本机身份指纹：填到中转 RELAY_ALLOWED_DESKTOPS 后，中转只服务这一台桌面
+    remoteIdentityFp.value = (await window.shangbo.remote.identity()).fingerprint
+  } catch {
+    remoteIdentityFp.value = ''
+  }
 }
 
 async function toggleRemoteEnabled(): Promise<void> {
@@ -207,6 +215,16 @@ async function toggleRemoteEnabled(): Promise<void> {
 async function saveRemoteRelayUrl(): Promise<void> {
   await window.shangbo.settings.set('remote.relayUrl', remoteRelayUrl.value.trim())
   feedback.value = { ok: true, message: '中转地址已保存' }
+}
+
+async function saveRemoteAccessKey(): Promise<void> {
+  await window.shangbo.settings.set('remote.accessKey', remoteAccessKey.value.trim())
+  feedback.value = {
+    ok: true,
+    message: remoteAccessKey.value.trim()
+      ? '准入密钥已保存：中转必须设置同一个 RELAY_ACCESS_KEY，否则会被拒绝'
+      : '准入密钥已清空：该中转对任何拿到地址的人开放'
+  }
 }
 
 async function saveRemotePolicy(): Promise<void> {
@@ -395,6 +413,7 @@ async function load(): Promise<void> {
   updateState.value = await window.shangbo.update.status()
   remoteEnabled.value = (settings['remote.enabled'] as boolean) ?? false
   remoteRelayUrl.value = (settings['remote.relayUrl'] as string) ?? ''
+  remoteAccessKey.value = (settings['remote.accessKey'] as string) ?? ''
   remoteApprovalPolicy.value =
     (settings['remote.approvalPolicy'] as 'allow-all' | 'confirm-high' | 'read-only') ?? 'allow-all'
   await loadRemote()
@@ -1865,6 +1884,47 @@ async function toggleAutoScreenshot(): Promise<void> {
                 style="flex: 1"
               />
               <button class="btn btn-ghost tiny" @click="saveRemoteRelayUrl">保存</button>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">中转准入密钥</span>
+                <span class="row-sub">
+                  与中转服务器的 <code class="mono">RELAY_ACCESS_KEY</code> 一致。设置后，别人即使知道你的中转地址也注册不了房间，用不了你的公网。
+                  留空 = 你的中转对任何拿到地址的人开放（只建议本机调试）。
+                </span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <input
+                v-model="remoteAccessKey"
+                type="password"
+                class="select-control mono"
+                placeholder="留空表示不设准入"
+                style="flex: 1"
+                autocomplete="new-password"
+              />
+              <button class="btn btn-ghost tiny" @click="saveRemoteAccessKey">保存</button>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">只允许本机使用（推荐）</span>
+                <span class="row-sub">
+                  本机身份指纹：<strong class="mono">{{ remoteIdentityFp || '读取中…' }}</strong>
+                  <br />
+                  把它填到中转服务器的 <code class="mono">RELAY_ALLOWED_DESKTOPS</code>，中转就只接受这一台桌面。
+                  别人即使知道地址、抄走公钥，没有私钥也签不出有效签名，连注册都过不去。
+                </span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="row-sub">
+                  中转端设置：<code class="mono">RELAY_ALLOWED_DESKTOPS={{ remoteIdentityFp || '本机指纹' }}</code>
+                  ，重启中转生效。指纹是公钥摘要，可以安全外露。
+                </span>
+              </div>
             </div>
 
             <div class="setting-row">

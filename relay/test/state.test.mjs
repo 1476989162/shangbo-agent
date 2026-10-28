@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { RelayState, RateLimiter } from '../state.mjs'
+import { RelayState, RateLimiter, MAX_REVOKED_PHONES } from '../state.mjs'
 
 /* 中转状态机：房间、配对码（过期/复用失败）、吊销。 */
 
@@ -83,5 +83,59 @@ describe('RelayState', () => {
     assert.equal(limiter.take(), true)
     assert.equal(limiter.take(), true)
     assert.equal(limiter.take(), false)
+  })
+})
+
+/* 公网资源上限：中转对全世界开放，房间与吊销表必须有界，
+   否则任何人循环注册就能远程把内存吃光（无认证 OOM）。 */
+describe('资源上限与回收', () => {
+  it('房间数达到上限后拒绝新建（createRoom 返回 null）', () => {
+    const s = new RelayState({ maxRooms: 2 })
+    assert.ok(s.createRoom())
+    assert.ok(s.createRoom())
+    assert.equal(s.createRoom(), null)
+    assert.equal(s.rooms.size, 2)
+  })
+
+  it('空闲空房间被回收，deviceToken 索引一并清理', () => {
+    const s = new RelayState()
+    const { roomId, deviceToken } = s.createRoom()
+    assert.ok(s.findRoomByDeviceToken(deviceToken))
+    // 桌面不在线、无手机，时间推到 TTL 之后
+    const removed = s.sweepIdleRooms(Date.now() + 8 * 24 * 60 * 60 * 1000)
+    assert.equal(removed, 1)
+    assert.equal(s.getRoom(roomId), null)
+    assert.equal(s.findRoomByDeviceToken(deviceToken), null)
+    assert.equal(s.deviceTokens.size, 0)
+  })
+
+  it('有手机的房间不被回收', () => {
+    const s = new RelayState()
+    const { roomId } = s.createRoom()
+    const pairing = s.issuePairingCode(roomId)
+    assert.ok(s.redeemPairingCode(pairing.code, 'pixel'))
+    const removed = s.sweepIdleRooms(Date.now() + 8 * 24 * 60 * 60 * 1000)
+    assert.equal(removed, 0)
+    assert.ok(s.getRoom(roomId))
+  })
+
+  it('吊销表有上限，超出淘汰最旧的', () => {
+    const s = new RelayState()
+    for (let i = 0; i < MAX_REVOKED_PHONES + 10; i++) s.rememberRevoked(`t${i}`)
+    assert.equal(s.revokedPhones.size, MAX_REVOKED_PHONES)
+    // 最旧的被淘汰，最新的保留
+    assert.equal(s.isRevoked('t0'), false)
+    assert.equal(s.isRevoked(`t${MAX_REVOKED_PHONES + 9}`), true)
+  })
+
+  it('phoneToken 索引 O(1) 定位房间，吊销后失效', () => {
+    const s = new RelayState()
+    const { roomId } = s.createRoom()
+    const pairing = s.issuePairingCode(roomId)
+    const { phoneToken } = s.redeemPairingCode(pairing.code, 'pixel')
+    assert.equal(s.findRoomByPhoneToken(phoneToken)?.roomId, roomId)
+    s.revokePhone(roomId, phoneToken)
+    assert.equal(s.findRoomByPhoneToken(phoneToken), null)
+    assert.equal(s.isRevoked(phoneToken), true)
   })
 })

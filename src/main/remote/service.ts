@@ -13,6 +13,7 @@ import {
 import { appendRemoteAudit } from './audit'
 import type { RemoteHandlerContext } from './handler'
 import { buildPairingUrl } from './pairing-url'
+import { ensureIdentity, getIdentity, signChallenge } from './identity'
 
 /**
  * 阶段3：远程总控（单例）。
@@ -84,6 +85,15 @@ class RemoteService {
     }
   }
 
+  /** 中转准入密钥：与中转侧 RELAY_ACCESS_KEY 保持一致；空表示该中转不设准入。 */
+  private accessKey(): string {
+    try {
+      return getSetting<string>('remote.accessKey', '').trim()
+    } catch {
+      return ''
+    }
+  }
+
   private handlerContext(): RemoteHandlerContext {
     let policy: RemoteHandlerContext['approvalPolicy'] = 'allow-all'
     try {
@@ -126,10 +136,23 @@ class RemoteService {
       return
     }
     this.ensureDeviceKeys()
+    // 身份密钥：中转白名单模式要用它证明"这台桌面就是我"，必须在连接前就绪。
+    ensureIdentity()
+    // 地址或准入密钥变了必须重建客户端：RemoteClient 在构造时读取这两个值，
+    // 复用旧实例会让新填的准入密钥完全不生效（表现为一直 access denied）。
+    const relayUrl = this.relayUrl()
+    const accessKey = this.accessKey()
+    if (this.client && (this.client.relayUrl() !== relayUrl || this.client.accessKey() !== accessKey)) {
+      this.client.disconnectAll('config-changed')
+      this.client = null
+    }
     if (!this.client) {
       this.client = new RemoteClient({
-        relayUrl: this.relayUrl(),
+        relayUrl,
         deviceToken: getSecret(K_DEVICE_TOKEN),
+        accessKey,
+        getIdentity: () => getIdentity(),
+        signChallenge: (challenge, publicKeyB64) => signChallenge(challenge, publicKeyB64),
         getSession: () => {
           if (!this.currentDeviceId) return null
           const cipher = this.sessions.get(this.currentDeviceId)
@@ -167,6 +190,14 @@ class RemoteService {
       phoneName
     )
     return { qrText, code, expiresAt, fingerprint }
+  }
+
+  /**
+   * 本机中转身份（公钥 + 指纹）。用户把指纹填到中转的 RELAY_ALLOWED_DESKTOPS，
+   * 中转就只服务这一台桌面。公钥是公开信息，暴露给设置页展示没有风险。
+   */
+  getIdentityInfo(): { publicKeyB64: string; fingerprint: string } {
+    return ensureIdentity()
   }
 
   /** 配对完成：手机经中转控制面提交 X25519 公钥，桌面派生会话密钥并落库。 */

@@ -312,8 +312,13 @@ export function registerIpcHandlers(): void {
     setSetting(name, parsed)
     // 更新开关改完立即生效，不必等重启
     if (name.startsWith('app.update.')) updateService.syncSettings()
-    // 远程开关/地址/策略改完立即生效
-    if (name === 'remote.enabled' || name === 'remote.relayUrl' || name === 'remote.approvalPolicy') {
+    // 远程开关/地址/准入密钥/策略改完立即生效
+    if (
+      name === 'remote.enabled' ||
+      name === 'remote.relayUrl' ||
+      name === 'remote.accessKey' ||
+      name === 'remote.approvalPolicy'
+    ) {
       remoteService.sync()
     }
     if (name === 'agent.autonomous.enabled') autonomousScheduler.kick()
@@ -409,6 +414,8 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.remoteDevices, () => remoteService.listDevices())
+
+  ipcMain.handle(IPC.remoteIdentity, () => remoteService.getIdentityInfo())
 
   ipcMain.handle(IPC.remoteRevoke, async (_event, id: string) => remoteService.revokeDevice(id))
 

@@ -89,7 +89,7 @@ const api: ShangboApi = {
     devices: () => ipcRenderer.invoke(IPC.remoteDevices),
     revoke: (id: string) => ipcRenderer.invoke(IPC.remoteRevoke, id),
     disconnect: () => ipcRenderer.invoke(IPC.remoteDisconnect),
-    onEvent: (handler: (status: string, detail: string) => void) => {
+    identity: () => ipcRenderer.invoke(IPC.remoteIdentity),    onEvent: (handler: (status: string, detail: string) => void) => {
       ipcRenderer.removeAllListeners(IPC.remoteEvent)
       ipcRenderer.on(IPC.remoteEvent, (_event, status: string, detail: string) => handler(status, detail))
     },

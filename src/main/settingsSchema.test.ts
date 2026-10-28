@@ -64,9 +64,21 @@ describe('设置写入白名单 (parseSettingValue)', () => {
       'cowork.trustedFolders',
       'cowork.useMemory',
       'agent.notifyCompletion',
-      'agent.reduceMotion'
+      'agent.reduceMotion',
+      // 手机远程：中转准入密钥必须可写，否则设置页保存会抛错
+      'remote.enabled',
+      'remote.relayUrl',
+      'remote.accessKey',
+      'remote.approvalPolicy'
     ]) {
       expect(SettingSchemas[key], key).toBeDefined()
     }
+  })
+
+  it('中转准入密钥：字符串可写、长度受限、非字符串被拒', () => {
+    expect(parseSettingValue('remote.accessKey', 'abc123')).toBe('abc123')
+    expect(parseSettingValue('remote.accessKey', '')).toBe('')
+    expect(() => parseSettingValue('remote.accessKey', 123)).toThrow()
+    expect(() => parseSettingValue('remote.accessKey', 'x'.repeat(201))).toThrow()
   })
 })

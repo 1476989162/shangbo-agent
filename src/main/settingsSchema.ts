@@ -75,6 +75,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 手机远程（只能桌面本机改，远程通道无 settings:set）
   'remote.enabled': z.boolean(),
   'remote.relayUrl': z.string().max(500),
+  // 中转准入密钥：与中转侧 RELAY_ACCESS_KEY 一致，留空表示该中转不设准入
+  'remote.accessKey': z.string().max(200),
   'remote.approvalPolicy': z.enum(['allow-all', 'confirm-high', 'read-only']),
   // 枚举
   'agent.browser.default': z.enum(['external', 'builtin']),

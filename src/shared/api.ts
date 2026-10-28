@@ -123,6 +123,8 @@ export interface ShangboApi {
     revoke(id: string): Promise<boolean>
     /** 一键断开所有远程设备并关闭远程功能。 */
     disconnect(): Promise<boolean>
+    /** 本机中转身份指纹：填到中转 RELAY_ALLOWED_DESKTOPS 后，中转只服务本机。 */
+    identity(): Promise<{ publicKeyB64: string; fingerprint: string }>
     onEvent(handler: (status: string, detail: string) => void): void
     offEvent(): void
   }

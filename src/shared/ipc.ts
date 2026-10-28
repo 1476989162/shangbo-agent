@@ -53,8 +53,9 @@ export const IPC = {
   remoteDevices: 'remote:devices',
   remoteRevoke: 'remote:revoke',
   remoteDisconnect: 'remote:disconnect',
+  /** 本机中转身份指纹：用户据此配置服务器白名单。 */
+  remoteIdentity: 'remote:identity',
   remoteEvent: 'remote:event',
-
   autonomousList: 'autonomous:list',
   autonomousSave: 'autonomous:save',
   autonomousDelete: 'autonomous:delete',
