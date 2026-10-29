@@ -1,16 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerConfig } from './manager'
-import { loadServerConfigs, mcpToolName, McpManager, parseMcpToolName, BUILTIN_MCP_SERVERS, resolveEnv } from './manager'
+import { loadServerConfigs, mergeBuiltinServers, mcpToolName, McpManager, parseMcpToolName, BUILTIN_MCP_SERVERS, resolveEnv } from './manager'
 
 vi.mock('electron-log/main', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-const settingsStub = vi.hoisted(() => ({ servers: null as McpServerConfig[] | null }))
+const settingsStub = vi.hoisted(() => ({
+  servers: null as McpServerConfig[] | null,
+  legacy: null as string[] | null
+}))
 
 vi.mock('../settings', () => ({
-  getSetting: (key: string, fallback: unknown) =>
-    key === 'agent.mcp.servers' ? (settingsStub.servers ?? fallback) : fallback
+  getSetting: (key: string, fallback: unknown) => {
+    if (key === 'agent.mcp.servers') return settingsStub.servers ?? fallback
+    if (key === 'agent.mcpServers') return settingsStub.legacy ?? fallback
+    return fallback
+  }
 }))
 
 /** 假 MCP 服务：只懂握手、列工具、回固定文本，走换行 JSON。 */
@@ -33,6 +39,7 @@ function fakeConfig(id: string, command: string = process.execPath): McpServerCo
 describe('MCP 服务管理器', () => {
   beforeEach(() => {
     settingsStub.servers = null
+    settingsStub.legacy = null
   })
 
   it('内置服务清单：已实测的都在且默认启用', () => {
@@ -57,6 +64,18 @@ describe('MCP 服务管理器', () => {
     const ids = loadServerConfigs().map((s) => s.id)
     expect(ids).toEqual(expect.arrayContaining(['memory', 'fetch', 'playwright', 'docker']))
     expect(ids.length).toBeGreaterThan(0)
+  })
+
+  it('旧版快照自动补齐新增内置项，用户改过的保留', () => {
+    const old = BUILTIN_MCP_SERVERS.filter((s) => s.id !== 'magpie-vision' && s.id !== 'magpie-image').map((s) => ({
+      ...s,
+      enabled: s.id === 'memory' ? false : s.enabled
+    }))
+    const merged = mergeBuiltinServers(old)
+    expect(merged.find((s) => s.id === 'magpie-vision')).toBeTruthy()
+    expect(merged.find((s) => s.id === 'magpie-image')).toBeTruthy()
+    // 用户关掉的 memory 保持关闭，不被内置覆盖
+    expect(merged.find((s) => s.id === 'memory')?.enabled).toBe(false)
   })
 
   it('Magpie 识图/生图走 HTTP，默认关闭', () => {
@@ -91,6 +110,7 @@ describe('MCP 服务管理器', () => {
 
   it('聚合工具并转发调用', async () => {
     settingsStub.servers = [fakeConfig('fake1')]
+    settingsStub.legacy = ['fake1']
     const manager = new McpManager()
     try {
       const schemas = await manager.toolSchemas()
@@ -107,6 +127,7 @@ describe('MCP 服务管理器', () => {
 
   it('起不来的服务只跳过不炸', async () => {
     settingsStub.servers = [fakeConfig('bad', 'no-such-binary-xyz')]
+    settingsStub.legacy = ['bad']
     const manager = new McpManager()
     try {
       await expect(manager.toolSchemas()).resolves.toEqual([])
@@ -124,6 +145,7 @@ describe('MCP 服务管理器', () => {
    */
   it('shutdownSync 能同步清空登记表，不抛错', async () => {
     settingsStub.servers = [fakeConfig('fake1')]
+    settingsStub.legacy = ['fake1']
     const manager = new McpManager()
     // 先真正拉起一个服务，让 live 里有一条记录
     const schemas = await manager.toolSchemas()

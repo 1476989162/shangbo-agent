@@ -146,12 +146,24 @@ export function parseMcpToolName(name: string): { serverId: string; toolName: st
  * 再与设置页开关（agent.mcpServers，渲染端 toggles 写的 id 白名单）取交集，
  * 保证界面开关继续有效。
  */
+/**
+ * 库里的全量快照可能落后于内置（旧版存的，没有 Magpie 两条）：
+ * 按 id 合并，缺失的内置项补上，用户改过的 enabled 保留。
+ */
+export function mergeBuiltinServers(configured: McpServerConfig[]): McpServerConfig[] {
+  if (!Array.isArray(configured) || configured.length === 0) return BUILTIN_MCP_SERVERS
+  const ids = new Set(configured.map((s) => s?.id).filter(Boolean))
+  const missing = BUILTIN_MCP_SERVERS.filter((s) => !ids.has(s.id))
+  if (missing.length === 0) return configured
+  return [...configured, ...missing]
+}
+
 export function loadServerConfigs(): McpServerConfig[] {
   const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
   const legacy = getSetting<string[] | null>('agent.mcpServers', null)
-  // 0.8.1 的开关双写 bug 会在库里留下一个空数组（把内置 10 个全盖掉）：
-  // 空数组视为“没配过”，回落内置，避免设置页一点刷新就全空。
-  const effective = Array.isArray(configured) && configured.length === 0 ? BUILTIN_MCP_SERVERS : configured
+  // 0.8.1 的开关双写 bug 会在库里留下一个空数组（把内置全盖掉）：
+  // 空数组视为“没配过”，回落内置避免设置页一点刷新就全空。
+  const effective = mergeBuiltinServers(configured)
   return effective
     // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
     .filter((s) => s && s.id && (s.url || s.command))
@@ -199,8 +211,8 @@ export class McpManager {
     }[] = []
     // 关掉的服务不拉进程，直接标 disabled（不验证死活）。
     const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
-    // 与 loadServerConfigs 同规则：0.8.1 残留的空数组回落内置。
-    const effective = Array.isArray(configured) && configured.length === 0 ? BUILTIN_MCP_SERVERS : configured
+    // 与 loadServerConfigs 同规则：空数组回落内置，旧快照补齐新增内置项。
+    const effective = mergeBuiltinServers(configured)
     const all = effective
       .filter((s) => s && s.id && (s.url || s.command))
       .map((s) => ({ ...s, id: slug(s.id) }))
