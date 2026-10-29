@@ -55,6 +55,9 @@ const completedTodoCount = computed(
   () => props.todos.filter((item) => item.status === 'completed').length
 )
 
+/** 任务清单默认收起，只留进度；点标题展开看明细。 */
+const todosCollapsed = ref(true)
+
 /** 切换原因可能是一整段 HTTP 错误 JSON，提示条里只展示一句可读摘要。 */
 function shortReason(reason: string): string {
   const flat = reason.replace(/\s+/g, ' ').trim()
@@ -67,11 +70,11 @@ function shortReason(reason: string): string {
 
 <template>
   <div v-if="todos.length > 0" class="todo-panel">
-    <div class="todo-panel-head">
-      <span>任务清单</span>
+    <div class="todo-panel-head todo-toggle" @click="todosCollapsed = !todosCollapsed">
+      <span>{{ todosCollapsed ? '›' : '▾' }} 任务清单</span>
       <span class="todo-panel-count">{{ completedTodoCount }}/{{ todos.length }}</span>
     </div>
-    <ul class="todo-list">
+    <ul v-if="!todosCollapsed" class="todo-list">
       <li v-for="item in todos" :key="item.id" class="todo-item" :class="item.status">
         <span class="todo-status" aria-hidden="true">
           {{ item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '◌' : '○' }}
@@ -148,6 +151,15 @@ function shortReason(reason: string): string {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 600;
+}
+
+.todo-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.todo-toggle:hover {
+  color: var(--text);
 }
 
 .todo-panel-count {

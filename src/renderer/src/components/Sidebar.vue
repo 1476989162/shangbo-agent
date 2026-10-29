@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import type { UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
 import logoImg from '../assets/logo.png'
 
@@ -10,6 +11,23 @@ const pendingDeleteId = ref<string | null>(null)
 const searchQuery = ref('')
 const moreOpen = ref(false)
 const userMenuOpen = ref(false)
+
+/** 有新版本可更新时品牌区挂红点：状态由主进程推送，打开即订阅。 */
+const updateAvailable = ref(false)
+onMounted(async () => {
+  try {
+    const state = await window.shangbo.update.status()
+    updateAvailable.value = state.status === 'available' || state.status === 'downloading' || state.status === 'ready'
+  } catch {
+    // 忽略：拿不到就不挂红点
+  }
+  window.shangbo.update.onEvent((state: UpdateState) => {
+    updateAvailable.value = state.status === 'available' || state.status === 'downloading' || state.status === 'ready'
+  })
+})
+onBeforeUnmount(() => {
+  window.shangbo.update.offEvent()
+})
 
 const filteredGroups = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -53,6 +71,12 @@ function openTab(tab: string): void {
     <!-- 品牌区：数智太极 · 东方天圆 -->
     <div class="brand-bar">
       <div class="brand-lockup">
+        <button
+          v-if="updateAvailable"
+          class="update-dot"
+          title="发现新版本，点击去更新"
+          @click="openTab('general')"
+        />
         <span class="taiji-ring brand-mark">
           <img :src="logoImg" alt="尚搏" />
         </span>
@@ -98,13 +122,13 @@ function openTab(tab: string): void {
         </button>
       </div>
 
-      <!-- 协同 Cowork / 代码 Code 模式切换胶囊 -->
+      <!-- 协同 Cowork / 代码 Code 视图切换胶囊：改变系统提示倾向与排版，不改审批权限 -->
       <div class="mode-pill">
         <button
           class="mode-btn"
           :class="{ active: store.viewMode === 'cowork' }"
-          title="协同助手模式：聚焦多轮对话与工具协作"
-          @click="store.viewMode = 'cowork'"
+          title="协同视图：边做边讲，每步说明意图与影响，需要取舍时按默认值继续并交代假设"
+          @click="store.setViewMode('cowork')"
         >
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3" />
@@ -115,10 +139,9 @@ function openTab(tab: string): void {
         <button
           class="mode-btn"
           :class="{ active: store.viewMode === 'code' }"
-          title="代码模式：聚焦项目文件、终端命令与代码编写"
-          @click="store.viewMode = 'code'"
-        >
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          title="代码视图：以代码/路径/命令为第一语言，直接改文件、给完整命令与真实输出，界面加宽并默认展开工具详情"
+          @click="store.setViewMode('code')"
+        >          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
             <path d="M5.5 5L2.5 8L5.5 11M10.5 5L13.5 8L10.5 11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
           代码
@@ -421,10 +444,26 @@ function openTab(tab: string): void {
 }
 
 .brand-lockup {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+/* 有新版本时的红点：点直达设置页更新区 */
+.update-dot {
+  position: absolute;
+  left: 26px;
+  top: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e5484d;
+  border: 2px solid var(--sidebar-bg);
+  cursor: pointer;
+  padding: 0;
+  z-index: 1;
 }
 
 .brand-mark {

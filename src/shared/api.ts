@@ -60,6 +60,8 @@ export interface ShangboApi {
     editQueued(conversationId: string, userMessageId: string, content: string): Promise<boolean>
     /** 撤回一条排队中的消息，同时删除其已落库的记录与图片。 */
     cancelQueued(conversationId: string, userMessageId: string): Promise<boolean>
+    /** 某会话的实时运行态快照；切回会话时用它重建运行态并对账。 */
+    runtimeState(conversationId: string): Promise<import('./types').ConversationRuntimeState>
     onEvent(handler: (event: AgentEvent) => void): void
     offEvent(): void
   }

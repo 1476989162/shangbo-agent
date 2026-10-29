@@ -19,6 +19,8 @@ export const IPC = {
 
   chatEditQueued: 'chat:editQueued',
   chatCancelQueued: 'chat:cancelQueued',
+  /** 某会话的实时运行态快照（切回会话时重建运行态用）。 */
+  chatRuntimeState: 'chat:runtimeState',
 
   agentEvent: 'agent:event',
 

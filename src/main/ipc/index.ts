@@ -223,6 +223,12 @@ export function registerIpcHandlers(): void {
     return true
   })
 
+  // 切回会话时对账用：主进程内存里的真实运行态（是否在跑、在等哪个审批、任务清单）
+  ipcMain.handle(IPC.chatRuntimeState, (_event, conversationId: unknown) => {
+    const id = z.string().min(1).parse(conversationId)
+    return agentRuntime.conversationRuntimeState(id)
+  })
+
   ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageId: string) =>
     agentRuntime.regenerate(assistantMessageId, agentRuntime.withBus(() => {}))
   )

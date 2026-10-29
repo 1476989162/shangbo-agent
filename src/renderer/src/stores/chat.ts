@@ -1,16 +1,19 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { shouldAutoApproveApproval } from '../components/approvalPresentation'
+import { mergeLiveBlocks, shouldAdoptStreamingLeaf } from '../lib/runtimeSnapshot'
 import type {
   AgentMode,
   AgentEvent,
   AutonomyLevel,
   ContentBlock,
   Conversation,
+  ConversationRuntimeState,
   ImageAttachment,
   Message,
   Provider,
-  TodoItem
+  TodoItem,
+  UsageMode
 } from '@shared/types'
 
 export interface ApprovalRequest {
@@ -131,7 +134,22 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // 仿 Claude Desktop 现代工程特性
-  const viewMode = ref<'cowork' | 'code'>('cowork')
+  /**
+   * 协同 / 代码视图：只影响系统提示倾向与界面排版，不改变审批权限。
+   * 落库到 ui.viewMode，重启后保持上次选择；旧版是纯内存 ref，重启就丢。
+   */
+  const viewMode = ref<UsageMode>('cowork')
+
+  async function setViewMode(mode: UsageMode): Promise<void> {
+    if (viewMode.value === mode) return
+    viewMode.value = mode
+    try {
+      await window.shangbo.settings.set('ui.viewMode', mode)
+    } catch (error) {
+      // 持久化失败不该拦住切换，本次会话内仍然生效
+      lastError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
   const sidebarCollapsed = ref(false)
   const userName = ref('Administrator')
   const currentBranch = ref('main')
@@ -469,6 +487,11 @@ export const useChatStore = defineStore('chat', () => {
           break
         }
         case 'todo_update':
+          // 后台会话也要记下任务清单：切回来后不必等一次 IPC 往返就能看到进度
+          todosByConversation.value = {
+            ...todosByConversation.value,
+            [event.conversationId]: event.items
+          }
           break
         case 'run_error':
         case 'message_done':
@@ -695,6 +718,85 @@ export const useChatStore = defineStore('chat', () => {
     await window.shangbo.settings.set('chat.model', model)
   }
 
+  /**
+   * 切回会话后与主进程内存态对账。
+   *
+   * 这是「切走再切回来进度就没了」这个 bug 的收口点：
+   * - 后台会话的流式增量事件在切走期间被丢弃，本地消息内容停在切走那一刻；
+   * - 主进程只在工具批次边界落库，DB 里的正文可能比实际进度更旧；
+   * - 挂起审批弹窗在 openConversation 里被清空，切回来就再也点不到。
+   * 因此这里直接读主进程的权威快照，把运行态、实时正文、任务清单与审批补齐。
+   */
+  async function reconcileRuntime(conversationId: string): Promise<void> {
+    let state: ConversationRuntimeState
+    try {
+      state = await window.shangbo.chat.runtimeState(conversationId)
+    } catch {
+      // 主进程不可用（旧版本 / 会话刚被删）时保持本地状态，不影响正常浏览
+      return
+    }
+    // 等待期间用户可能又切走了，别把别的会话的状态写进来
+    if (activeConversationId.value !== conversationId) return
+
+    if (state.runId) {
+      setRun(conversationId, {
+        runId: state.runId,
+        streamingMessageId: state.streamingMessageId,
+        queued: state.queued
+      })
+    } else {
+      // 主进程说它空闲：清掉可能残留的乐观运行态，否则输入框会一直显示「排队」
+      setRun(conversationId, null)
+    }
+
+    // 任务清单：后台会话的进度切回来后仍要可见
+    if (state.todos.length > 0) {
+      todosByConversation.value = { ...todosByConversation.value, [conversationId]: state.todos }
+    } else if (!state.runId) {
+      const next = { ...todosByConversation.value }
+      delete next[conversationId]
+      todosByConversation.value = next
+    }
+
+    // 挂起审批：切走期间弹窗被清掉，这里恢复，否则这一轮会一直卡在等确认
+    const pending = state.approvals[0]
+    if (pending && !approval.value) {
+      approval.value = {
+        runId: pending.runId,
+        toolUseId: pending.toolUseId,
+        name: pending.name,
+        input: pending.input,
+        reason: pending.reason,
+        severity: pending.severity,
+        autoApprovable: pending.autoApprovable
+      }
+    }
+
+    if (!state.streamingMessageId) return
+
+    // 把实时正文补进那条仍在流式输出的助手消息里。
+    // run_start 时主进程已把助手消息落库，openConversation 刚拉过一次，
+    // 正常情况下它就在本地；万一不在（拉取与快照之间存在竞态）再补拉一次。
+    let streaming = findMessage(state.streamingMessageId)
+    if (!streaming) {
+      const persisted = await window.shangbo.conversation.messages(conversationId)
+      if (activeConversationId.value !== conversationId) return
+      messages.value = persisted.messages
+      streaming = messages.value.find((item) => item.id === state.streamingMessageId)
+    }
+    if (streaming) {
+      streaming.blocks = mergeLiveBlocks(state.liveBlocks, streaming.blocks)
+      streaming.status = 'streaming'
+    }
+
+    // 助手消息要等本轮结束才会被主进程指为 activeLeaf，切回来时视图路径里
+    // 往往还没有它。这里按「当前叶子仍是它的父消息」补一次推进，
+    // 用户在生成期间手动切过分支的话不动他的选择。
+    if (streaming && shouldAdoptStreamingLeaf(state, activeLeafId.value, streaming.parentId)) {
+      activeLeafId.value = state.streamingMessageId
+    }
+  }
+
   async function openConversation(id: string): Promise<void> {
     if (!navigatingHistory) {
       if (historyIndex.value < historyStack.value.length - 1) {
@@ -716,6 +818,12 @@ export const useChatStore = defineStore('chat', () => {
     approval.value = null
     switchNotice.value = null
     retryInfo.value = null
+
+    // 关键：与主进程内存态对账。
+    // 切走期间该会话的流式增量事件被丢弃、正文又只在工具批次边界落库，
+    // 只读 DB 必然看到「还在跑但没有内容」。快照补齐运行态、实时内容、
+    // 任务清单与挂起审批，用户切回来就能接着看到进度。
+    await reconcileRuntime(id)
 
     // 更新分支信息
     const currentConv = conversations.value.find((c) => c.id === id)
@@ -1019,6 +1127,8 @@ export const useChatStore = defineStore('chat', () => {
       autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
       const savedHidden = settings['chat.hiddenModels'] as string[] | undefined
       if (Array.isArray(savedHidden)) hiddenModels.value = savedHidden
+      const savedViewMode = settings['ui.viewMode'] as UsageMode | undefined
+      if (savedViewMode === 'cowork' || savedViewMode === 'code') viewMode.value = savedViewMode
     } catch {
       // 忽略
     }
@@ -1056,6 +1166,7 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming,
     activeConversation,
     viewMode,
+    setViewMode,
     sidebarCollapsed,
     userName,
     currentBranch,

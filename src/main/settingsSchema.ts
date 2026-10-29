@@ -23,6 +23,10 @@ export const SettingSchemas: Record<string, z.ZodType> = {
     .int()
     .min(1, '许愿模式步数上限需为 1–500 之间的整数')
     .max(500, '许愿模式步数上限需为 1–500 之间的整数'),
+  // 目标驱动：打开后不再按步数熔断，跑到模型自己收手为止（防打转保险丝与手动停止仍在）。
+  'agent.unlimitedSteps': z.boolean(),
+  // 子任务模型：空=跟随父会话；否则为 `${providerId}::${model}`，由设置页下拉写入。
+  'agent.subagent.target': z.string().max(300),
   'agent.toolResultMaxChars': z
     .number()
     .int()
@@ -74,6 +78,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.effort': z.string().max(50),
   'agent.mode': z.string().max(50),
   'agent.workRole': z.string().max(200),
+  // 侧边栏协同 / 代码视图：决定系统提示的行为倾向与界面排版，不改变审批权限
+  'ui.viewMode': z.enum(['cowork', 'code']),
   'agent.chatFont': z.string().max(100),
   'app.theme': z.string().max(50),
   'chat.model': z.string().max(200),

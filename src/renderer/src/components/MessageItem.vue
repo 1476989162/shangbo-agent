@@ -11,7 +11,10 @@ const props = defineProps<{
   branch?: BranchInfo | null
   /** 该消息还在队列里没轮到生成回复 */
   queued?: boolean
+  /** 当前视图：代码视图下工具调用详情默认展开，省一次点击 */
+  workMode?: 'cowork' | 'code'
 }>()
+
 const emit = defineEmits<{
   regenerate: [messageId: string]
   switchBranch: [messageId: string]
@@ -191,40 +194,31 @@ const liveWorkingIcon = computed(() => {
   return '⚡'
 })
 
-/** 当前实时工作状态描述 */
+/** 当前实时工作状态描述：执行中只分“操作中 / 思考中”，不刷具体工具名。 */
 const liveWorkingStatus = computed(() => {
   if (!isStreaming.value) return null
 
-  // 1. 如果最后一个元素是工具且尚未返回结果：说明正在执行本机工具
   const lastItem = renderItems.value[renderItems.value.length - 1]
+  // 工具尚未返回结果：在动手（读/写/跑命令/调 MCP 都一样）。
   if (lastItem && lastItem.kind === 'tool' && !lastItem.result) {
-    const target = summarizeInput(lastItem.name, lastItem.input)
-    if (lastItem.name === 'read_file') return `正在读取文件: ${target || '…'}`
-    if (lastItem.name === 'write_file') return `正在写入文件: ${target || '…'}`
-    if (lastItem.name === 'patch_file') return `正在精确修改代码: ${target || '…'}`
-    if (lastItem.name === 'run_command') return `正在执行终端命令: ${target || '…'}`
-    if (lastItem.name === 'list_directory') return `正在检索工程目录: ${target || '…'}`
-    return `正在执行工具: ${lastItem.name}…`
+    return '操作中…'
   }
 
-  // 2. 如果最新块是思考块，且当前还在流式接收
   const lastBlock = props.message.blocks[props.message.blocks.length - 1]
   if (lastBlock && lastBlock.type === 'reasoning') {
-    return '正在深度思考推导与规划中…'
+    return '思考中…'
   }
 
-  // 3. 如果上一个工具刚刚执行完毕，正在交接给大模型分析结果并写后续代码
+  // 工具刚执行完，交接给模型分析结果并规划下一步。
   if (lastItem && lastItem.kind === 'tool' && lastItem.result) {
-    const target = summarizeInput(lastItem.name, lastItem.input)
-    return `已完成 ${lastItem.name}${target ? ` (${target})` : ''}，正在分析并规划下一步…`
+    return '思考中…'
   }
 
-  // 4. 起始状态或两步交接状态
   if (renderItems.value.length === 0) {
-    return '正在分析任务并组织执行步骤…'
+    return '思考中…'
   }
 
-  return '正在处理中，请稍候…'
+  return '操作中…'
 })
 
 const usageLabel = computed(() => {
@@ -314,7 +308,7 @@ function toolTarget(name: string, input: unknown): string {
 }
 
 function toolStatus(item: Extract<RenderItem, { kind: 'tool' }>): string {
-  if (!item.result) return '执行中'
+  if (!item.result) return '操作中'
   if (item.result.isError) return '失败'
   return '完成'
 }
@@ -477,9 +471,8 @@ async function copy(): Promise<void> {
             v-else
             class="codex-activity tool-activity"
             :class="[toolKindClass(item.name), { failed: item.result?.isError }]"
-            :open="!item.result"
-          >
-            <summary>
+            :open="props.workMode === 'code' || !item.result"
+          >            <summary>
               <span class="activity-glyph">{{ toolIcon(item.name) }}</span>
               <span class="activity-title">{{ toolAction(item.name) }}</span>
               <span v-if="toolTarget(item.name, item.input)" class="activity-preview mono">

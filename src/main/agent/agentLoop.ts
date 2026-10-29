@@ -23,7 +23,8 @@ import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { buildTaskContract, classifyIntent, matchTaskPlaybook } from './intent'
 import { listLessons, markLessonsUsed } from '../autonomous/store'
 import { resolveAgentMode } from './wishMode'
-import type { AgentMode } from '../../shared/types'
+import { buildWorkModeDirective } from './workMode'
+import type { AgentMode, UsageMode } from '../../shared/types'
 import type { ToolOutcome } from './toolOutcome'
 import {
   appendBlock,
@@ -73,8 +74,11 @@ export async function runAgentLoop(
   target: { providerId?: string | null; model?: string | null },
   emit: LoopEmitter,
   controller: AbortController,
-  /** runtime 已按自然语言判定好的模式；缺省时按会话声明与意图兜底。 */
-  options?: { effectiveMode?: AgentMode }
+  /**
+   * runtime 已按自然语言判定好的模式；缺省时按会话声明与意图兜底。
+   * workMode 是发送时用户选的协同 / 代码视图，只影响提示词倾向，不影响工具权限。
+   */
+  options?: { effectiveMode?: AgentMode; workMode?: UsageMode | null }
 ): Promise<void> {
     const resolved = resolveTarget(
       target.providerId,
@@ -262,11 +266,23 @@ export async function runAgentLoop(
     // 用户若切到许愿模式，就明确表示要落盘和验证。
     const readOnly = agentMode !== 'wish' && getSetting<boolean>('agent.readOnly', false)
     if (readOnly) system += '\n\n【只读复查】只允许读取与搜索文件，禁止写入、修改与执行命令；输出问题清单即可，不要尝试改动。'
+    // 协同 / 代码视图：只调表达与默认动作顺序，绝不改工具清单或审批范围。
+    // 优先用本轮显式传入的 workMode；没有时回退到落库的 usageMode，历史消息无记录则不注入。
+    const workModeDirective = buildWorkModeDirective({
+      workMode: options?.workMode ?? userMessage.usageMode ?? null,
+      workingDirectory: conversation.workingDir,
+      readOnly,
+      conversationMode: agentMode
+    })
+    if (workModeDirective) system += `\n${workModeDirective}`
     // 保险丝灵敏度：连续几次打转就停，默认 3。
     const stuckCfg = getSetting<number>('agent.stuckLimit', 3)
     const effectiveStuckLimit = typeof stuckCfg === 'number' && stuckCfg > 0 ? stuckCfg : 3
     // 步数上限：防止模型换参试错无限烧 Token，默认 50 轮请求后暂停。loopGuard 只拦"打转"，
     // 正常干活 50 步也会触发——这是成本熔断，不是行为判断。到顶复用 guardNotice 提示用户。
+    // 目标驱动（agent.unlimitedSteps=true）时跳过熔断：跑到模型自己收手为止，
+    // 兜底只剩 loopGuard 打转保险丝与手动停止，与 Claude Code 本体一致。
+    const unlimitedSteps = getSetting<boolean>('agent.unlimitedSteps', false)
     const maxStepsCfg =
       agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)
         ? getSetting<number>('agent.wishMaxSteps', 120)
@@ -322,8 +338,9 @@ export async function runAgentLoop(
           status = 'aborted'
           break
         }
-        // 成本熔断：超过 maxSteps 轮请求即暂停，提示用户回复"继续"接力
-        if (stepCount >= effectiveMaxSteps) {
+        // 成本熔断：超过 maxSteps 轮请求即暂停，提示用户回复"继续"接力。
+        // unlimitedSteps 打开时跳过（目标驱动，只靠打转保险丝 + 手动停止）。
+        if (!unlimitedSteps && stepCount >= effectiveMaxSteps) {
           stoppedByGuard = true
           const guardNotice = `\n\n_（已达到单轮步数上限（${effectiveMaxSteps} 步），先停下来请人看一眼，不要继续烧 Token。排除问题后回复「继续」。）_`
           appendBlock(blocks, { type: 'text', text: guardNotice })

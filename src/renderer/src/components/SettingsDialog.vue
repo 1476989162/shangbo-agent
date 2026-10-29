@@ -115,6 +115,39 @@ async function setAutonomyLevel(level: 'strict' | 'balanced' | 'trusted'): Promi
   }
 }
 
+// 目标驱动与子任务模型
+const unlimitedSteps = ref(false)
+const subagentTarget = ref('')
+
+/** 子任务模型下拉：跟随主模型 + 已启用供应商的可见模型。 */
+const subagentModelOptions = computed(() =>
+  store.usableProviders.flatMap((provider) =>
+    provider.models
+      .filter((model) => !store.isModelHidden(provider.id, model))
+      .map((model) => ({
+        value: `${provider.id}::${model}`,
+        label: `${model}（${provider.name}）`
+      }))
+  )
+)
+
+async function toggleUnlimitedSteps(): Promise<void> {
+  await window.shangbo.settings.set('agent.unlimitedSteps', unlimitedSteps.value)
+  feedback.value = {
+    ok: true,
+    message: unlimitedSteps.value
+      ? '已开启目标驱动：不再按步数熔断，兜底只剩打转保险丝与手动停止。'
+      : '已关闭目标驱动：恢复按步数熔断。'
+  }
+}
+
+async function saveSubagentTarget(): Promise<void> {
+  await window.shangbo.settings.set('agent.subagent.target', subagentTarget.value)
+  feedback.value = {
+    ok: true,
+    message: subagentTarget.value ? `子任务模型已设为 ${subagentTarget.value}` : '子任务模型已恢复跟随主模型'
+  }
+}
 // 许愿模式
 const wishEnabled = ref(true)
 const wishAutoApproveWorkspace = ref(true)
@@ -383,6 +416,8 @@ async function load(): Promise<void> {
   autonomyLevel.value =
     (settings['agent.autonomy'] as 'strict' | 'balanced' | 'trusted') ?? 'balanced'
   autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
+  unlimitedSteps.value = (settings['agent.unlimitedSteps'] as boolean) ?? false
+  subagentTarget.value = (settings['agent.subagent.target'] as string) ?? ''
   wishEnabled.value = (settings['agent.wish.enabled'] as boolean) ?? true
   wishAutoApproveWorkspace.value =
     (settings['agent.wish.autoApproveWorkspace'] as boolean) ?? true
@@ -1452,9 +1487,41 @@ async function toggleAutoScreenshot(): Promise<void> {
 
           <div class="divider" />
 
-          <!-- Agent 执行与安全策略 (步数上限已移除：循环到模型收手为止，防打转只靠行为保险丝) -->
+          <!-- Agent 执行与安全策略 -->
           <div class="section-block">
             <h3 class="pane-title">执行与安全策略 (Execution & Safety)</h3>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">目标驱动（不限步数）</span>
+                <span class="row-sub">
+                  打开后不再按步数熔断，跑到模型自己收手为止。兜底只剩打转保险丝与手动停止，长任务烧 Token 会更多。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input v-model="unlimitedSteps" type="checkbox" @change="toggleUnlimitedSteps" />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">子任务模型</span>
+                <span class="row-sub">
+                  派生子任务用的模型，默认跟随主模型。选项来自已启用的供应商。
+                </span>
+              </div>
+              <select v-model="subagentTarget" class="submodal-input" @change="saveSubagentTarget">
+                <option value="">跟随主模型</option>
+                <option
+                  v-for="option in subagentModelOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
 
             <div class="setting-row">
               <div class="row-text">

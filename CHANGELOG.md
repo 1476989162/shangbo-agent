@@ -2,10 +2,42 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.8.0] - 2026-10-29
+
+### 新增
+
+- **目标驱动（不限步数）**：新设置 `agent.unlimitedSteps`（默认关），打开后跳过按步数熔断，跑到模型自己收手为止。兜底只剩 loopGuard 打转保险丝与手动停止，与 Claude Code 本体一致。代价是长任务烧 Token 更多，设置页已明示。
+- **子任务模型可指定**：新设置 `agent.subagent.target`（空=跟随主模型），设置页执行区下拉选择，选项来自已启用供应商的可见模型。非法值回落跟随，不炸轮。
+- **Magpie 识图/生图 MCP**：新增 Streamable HTTP 传输入口（`HttpMcpClient`），预置 `magpie-vision` / `magpie-image` 两服务（默认关闭，用户手动启用）。key 复用网关 `magpie`，无需另填；生图超时 10 分钟。
+- **升级提醒显眼化**：有新版本（available/downloading/ready）时侧边栏品牌区挂红点，点击直达设置页更新区。安装仍需确认，不会自动重启。
+- **工具过程文案收敛**：执行中统一显示“操作中…”/“思考中…”，不再刷“写入文件/读取文件”；工具行状态“执行中”改“操作中”。历史展开仍能看到具体工具名。
+- **任务清单可折叠**：默认收起只留进度（13/13），点标题展开看明细。
+
+### 变更
+
+- **协同 / 代码视图从「只打统计标签」变成真功能**：此前侧边栏这两个按钮只做两件事——给消息落库时打一个 `usage_mode` 标签（供用量统计分类），以及给 `<main>` 挂一个**没有任何样式定义**的 `code-mode` class。也就是说切过去界面像素级不变、Agent 行为也不变，重启后还会回到「协同」。现在：
+  - **提示词层生效**：新增 `src/main/agent/workMode.ts` 的 `buildWorkModeDirective()`，把视图翻译成行为倾向注入系统提示。协同视图要求边做边讲、每步说明意图与影响、需要取舍时按默认值继续并交代假设；代码视图要求以代码/路径/命令为第一语言、直接落盘（优先 `patch_file`）、结论用「文件:行号 + 改了什么 + 为什么」、命令给完整可复制形式并贴真实输出。
+  - **界面层生效**：`.chat.code-mode` 补上样式——对话栏取消 780px 上限并加宽内边距、助手正文改等宽字体；`MessageItem` 新增 `work-mode` prop，代码视图下工具调用详情默认展开。
+  - **持久化**：新增设置键 `ui.viewMode`（白名单登记，`z.enum(['cowork','code'])`），切换即写库，`bootstrap` 时恢复。旧版是纯内存 `ref`，重启即丢。
+  - **权限边界不动**：视图模式只影响表达与默认动作顺序，**不新增、不放开任何工具**。放行范围仍由自治等级与安全分级决定，硬红线在任何视图下都需人工确认——避免"切个视图就悄悄放宽审批"。
+  - **降级优先级**：`agent.readOnly`（只读复查）与 `agent.mode = chat`（纯讨论）优先于视图指令。代码视图在只读下只给「文件:行号」的问题与改法，不再要求动手；纯讨论模式下协同视图也不注入"不要用建议代替执行"，否则会与 chat 模式直接冲突。
+  - 历史消息没有 `usage_mode` 记录时不注入任何视图指令，不做猜测。
+  - 新增 `src/main/agent/workMode.test.ts`（6 例）覆盖上述分支；`docs/功能说明.md` 补上两视图的真实差异对照表。
+
+
+## [0.7.1] - 2026-10-29
+
+会话运行态修复版本：切走再切回，进度不再消失。
 
 ### 修复
 
+- **运行中的会话切走再切回，进度全丢**（三层叠加的真实 bug）：
+  1. 渲染层切走后直接丢弃后台会话的流式增量事件（`text_delta` / `tool_use` / `tool_result` 等），只保留「在跑」这个粗状态，本地正文停在切走那一刻；
+  2. 主进程的流式正文只在**工具批次边界**落库（`agentLoop` 的阶段性 `updateMessage`），两次工具之间的正文在 DB 里仍是空块；
+  3. `openConversation` 只读 DB 重建视图，于是切回来看到「还在跑，但一片空白」；并且它把 `approval` 清成 null，**挂起中的审批弹窗一并丢失**，这一轮会一直卡在等确认；助手消息又要等本轮结束才被指为 `activeLeaf`，切回时视图路径里根本没有它。
+- **修复方式**：主进程新增权威运行态快照 `conversationRuntimeState()`（新 IPC 通道 `chat:runtimeState`），下发 `runId / streamingMessageId / queued / todos / approvals / liveBlocks`；`openConversation` 末尾与快照对账，重建运行态、补齐实时正文、任务清单与挂起审批，并按「当前叶子仍是它的父消息」补推视图——用户在生成期间手动切过分支则不打断他的选择。
+- **实时正文的内存副本**：`AgentRuntime` 新增 `liveBlocks`，在 `startRun` 里统一包一层跟踪（刻意不放在 `withBus` 里，否则裸 emit 的调用路径覆盖不到、且正文会被追加两次）。会话空闲时快照报 `runId=null`、`liveBlocks=[]`，不会留下一条永远不动的空消息。
+- **后台会话的任务清单**：切走期间收到的 `todo_update` 也记进 `todosByConversation`，切回来不必等一次 IPC 往返就能看到进度。
 - **Token 用量统计输入侧恒为 0**：`openai.ts` 此前对每帧 `usage` 做整体覆盖，而部分兼容网关会在中间帧只带 `completion_tokens`、末尾帧把 `prompt_tokens` 写回 0，覆盖后整段输入统计丢失，UI 上表现为「累计输入 0 / 累计输出 N」的自相矛盾（总消耗恰好等于输出量）。改为逐帧合并：仅在本帧字段真实存在时才更新，累计值取单调最大值，回退值按脏数据丢弃。
 - **DeepSeek 缓存拆分回填**：DeepSeek 系返回 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 而非 `prompt_tokens`，此前只映射到 `cacheRead/cacheWrite`，导致 `promptTokens` 恒为 0。现在在 `prompt_tokens` 缺失或为 0 时用两者之和回填输入侧。
 - **输入侧失真留痕**：`agentLoop` 在收到「输入 0 / 输出 > 0」的 usage 时打 warn 日志，便于区分「网关不返回 prompt_tokens」与「本地统计算错」，不再静默失真。
@@ -21,6 +53,17 @@
 
 - 三条硬红线、`agent.readOnly`、外部 MCP 逐次审批在建造者/问答模式下**行为不变**；本次只放宽许愿模式这一条路径，且放宽点由设置开关显式控制，可一键回到旧行为（关掉「允许调用 MCP」）。
 - 白名单匹配按服务 id 精确比对（`mcp__服务__工具` 解析），不做前缀或子串匹配，避免 `mcp__playwright_evil__x` 之类命名蹭白名单。
+
+### 测试
+
+- 新增 `runtimeState.test.ts`：锁定「DB 里 assistant 消息 `blocks` 仍为空、但快照 `liveBlocks` 有正文」——正是用户报告的现象；另测空闲快照为 null、本轮收尾后实时副本被清理。
+- 新增 `runtimeSnapshot.test.ts`：覆盖 `mergeLiveBlocks` 合并策略（本地更新则保留本地、落后则以快照为准）与 `shouldAdoptStreamingLeaf` 视图推进条件。
+- 全量 52 个测试文件 / 356 个用例通过；`typecheck`（node + web）与 `build` 通过。
+
+### 风险
+
+- `liveBlocks` 是纯内存副本，主进程重启即失效；重启后由启动时的 `settleOrphanStreamingMessages` 把 streaming 收敛为 aborted，与原有行为一致。
+- `trackedEmit` 依赖 `startRun` 被调用；将来若新增绕过队列直连 `execute()` 的路径，需在那里也包一层。
 
 ## [0.7.0] - 2026-10-28
 

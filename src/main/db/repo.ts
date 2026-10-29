@@ -244,6 +244,22 @@ export function listChildren(messageId: string): Message[] {
   return rows.map(toMessage)
 }
 
+/**
+ * 该会话当前仍在流式输出的助手消息 id（切回会话时恢复「生成中」状态用）。
+ * 流式正文只在工具批次边界落库，中途 DB 里的正文是空的，因此「有没有在跑」
+ * 只能靠消息状态判断，不能靠有没有正文判断。
+ */
+export function findStreamingAssistantMessageId(conversationId: string): string | null {
+  const row = getDb()
+    .prepare(
+      `SELECT id FROM messages
+       WHERE conversation_id = ? AND role = 'assistant' AND status = 'streaming'
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(conversationId) as { id: string } | undefined
+  return row?.id ?? null
+}
+
 /** 该会话树上最新一条消息的 id（排队消息落库时作为临时挂载点）。 */
 export function getLatestMessageId(conversationId: string): string | null {
   const row = getDb()

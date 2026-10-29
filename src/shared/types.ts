@@ -482,6 +482,41 @@ export interface ApprovalDecision {
   alwaysAllow?: boolean
 }
 
+/**
+ * 某会话的实时运行态快照（主进程权威来源）。
+ *
+ * 渲染层切走会话期间只维护内存里的运行态，一旦渲染层状态丢失或消息内容
+ * 落后于主进程，切回来就会显示「没有进度」。openConversation 用这份快照
+ * 重建运行态，不依赖历史事件是否被完整收到。
+ */
+export interface ConversationRuntimeState {
+  conversationId: string
+  /** 正在跑（或排队中最新）的 runId；null 表示该会话空闲。 */
+  runId: string | null
+  /** 正在流式输出的助手消息 id，用于切回来后继续渲染「生成中」。 */
+  streamingMessageId: string | null
+  /** 该会话队列里还剩几项（不含正在跑的那一轮）。 */
+  queued: number
+  /** 正在跑那一轮的实时任务清单。 */
+  todos: TodoItem[]
+  /**
+   * 正在流式输出的助手消息的实时内容块。
+   * 流式正文只在工具批次边界落库，切回会话时 DB 里可能还是空的，
+   * 靠这份内存副本才能立刻看到已生成的内容，而不是「还在跑但一片空白」。
+   */
+  liveBlocks: ContentBlock[]
+  /** 该会话挂起中的审批（切走期间弹窗不会丢）。 */
+  approvals: {
+    runId: string
+    toolUseId: string
+    name: string
+    input: unknown
+    reason: string
+    severity: 'normal' | 'critical'
+    autoApprovable: boolean
+  }[]
+}
+
 /* ------------------------------------------------------------------ */
 /* 应用信息                                                            */
 /* ------------------------------------------------------------------ */

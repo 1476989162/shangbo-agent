@@ -372,6 +372,7 @@ const capabilities = [
             :is-last="message.id === lastAssistantId && !store.isStreaming"
             :branch="branchInfo(message)"
             :queued="message.role === 'user' && message.status !== 'aborted' && !hasAssistantReply(message.id)"
+            :work-mode="store.viewMode"
             @regenerate="store.regenerate"
             @switch-branch="store.switchBranch"
             @edit="onEdit"
@@ -427,6 +428,21 @@ const capabilities = [
   height: 100%;
   background: var(--bg);
   position: relative;
+}
+
+/*
+ * 代码视图的排版差异：对话栏放宽、正文改等宽字体、隐藏欢迎仪表盘里的大块装饰。
+ * 只改视觉，不改变任何工具权限——权限由自治等级与安全分级决定。
+ */
+.chat.code-mode .chat-column {
+  max-width: none;
+  padding: 0 32px;
+}
+
+.chat.code-mode :deep(.message-assistant .markdown) {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.62;
 }
 
 /* 顶部导航 */

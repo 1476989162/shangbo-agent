@@ -1,6 +1,7 @@
 import log from 'electron-log/main'
 import { getSetting } from '../settings'
 import { McpClient } from './client'
+import { HttpMcpClient } from './httpClient'
 import type { ToolSchema } from '../providers/types'
 
 /**
@@ -18,6 +19,10 @@ export interface McpServerConfig {
   args: string[]
   env?: Record<string, string>
   enabled: boolean
+  /** Streamable HTTP 传输入口：填了就走 HTTP，不再拉子进程（Magpie 识图/生图即此类）。 */
+  url?: string
+  /** HTTP 模式的 Authorization 头；缺省复用网关密钥，无需另填。 */
+  bearerKey?: string
 }
 
 const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx'
@@ -26,6 +31,7 @@ const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx'
  * 内置服务（已实测协议，逐个加，不靠猜写死）。
  * 已接入：memory、fetch、playwright（25 工具）、github（45 工具）、chrome-devtools（30 工具）、context7（2 工具）、duckduckgo（1 工具）、docker（网关 8 工具）。
  * 全部经 handshake + tools/list 实测。
+ * 识图 / 生图走 Magpie 网关的 Streamable HTTP（url 模式，不拉子进程）。
  */
 export const BUILTIN_MCP_SERVERS: McpServerConfig[] = [
   {
@@ -84,6 +90,22 @@ export const BUILTIN_MCP_SERVERS: McpServerConfig[] = [
     command: 'docker',
     args: ['mcp', 'gateway', 'run', '--transport', 'stdio'],
     enabled: true
+  },
+  {
+    id: 'magpie-vision',
+    name: 'Magpie 识图',
+    command: '',
+    args: [],
+    url: 'http://127.0.0.1:34254/mcp/magpie/vision',
+    enabled: false
+  },
+  {
+    id: 'magpie-image',
+    name: 'Magpie 生图',
+    command: '',
+    args: [],
+    url: 'http://127.0.0.1:34254/mcp/magpie/image',
+    enabled: false
   }
 ]
 
@@ -128,13 +150,14 @@ export function loadServerConfigs(): McpServerConfig[] {
   const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
   const legacy = getSetting<string[] | null>('agent.mcpServers', null)
   return configured
-    .filter((s) => s && s.id && s.command)
+    // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
+    .filter((s) => s && s.id && (s.url || s.command))
     .map((s) => ({ ...s, id: slug(s.id) }))
     .filter((s) => s.enabled && (!Array.isArray(legacy) || legacy.includes(s.id)))
 }
 
 interface LiveServer {
-  client: McpClient
+  client: McpClient | HttpMcpClient
   tools: { name: string; description?: string; inputSchema: Record<string, unknown> }[]
 }
 
@@ -173,7 +196,7 @@ export class McpManager {
     }[] = []
     // 关掉的服务不拉进程，直接标 disabled（不验证死活）。
     const all = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
-      .filter((s) => s && s.id && s.command)
+      .filter((s) => s && s.id && (s.url || s.command))
       .map((s) => ({ ...s, id: slug(s.id) }))
     const legacy = getSetting<string[] | null>('agent.mcpServers', null)
     for (const config of all) {
@@ -275,6 +298,16 @@ export class McpManager {
     if (ongoing) return ongoing
     const task = (async (): Promise<LiveServer | null> => {
       try {
+        // url 模式（Magpie 识图/生图）：走 Streamable HTTP，不拉子进程。
+        if (config.url) {
+          const client = await HttpMcpClient.start({ url: config.url, bearerKey: config.bearerKey })
+          const tools = await client.listTools()
+          const live: LiveServer = { client, tools }
+          this.live.set(config.id, live)
+          this.lastError.delete(config.id)
+          log.info(`[mcp] 服务已就绪：${config.name}（${tools.length} 个工具）`)
+          return live
+        }
         const { env, missing } = resolveEnv(config.env ?? {})
         if (missing.length > 0) {
           log.warn(`[mcp] ${config.name} 缺少环境变量（${missing.join('、')}），已跳过：请设置后重启应用`)

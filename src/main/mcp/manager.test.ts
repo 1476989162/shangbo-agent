@@ -39,10 +39,29 @@ describe('MCP 服务管理器', () => {
     const ids = BUILTIN_MCP_SERVERS.map((s) => s.id)
     expect(ids).toEqual(expect.arrayContaining(['memory', 'fetch', 'playwright', 'github', 'chrome-devtools', 'context7', 'duckduckgo', 'docker']))
     for (const s of BUILTIN_MCP_SERVERS) {
-      expect(s.command.length).toBeGreaterThan(0)
-      expect(s.args.length).toBeGreaterThan(0)
+      // stdio 要求 command，Streamable HTTP（magpie-vision/image）要求 url
+      expect(s.url || s.command).toBeTruthy()
+      // Magpie 识图/生图默认关闭：网关不一定开着，用户手动启用
+      if (s.id === 'magpie-vision' || s.id === 'magpie-image') {
+        expect(s.enabled).toBe(false)
+        continue
+      }
       expect(s.enabled).toBe(true)
     }
+  })
+
+  it('Magpie 识图/生图走 HTTP，默认关闭', () => {
+    const vision = BUILTIN_MCP_SERVERS.find((s) => s.id === 'magpie-vision')
+    const image = BUILTIN_MCP_SERVERS.find((s) => s.id === 'magpie-image')
+    expect(vision?.url).toBe('http://127.0.0.1:34254/mcp/magpie/vision')
+    expect(image?.url).toBe('http://127.0.0.1:34254/mcp/magpie/image')
+    expect(vision?.enabled).toBe(false)
+    expect(image?.enabled).toBe(false)
+    expect(mcpToolName('magpie-image', 'generate_image')).toBe('mcp__magpie-image__generate_image')
+    expect(parseMcpToolName('mcp__magpie-image__generate_image')).toEqual({
+      serverId: 'magpie-image',
+      toolName: 'generate_image'
+    })
   })
 
   it('环境变量展开：缺失的变量点名报告', () => {

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+﻿import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,6 +27,7 @@ import type {
   ContentBlock,
   ContextStatics,
   Conversation,
+  ConversationRuntimeState,
   Message,
   MessageStatus,
   Usage
@@ -98,6 +99,15 @@ export class AgentRuntime {
   private runModes = new Map<string, AgentMode>()
 
   /**
+   * 会话 id → 正在流式输出的助手消息的实时内容块。
+   *
+   * 流式正文只在工具批次边界落库（agentLoop 的阶段性 updateMessage），
+   * 中途 DB 里可能是空的。切走再切回时若只读 DB，就会看到「还在跑但没内容」。
+   * 这里在主进程内存里维护权威副本，运行态快照直接下发它。
+   */
+  private liveBlocks = new Map<string, { messageId: string; blocks: ContentBlock[] }>()
+
+  /**
    * 事件总线订阅（阶段1/阶段3共用）。
    * AgentRuntime 内部不再直接依赖 IPC：每次 emit 都经过 withBus 包装，
    * 自动 publish 到总线，桌面窗口与远程模块各自订阅。
@@ -118,8 +128,77 @@ export class AgentRuntime {
   }
 
   /**
-   * 统一的生命周期包装：失败发 run_error，结束必发 run_end。
+   * 包一层实时内容跟踪。
    *
+   * 跟踪放在这里而不是 withBus 里：withBus 只覆盖「经总线广播」的生产接线，
+   * 单元测试与内部直连（autonomous 等）传的是裸 emit，只有在这里包才能全覆盖。
+   * 也正因为要唯一跟踪点，withBus 里刻意不做同样的事，否则正文会被追加两次。
+   */
+  private trackedEmit(emit: Emitter): Emitter {
+    return (event) => {
+      this.trackLiveBlocks(event)
+      emit(event)
+    }
+  }
+
+  /** 累积本轮实时内容块；与 agentLoop 的 appendBlock 同语义（相邻同类块合并）。 */
+  private trackLiveBlocks(event: AgentEvent): void {
+    switch (event.type) {
+      case 'run_start': {
+        this.liveBlocks.set(event.conversationId, {
+          messageId: event.assistantMessageId,
+          blocks: []
+        })
+        return
+      }
+      case 'text_delta':
+      case 'reasoning_delta': {
+        const live = this.liveBlocks.get(event.conversationId)
+        if (!live || live.messageId !== event.messageId) return
+        const last = live.blocks[live.blocks.length - 1]
+        if (event.type === 'text_delta') {
+          if (last?.type === 'text') last.text += event.text
+          else live.blocks.push({ type: 'text', text: event.text })
+        } else {
+          if (last?.type === 'reasoning') last.text += event.text
+          else live.blocks.push({ type: 'reasoning', text: event.text })
+        }
+        return
+      }
+      case 'tool_use': {
+        const live = this.liveBlocks.get(event.conversationId)
+        if (!live || live.messageId !== event.messageId) return
+        live.blocks.push({
+          type: 'tool_use',
+          id: event.toolUseId,
+          name: event.name,
+          input: event.input
+        })
+        return
+      }
+      case 'tool_result': {
+        const live = this.liveBlocks.get(event.conversationId)
+        if (!live || live.messageId !== event.messageId) return
+        live.blocks.push({
+          type: 'tool_result',
+          toolUseId: event.toolUseId,
+          content: event.content,
+          isError: event.isError
+        })
+        return
+      }
+      case 'message_done':
+      case 'run_error':
+      case 'run_end': {
+        // 本轮收尾：实时副本已落库，内存副本没有保留价值
+        this.liveBlocks.delete(event.conversationId)
+        return
+      }
+    }
+  }
+
+  /**
+   * 统一的生命周期包装：失败发 run_error，结束必发 run_end。
    * 收尾顺序很关键：先把自己从 runs 里摘掉，再推进队列。
    * 反过来的话 isRunning 仍为 true，队列里的下一轮会被当成「排队」塞回去，
    * 永远起不来——同会话第二条消息就再也不会被回复。
@@ -196,6 +275,8 @@ export class AgentRuntime {
 
   /** 真正启动一轮：登记占用、在微任务里执行，结束后让出执行权。 */
   private startRun(item: QueuedRun): void {
+    // 在这里包跟踪，保证无论调用方怎么构造 emit，实时内容都被记下来
+    item.emit = this.trackedEmit(item.emit)
     this.runs.set(item.runId, {
       controller: new AbortController(),
       conversationId: item.conversationId,
@@ -286,10 +367,10 @@ export class AgentRuntime {
         // 读 self.payload 而非闭包捕获的入参：编辑排队消息改的是队列项，
         // 捕获入参会让编辑完全不生效
         const fresh = repo.getMessage(self.userMessageId) ?? userMessage
-        await this.executeSend(runId, self.payload, fresh, emit, controller)
+        // 用 self.emit 而不是外层捕获的 emit：startRun 会给它包一层实时内容跟踪
+        await this.executeSend(runId, self.payload, fresh, self.emit, controller)
       }
-    }, busy ? { userMessage } : null)
-  }
+    }, busy ? { userMessage } : null)  }
 
   /**
    * 重新生成：为同一条用户消息再挂一个助手兄弟节点，形成新的分支。
@@ -318,7 +399,7 @@ export class AgentRuntime {
         content: userMessage.blocks.find((b) => b.type === 'text')?.text ?? ''
       },
       emit,
-      start: async () => {
+      start: async (self) => {
         const controller = this.runs.get(runId)?.controller ?? new AbortController()
         const conversation = repo.getConversation(conversationId)
         if (!conversation) throw new Error('会话不存在或已被删除')
@@ -329,7 +410,8 @@ export class AgentRuntime {
           conversation,
           userMessage,
           { providerId: assistantMessage.providerId, model: assistantMessage.model },
-          emit,
+          // 同 send：用队列项的 emit，才能带上实时内容跟踪
+          self.emit,
           controller
         )
       }
@@ -548,6 +630,47 @@ export class AgentRuntime {
     return this.approvalBroker.list()
   }
 
+  /**
+   * 某会话的实时运行态快照。
+   *
+   * 渲染层切换会话时本地状态会被重建，事件流也可能在中途丢失（渲染层重载、
+   * 缓冲上限截断）。这份快照直接读主进程内存，是「这一轮到底还在不在跑、
+   * 在等哪个审批、任务清单到哪一步」的权威答案，用于切回会话后对账。
+   */
+  conversationRuntimeState(conversationId: string): ConversationRuntimeState {
+    const running = [...this.runs.values()].find((run) => run.conversationId === conversationId)
+    const runId = running?.runId ?? null
+    const approvals = this.approvalBroker
+      .list()
+      .filter((item) => item.conversationId === conversationId)
+      .map((item) => ({
+        runId: item.runId,
+        toolUseId: item.toolUseId,
+        name: item.toolName,
+        input: item.input,
+        reason: item.reason,
+        severity: item.severity,
+        autoApprovable: item.autoApprovable
+      }))
+
+    // 没有在跑的回合就不该报 streamingMessageId，否则切回来会挂着一个永远不动的空消息
+    const streamingId = runId ? repo.findStreamingAssistantMessageId(conversationId) : null
+
+    return {
+      conversationId,
+      runId,
+      streamingMessageId: streamingId,
+      queued: this.queueLength(conversationId),
+      todos: runId ? getTodoItems(runId) : [],
+      approvals,
+      /** 正在流式输出的实时内容（DB 里可能还是空的，切回会话靠它续显）。 */
+      liveBlocks:
+        streamingId && this.liveBlocks.get(conversationId)?.messageId === streamingId
+          ? [...(this.liveBlocks.get(conversationId)?.blocks ?? [])]
+          : []
+    }
+  }
+
   /** 对工具参数计算稳定哈希（审批绑定用，与手机端 WebCrypto SHA-256 对应）。 */
   static paramHashOf(input: unknown): string {
     return ApprovalBroker.paramHashOf(input)
@@ -764,7 +887,7 @@ export class AgentRuntime {
       target,
       emit,
       controller,
-      { effectiveMode }
+      { effectiveMode, workMode: userMessage.usageMode ?? null }
     )
   }
 
@@ -1065,16 +1188,18 @@ export class AgentRuntime {
     try {
       const conversation = repo.getConversation(conversationId)
       const resolved = resolveTarget(conversation?.providerId, conversation?.model)
+      // 子任务模型：设置页可指定，为空则跟随父会话；非法值回落跟随，不炸轮。
+      const subTarget = resolveSubagentTarget(resolved.providerId, resolved.model)
       const effort = getSetting<string>('agent.effort', 'high')
-      const subEffort = resolveEffort(resolved.model, effort)
+      const subEffort = resolveEffort(subTarget.model, effort)
       const readOnly = getSetting<boolean>('agent.readOnly', false)
       const stuckCfg = getSetting<number>('agent.stuckLimit', 3)
       const stuckLimit = typeof stuckCfg === 'number' && stuckCfg > 0 ? stuckCfg : 3
       const result = await runSubagent(
         call.input,
         {
-          model: resolved.model,
-          providerId: resolved.providerId,
+          model: subTarget.model,
+          providerId: subTarget.providerId,
           workingDirectory: parentWorkingDir,
           readOnly,
           maxTokens: subEffort.maxTokens,
@@ -1162,6 +1287,28 @@ export class AgentRuntime {
 
   private grantAutoApprove(toolName: string): void {
     this.approvalBroker.grantAutoApprove(toolName)
+  }
+}
+
+/**
+ * 子任务模型解析：`agent.subagent.target` 为空即跟随父会话；
+ * 否则按 `${providerId}::${model}` 拆出，provider 不可用时回落跟随。
+ */
+export function resolveSubagentTarget(
+  parentProviderId: string,
+  parentModel: string
+): { providerId: string; model: string } {
+  const raw = getSetting<string>('agent.subagent.target', '').trim()
+  if (!raw) return { providerId: parentProviderId, model: parentModel }
+  const sep = raw.indexOf('::')
+  if (sep <= 0 || sep >= raw.length - 2) return { providerId: parentProviderId, model: parentModel }
+  const providerId = raw.slice(0, sep)
+  const model = raw.slice(sep + 2)
+  try {
+    const resolved = resolveTarget(providerId, model)
+    return { providerId: resolved.providerId, model: resolved.model }
+  } catch {
+    return { providerId: parentProviderId, model: parentModel }
   }
 }
 
