@@ -2,6 +2,13 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.4] - 2026-10-29
+
+### 新增
+
+- **MCP 添加/编辑真功能**：连接器页“+ 添加”支持 stdio 命令与 Streamable HTTP 两种表单，齿轮“配置”复用同一表单可改可删，保存写入 `agent.mcp.servers` 并同步白名单。密钥维持走系统环境变量不落盘。
+- **技能中心死按钮接线**：“发现”跳 MCP 页，“添加”明示内置已全量、外部能力去 MCP 页加。
+
 ## [0.8.3] - 2026-10-29
 
 ### 修复

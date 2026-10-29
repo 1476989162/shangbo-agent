@@ -1038,6 +1038,117 @@ const mcpServers = ref<McpServerItem[]>([])
 const mcpLoading = ref(false)
 const expandedMcp = ref<string | null>(null)
 
+/** MCP 添加/编辑表单：stdio 命令 或 Streamable HTTP 二选一。 */
+const mcpEditorOpen = ref(false)
+const mcpEditingId = ref<string | null>(null)
+const mcpForm = ref({ name: '', kind: 'stdio' as 'stdio' | 'http', command: '', args: '', url: '' })
+const mcpAddMenuOpen = ref(false)
+
+function openMcpAdd(kind: 'stdio' | 'http'): void {
+  mcpEditingId.value = null
+  mcpForm.value = { name: '', kind, command: '', args: '', url: '' }
+  mcpAddMenuOpen.value = false
+  mcpEditorOpen.value = true
+}
+
+function openMcpEdit(id: string): void {
+  const item = mcpServers.value.find((s) => s.id === id)
+  mcpEditingId.value = id
+  mcpForm.value = {
+    name: item?.name ?? id,
+    kind: 'stdio',
+    command: '',
+    args: '',
+    url: ''
+  }
+  mcpEditorOpen.value = true
+}
+
+function slugId(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+}
+
+async function saveMcpServer(): Promise<void> {
+  const name = mcpForm.value.name.trim()
+  if (!name) {
+    feedback.value = { ok: false, message: '请填写服务名称' }
+    return
+  }
+  const id = mcpEditingId.value ?? slugId(name)
+  if (!id) {
+    feedback.value = { ok: false, message: '名称需包含字母或数字' }
+    return
+  }
+  try {
+    const settings = await window.shangbo.settings.getAll()
+    const stored = settings['agent.mcp.servers'] as Record<string, unknown>[] | undefined
+    const base: Record<string, unknown>[] = Array.isArray(stored) && stored.length > 0
+      ? stored.map((s) => ({ ...s }))
+      : mcpServers.value.map((s) => ({ id: s.id, enabled: s.enabled }))
+    const entry: Record<string, unknown> = { id, enabled: true }
+    if (mcpForm.value.kind === 'http') {
+      const url = mcpForm.value.url.trim()
+      if (!/^https?:\/\/.+/.test(url)) {
+        feedback.value = { ok: false, message: '请填写 http(s):// 开头的 URL' }
+        return
+      }
+      entry['url'] = url
+      entry['command'] = ''
+      entry['args'] = []
+    } else {
+      const command = mcpForm.value.command.trim()
+      if (!command) {
+        feedback.value = { ok: false, message: '请填写启动命令' }
+        return
+      }
+      entry['command'] = command
+      entry['args'] = mcpForm.value.args.split(/\s+/).filter(Boolean)
+    }
+    // 名称：新增时写入，编辑时保留原名（id 不变）
+    if (!mcpEditingId.value) entry['name'] = name
+    const next = base.some((s) => s['id'] === id)
+      ? base.map((s) => (s['id'] === id ? { ...s, ...entry, id } : s))
+      : [...base, entry]
+    await window.shangbo.settings.set('agent.mcp.servers', next)
+    // 白名单同步加上，否则生效逻辑取交集后新服务被过滤
+    const enabledIds = new Set(mcpServers.value.filter((s) => s.enabled).map((s) => s.id))
+    enabledIds.add(id)
+    await window.shangbo.settings.set('agent.mcpServers', [...enabledIds])
+    mcpEditorOpen.value = false
+    feedback.value = { ok: true, message: `MCP 服务「${name}」已保存` }
+    void refreshMcp()
+  } catch (error) {
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '保存失败' }
+  }
+}
+
+async function removeMcpServer(): Promise<void> {
+  const id = mcpEditingId.value
+  if (!id) return
+  if (!confirm('删除该 MCP 服务？')) return
+  try {
+    const settings = await window.shangbo.settings.getAll()
+    const stored = settings['agent.mcp.servers'] as Record<string, unknown>[] | undefined
+    const base: Record<string, unknown>[] = Array.isArray(stored) && stored.length > 0
+      ? stored
+      : mcpServers.value.map((s) => ({ id: s.id, enabled: s.enabled }))
+    await window.shangbo.settings.set(
+      'agent.mcp.servers',
+      base.filter((s) => s['id'] !== id)
+    )
+    mcpEditorOpen.value = false
+    feedback.value = { ok: true, message: 'MCP 服务已删除' }
+    void refreshMcp()
+  } catch (error) {
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '删除失败' }
+  }
+}
+
 /** 拉取实时状态（会按需拉起服务进程，首次可能慢，不阻塞设置页打开）。 */
 async function refreshMcp(): Promise<void> {
   if (mcpLoading.value) return
@@ -2218,8 +2329,12 @@ async function toggleAutoScreenshot(): Promise<void> {
 
             <!-- 右侧发现与添加按钮 -->
             <div class="plugins-top-actions">
-              <button class="btn btn-ghost tiny" title="浏览官方扩展生态市场">发现 (Discover)</button>
-              <button class="btn btn-primary tiny btn-add-plugin" title="从 GitHub 仓库或本地目录添加扩展插件">
+              <button class="btn btn-ghost tiny" title="去 MCP 页添加外部服务" @click="activeTab = 'connectors'">发现 (Discover)</button>
+              <button
+                class="btn btn-primary tiny btn-add-plugin"
+                title="内置插件已全量列出，外部能力去 MCP 页添加"
+                @click="feedback = { ok: true, message: '内置插件已全量列出；外部能力请到「连接器 / MCP」添加' }"
+              >
                 添加 (Add) ▾
               </button>
             </div>
@@ -2414,7 +2529,13 @@ async function toggleAutoScreenshot(): Promise<void> {
               </div>
               <div class="servers-head-actions">
                 <button class="btn btn-ghost tiny" title="刷新服务状态" @click="refreshMcp">↻</button>
-                <button class="btn btn-primary tiny btn-add-mcp">+ 添加 ▾</button>
+                <div class="mcp-add-wrap">
+                  <button class="btn btn-primary tiny btn-add-mcp" @click="mcpAddMenuOpen = !mcpAddMenuOpen">+ 添加 ▾</button>
+                  <div v-if="mcpAddMenuOpen" class="mcp-add-menu" @click.self="mcpAddMenuOpen = false">
+                    <button class="menu-item" @click="openMcpAdd('stdio')">命令行（stdio）</button>
+                    <button class="menu-item" @click="openMcpAdd('http')">网址（Streamable HTTP）</button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -2450,7 +2571,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 </div>
 
                 <div class="server-right-actions">
-                  <button class="server-gear-btn" title="配置服务器参数">⚙</button>
+                  <button class="server-gear-btn" title="配置服务器参数" @click="openMcpEdit(server.id)">⚙</button>
                   <label class="switch-control">
                     <input
                       type="checkbox"
@@ -2460,6 +2581,51 @@ async function toggleAutoScreenshot(): Promise<void> {
                     <span class="switch-slider" />
                   </label>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- MCP 添加/编辑弹窗 -->
+          <div v-if="mcpEditorOpen" class="submodal-overlay" @click.self="mcpEditorOpen = false">
+            <div class="submodal">
+              <div class="submodal-head">
+                <h3 class="submodal-title">{{ mcpEditingId ? '配置 MCP 服务' : '添加 MCP 服务' }}</h3>
+                <button class="btn-submodal-close" @click="mcpEditorOpen = false">×</button>
+              </div>
+              <label class="wish-field">
+                <span class="field-label">服务名称</span>
+                <input v-model="mcpForm.name" class="submodal-input" placeholder="例如：我的 HTTP 服务" :disabled="!!mcpEditingId" />
+              </label>
+              <label v-if="!mcpEditingId" class="wish-field">
+                <span class="field-label">类型</span>
+                <select v-model="mcpForm.kind" class="submodal-input">
+                  <option value="stdio">命令行（stdio）</option>
+                  <option value="http">网址（Streamable HTTP）</option>
+                </select>
+              </label>
+              <template v-if="mcpForm.kind === 'http'">
+                <label class="wish-field">
+                  <span class="field-label">URL</span>
+                  <input v-model="mcpForm.url" class="submodal-input mono" placeholder="http://127.0.0.1:34254/mcp/xxx" />
+                  <span class="wish-field-hint">密钥走网关复用，无需填写。</span>
+                </label>
+              </template>
+              <template v-else>
+                <label class="wish-field">
+                  <span class="field-label">启动命令</span>
+                  <input v-model="mcpForm.command" class="submodal-input mono" placeholder="例如：npx.cmd 或 docker" />
+                </label>
+                <label class="wish-field">
+                  <span class="field-label">参数（空格分隔）</span>
+                  <input v-model="mcpForm.args" class="submodal-input mono" placeholder="例如：-y @modelcontextprotocol/server-fetch" />
+                  <span class="wish-field-hint">密钥走系统环境变量，不落盘。</span>
+                </label>
+              </template>
+              <div class="submodal-actions">
+                <button v-if="mcpEditingId" class="btn btn-ghost tiny btn-danger" @click="removeMcpServer">删除</button>
+                <span class="submodal-spacer" />
+                <button class="btn btn-ghost tiny" @click="mcpEditorOpen = false">取消</button>
+                <button class="btn btn-primary tiny" @click="saveMcpServer">保存</button>
               </div>
             </div>
           </div>
@@ -4125,6 +4291,29 @@ async function toggleAutoScreenshot(): Promise<void> {
   background: #111111;
   color: #ffffff;
   border: none;
+}
+
+.mcp-add-wrap {
+  position: relative;
+}
+
+.mcp-add-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  z-index: 50;
+}
+
+.submodal-spacer {
+  flex: 1;
 }
 
 .mcp-servers-list {
