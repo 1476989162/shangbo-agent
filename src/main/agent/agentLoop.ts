@@ -477,6 +477,14 @@ export async function runAgentLoop(
             })
           } else if (chunk.type === 'usage') {
             lastUsage = chunk.usage
+            // 上游只回输出不回输入时，累计输入会恒为 0，UI 上表现为
+            // 「累计输入 0 / 累计输出 N」的自相矛盾。这里留痕，便于定位是
+            // 网关不返回 prompt_tokens，而不是本地统计算错。
+            if (chunk.usage.promptTokens === 0 && chunk.usage.completionTokens > 0) {
+              log.warn(
+                `[usage] ${servedProviderId}/${servedModel} 未返回 prompt_tokens（输出 ${chunk.usage.completionTokens}），输入侧统计会失真`
+              )
+            }
             turnPromptTokens += chunk.usage.promptTokens
             turnCompletionTokens += chunk.usage.completionTokens
             turnCacheReadTokens += chunk.usage.cacheReadTokens ?? 0

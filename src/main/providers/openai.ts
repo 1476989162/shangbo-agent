@@ -28,6 +28,66 @@ function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${path}`
 }
 
+/** 把 `unknown` 收成非负数；缺失、非数字、NaN 一律视为「本帧没有该字段」。 */
+function asCount(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return value
+}
+
+/**
+ * 合并单帧 usage 到已累积的 usage。
+ *
+ * 为什么不是整体覆盖：OpenAI 兼容协议里 usage 通常只在最后一帧出现，
+ * 但部分中转网关会在多帧重复下发，且各帧字段不齐——先发 `prompt_tokens`、
+ * 后续帧只发 `completion_tokens`，或末尾帧把 `prompt_tokens` 写回 0。
+ * 直接 `usage = {...}` 会让先拿到的输入侧被后帧的 0 覆盖，
+ * 最终表现为「累计输入 0、输出正常」。
+ *
+ * 规则：只在本帧字段真实存在时才更新对应字段；累计值取见过的最大值，
+ * 因为流式协议下 usage 只会随生成推进而单调增长，回退值一律视为脏数据。
+ */
+export function mergeUsage(
+  previous: Usage | null,
+  raw: Record<string, any>
+): Usage {
+  // DeepSeek 系返回 prompt_cache_hit_tokens / prompt_cache_miss_tokens 而不是
+  // prompt_tokens；只把这两项映射到 cacheRead/cacheWrite 会让 promptTokens 恒为 0。
+  // 因此当 prompt_tokens 缺失时，用命中 + 未命中回填输入侧。
+  const cacheHit = asCount(raw.prompt_cache_hit_tokens)
+  const cacheMiss = asCount(raw.prompt_cache_miss_tokens)
+  const explicitPrompt = asCount(raw.prompt_tokens) ?? asCount(raw.input_tokens)
+  const derivedPrompt =
+    cacheHit !== undefined || cacheMiss !== undefined
+      ? (cacheHit ?? 0) + (cacheMiss ?? 0)
+      : undefined
+
+  // 显式字段为 0 而派生值 > 0 时以派生值为准：这类网关只回缓存拆分，
+  // 用 0 会白白丢掉整段输入统计。两者都为 0 时仍按 0 处理（真实空输入）。
+  const framePrompt =
+    explicitPrompt !== undefined && (explicitPrompt > 0 || derivedPrompt === undefined)
+      ? explicitPrompt
+      : derivedPrompt !== undefined
+        ? derivedPrompt
+        : explicitPrompt
+
+  const pickMax = (a: number | undefined, b: number | undefined): number | undefined => {
+    if (a === undefined) return b
+    if (b === undefined) return a
+    return Math.max(a, b)
+  }
+
+  return {
+    promptTokens: pickMax(previous?.promptTokens, framePrompt) ?? 0,
+    completionTokens:
+      pickMax(previous?.completionTokens, asCount(raw.completion_tokens) ?? asCount(raw.output_tokens)) ?? 0,
+    ...(cacheHit !== undefined || previous?.cacheReadTokens !== undefined
+      ? { cacheReadTokens: pickMax(previous?.cacheReadTokens, cacheHit) }
+      : {}),
+    ...(cacheMiss !== undefined || previous?.cacheWriteTokens !== undefined
+      ? { cacheWriteTokens: pickMax(previous?.cacheWriteTokens, cacheMiss) }
+      : {})
+  }
+}
 function parseArgs(raw: string): unknown {
   const trimmed = raw.trim()
   if (!trimmed) return {}
@@ -218,14 +278,13 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
       if (choice?.finish_reason) stopReason = choice.finish_reason
 
       if (payload.usage) {
-        usage = {
-          promptTokens: payload.usage.prompt_tokens ?? 0,
-          completionTokens: payload.usage.completion_tokens ?? 0,
-          cacheReadTokens: payload.usage.prompt_cache_hit_tokens,
-          cacheWriteTokens: payload.usage.prompt_cache_miss_tokens
-        }
-      }
-    }
+        // 逐帧合并而不是整体覆盖：部分兼容网关会在中间帧带 usage，且只填其中一侧
+        // （例如先发 prompt_tokens、后续帧只发 completion_tokens，或末尾帧把
+        // prompt_tokens 写回 0）。整体覆盖会把先前拿到的输入侧覆盖成 0，
+        // 表现为「累计输入恒为 0、输出正常」。
+        const merged = mergeUsage(usage, payload.usage)
+        usage = merged
+      }    }
 
     for (const acc of toolCalls.values()) {
       if (!acc.name) continue

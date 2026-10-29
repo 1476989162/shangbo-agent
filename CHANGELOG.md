@@ -4,6 +4,12 @@
 
 ## [未发布]
 
+### 修复
+
+- **Token 用量统计输入侧恒为 0**：`openai.ts` 此前对每帧 `usage` 做整体覆盖，而部分兼容网关会在中间帧只带 `completion_tokens`、末尾帧把 `prompt_tokens` 写回 0，覆盖后整段输入统计丢失，UI 上表现为「累计输入 0 / 累计输出 N」的自相矛盾（总消耗恰好等于输出量）。改为逐帧合并：仅在本帧字段真实存在时才更新，累计值取单调最大值，回退值按脏数据丢弃。
+- **DeepSeek 缓存拆分回填**：DeepSeek 系返回 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 而非 `prompt_tokens`，此前只映射到 `cacheRead/cacheWrite`，导致 `promptTokens` 恒为 0。现在在 `prompt_tokens` 缺失或为 0 时用两者之和回填输入侧。
+- **输入侧失真留痕**：`agentLoop` 在收到「输入 0 / 输出 > 0」的 usage 时打 warn 日志，便于区分「网关不返回 prompt_tokens」与「本地统计算错」，不再静默失真。
+
 ### 变更
 
 - **许愿模式放开外部 MCP 调用**：此前许愿模式一律拒绝 `mcp__*` 工具（返回“只使用本地工作区工具”），导致无人值守任务无法用浏览器自动化、抓网页、检索文档、记忆库等能力。现在由新设置 `agent.wish.allowMcp`（默认开）控制是否允许调用，并在系统提示里明确告知模型「MCP 工具可用，直接调用即可」。
