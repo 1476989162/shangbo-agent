@@ -248,6 +248,26 @@ export class McpManager {
     await Promise.all(clients.map((c) => c.stop().catch(() => undefined)))
   }
 
+  /**
+   * 同步版收尾：给 `app.on('before-quit')` 用。
+   *
+   * before-quit 是同步回调，异步 shutdown() 里的 await 不会阻塞进程退出——
+   * 进程可能在任何 await 之前就结束，子进程清理等于没做。这里只做同步动作：
+   * 标记 killed、清空登记表、直接杀进程树，不做任何等待。
+   * 真正的优雅关闭（等 exit 事件、最多 3 秒）仍走 shutdown()。
+   */
+  shutdownSync(): void {
+    const clients = [...this.live.values()].map((s) => s.client)
+    this.live.clear()
+    this.starting.clear()
+    for (const client of clients) {
+      try {
+        client.stopSync()
+      } catch {
+        // 清理路径不抛错：杀不到就算了，不能让退出流程卡住
+      }
+    }
+  }
   private ensureStarted(config: McpServerConfig): Promise<LiveServer | null> {
     const existing = this.live.get(config.id)
     if (existing) return Promise.resolve(existing)

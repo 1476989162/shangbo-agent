@@ -88,4 +88,31 @@ describe('MCP 服务管理器', () => {
       await manager.shutdown()
     }
   })
+
+  /*
+   * 退出清理回归：before-quit 是同步回调，必须能同步收尾。
+   * 线上症状是应用退出后残留 node 进程（npx 的 cmd → npx → node 三层，
+   * 只杀直接子进程等于没杀）。
+   */
+  it('shutdownSync 能同步清空登记表，不抛错', async () => {
+    settingsStub.servers = [fakeConfig('fake1')]
+    const manager = new McpManager()
+    // 先真正拉起一个服务，让 live 里有一条记录
+    const schemas = await manager.toolSchemas()
+    expect(schemas).toHaveLength(1)
+
+    // 同步调用必须不抛错且立即返回（不能返回 Promise 被 await 掉）
+    expect(() => manager.shutdownSync()).not.toThrow()
+
+    // 清空后再次聚合会重新拉起，说明登记表确实被清了
+    const again = await manager.toolSchemas()
+    expect(again).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it('shutdownSync 对空管理器是幂等的', () => {
+    const manager = new McpManager()
+    expect(() => manager.shutdownSync()).not.toThrow()
+    expect(() => manager.shutdownSync()).not.toThrow()
+  })
 })

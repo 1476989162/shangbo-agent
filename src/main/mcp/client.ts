@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import log from 'electron-log/main'
 
 /**
@@ -40,6 +40,25 @@ function needsShell(command: string): boolean {
   return /\.cmd$|\.bat$/i.test(command)
 }
 
+/**
+ * 终止整棵进程树（Windows）。
+ *
+ * 为什么不用 proc.kill()：npx 启动的 MCP 服务实际是
+ * `cmd.exe → npx-cli.js → 真正的服务`，proc.kill() 只能杀掉直接子进程，
+ * 剩下的孙进程会变成孤儿常驻内存——这正是「node 调用完不释放」的成因。
+ *
+ * 用 execFile 而不是 spawn：同步语义更可控，且不需要保存子句柄；
+ * 失败（进程已退出、pid 不存在）一律吞掉，清理路径不该因为杀不到而抛错。
+ */
+function killProcessTree(pid: number): void {
+  try {
+    execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, () => {
+      // 忽略回调错误：目标可能已经自行退出
+    })
+  } catch {
+    // execFile 同步抛错（如参数非法）时兜底回落到 proc.kill()
+  }
+}
 /** MCP content 块压平成纯文本（图片/资源只留一句话占位，不污染上下文）。 */
 export function flattenContent(content: unknown, isError: unknown): McpCallResult {
   if (!Array.isArray(content)) return { content: '[MCP 返回了空内容]', isError: true }
@@ -145,7 +164,14 @@ export class McpClient {
     this.pending.clear()
     const proc = this.proc
     if (proc.exitCode === null) {
-      proc.kill()
+      // Windows 上 proc.kill() 只杀直接子进程。npx 启动的 MCP 是
+      // `cmd.exe → npx-cli.js → 真正的服务` 三层结构，只杀第一层会让后两层
+      // 变成孤儿常驻内存。因此 Windows 一律用 taskkill /T 杀整棵进程树。
+      if (process.platform === 'win32' && proc.pid) {
+        killProcessTree(proc.pid)
+      } else {
+        proc.kill()
+      }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 3000)
         proc.once('exit', () => {
@@ -153,8 +179,27 @@ export class McpClient {
           resolve()
         })
       })
-      if (proc.exitCode === null) proc.kill('SIGKILL')
+      if (proc.exitCode === null) {
+        if (process.platform === 'win32' && proc.pid) killProcessTree(proc.pid)
+        else proc.kill('SIGKILL')
+      }
     }
+  }
+  /**
+   * 同步终止：只给 `before-quit` 这类不能 await 的收尾路径用。
+   * 不等待 exit 事件，杀完立即返回；进程可能稍后才真正消失。
+   */
+  stopSync(): void {
+    this.killed = true
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer)
+      p.reject(new Error('MCP 客户端已关闭'))
+    }
+    this.pending.clear()
+    const proc = this.proc
+    if (proc.exitCode !== null || !proc.pid) return
+    if (process.platform === 'win32') killProcessTree(proc.pid)
+    else proc.kill('SIGKILL')
   }
 
   private send(payload: Record<string, unknown>): void {

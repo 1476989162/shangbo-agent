@@ -12,7 +12,7 @@ import { pythonBridge } from './py/bridge'
 import { handleImageProtocol, registerImageProtocol } from './storage/images'
 import { autonomousScheduler } from './autonomous/scheduler'
 import { settleOrphanAutonomousRuns } from './autonomous/store'
-
+import { mcpManager } from './mcp/manager'
 // 固定应用名，让开发态与打包态落在同一个 userData 目录。
 // 否则打包后 productName「尚搏 Agent」会另建一个目录，用户会以为数据丢了。
 // 必须在 requestSingleInstanceLock 之前调用——单实例锁文件也在 userData 下。
@@ -76,7 +76,10 @@ if (!gotLock) {
     markQuitting()
     autonomousScheduler.stop()
     pythonBridge.dispose()
+    // MCP 子进程必须在这里收尾：常驻复用是设计选择，但退出时没人杀就会留下
+    // 孤儿 node 进程（npx 的 cmd → npx → node 三层，只杀第一层等于没杀）。
+    // 用同步版：before-quit 是同步回调，异步 await 不阻塞退出。
+    mcpManager.shutdownSync()
     destroyTray()
     closeDatabase()
-  })
-}
+  })}
