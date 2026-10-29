@@ -1055,6 +1055,16 @@ async function toggleMcpServer(item: McpServerItem): Promise<void> {
   item.enabled = !item.enabled
   const enabledIds = mcpServers.value.filter((s) => s.enabled).map((s) => s.id)
   await window.shangbo.settings.set('agent.mcpServers', enabledIds)
+  // 双写配置的 enabled：生效逻辑是白名单 ∩ 配置 enabled，
+  // 只写白名单的话，预置 enabled:false 的服务（Magpie 识图/生图）永远打不开。
+  try {
+    const settings = await window.shangbo.settings.getAll()
+    const servers = (settings['agent.mcp.servers'] as { id: string; enabled?: boolean }[] | undefined) ?? []
+    const next = servers.map((s) => (s.id === item.id ? { ...s, enabled: item.enabled } : s))
+    await window.shangbo.settings.set('agent.mcp.servers', next)
+  } catch {
+    // 白名单已写，刷新后至少状态一致；配置写失败下次打开再试
+  }
   feedback.value = {
     ok: true,
     message: item.enabled ? `已启用 MCP 服务「${item.name}」` : `已停用 MCP 服务「${item.name}」`

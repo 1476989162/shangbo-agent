@@ -2,6 +2,12 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] - 2026-10-29
+
+### 修复
+
+- **MCP 开关打不开预置关闭的服务**：开关只写白名单 `agent.mcpServers`，但生效逻辑是白名单 ∩ 配置 `enabled`——Magpie 识图/生图预置 `enabled:false`，打开也被盖住。现在开关双写两处，打开即生效。
+
 ## [0.8.0] - 2026-10-29
 
 ### 新增
