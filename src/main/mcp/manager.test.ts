@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerConfig } from './manager'
-import { mcpToolName, McpManager, parseMcpToolName, BUILTIN_MCP_SERVERS, resolveEnv } from './manager'
+import { loadServerConfigs, mcpToolName, McpManager, parseMcpToolName, BUILTIN_MCP_SERVERS, resolveEnv } from './manager'
 
 vi.mock('electron-log/main', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -48,6 +48,15 @@ describe('MCP 服务管理器', () => {
       }
       expect(s.enabled).toBe(true)
     }
+  })
+
+  it('空数组回落内置：0.8.1 开关残留不再清空列表', () => {
+    settingsStub.servers = []
+    // 白名单 legacy 为 null 时只看配置 enabled：Magpie 默认关会被过滤，
+    // 这里锁定“列表不再是空的”，Magpie 的存在由上面那条覆盖。
+    const ids = loadServerConfigs().map((s) => s.id)
+    expect(ids).toEqual(expect.arrayContaining(['memory', 'fetch', 'playwright', 'docker']))
+    expect(ids.length).toBeGreaterThan(0)
   })
 
   it('Magpie 识图/生图走 HTTP，默认关闭', () => {

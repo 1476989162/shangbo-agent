@@ -149,7 +149,10 @@ export function parseMcpToolName(name: string): { serverId: string; toolName: st
 export function loadServerConfigs(): McpServerConfig[] {
   const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
   const legacy = getSetting<string[] | null>('agent.mcpServers', null)
-  return configured
+  // 0.8.1 的开关双写 bug 会在库里留下一个空数组（把内置 10 个全盖掉）：
+  // 空数组视为“没配过”，回落内置，避免设置页一点刷新就全空。
+  const effective = Array.isArray(configured) && configured.length === 0 ? BUILTIN_MCP_SERVERS : configured
+  return effective
     // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
     .filter((s) => s && s.id && (s.url || s.command))
     .map((s) => ({ ...s, id: slug(s.id) }))
@@ -195,7 +198,10 @@ export class McpManager {
       error?: string
     }[] = []
     // 关掉的服务不拉进程，直接标 disabled（不验证死活）。
-    const all = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
+    const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
+    // 与 loadServerConfigs 同规则：0.8.1 残留的空数组回落内置。
+    const effective = Array.isArray(configured) && configured.length === 0 ? BUILTIN_MCP_SERVERS : configured
+    const all = effective
       .filter((s) => s && s.id && (s.url || s.command))
       .map((s) => ({ ...s, id: slug(s.id) }))
     const legacy = getSetting<string[] | null>('agent.mcpServers', null)

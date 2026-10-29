@@ -1057,11 +1057,15 @@ async function toggleMcpServer(item: McpServerItem): Promise<void> {
   await window.shangbo.settings.set('agent.mcpServers', enabledIds)
   // 双写配置的 enabled：生效逻辑是白名单 ∩ 配置 enabled，
   // 只写白名单的话，预置 enabled:false 的服务（Magpie 识图/生图）永远打不开。
+  // 库里没 agent.mcp.servers 时不写空数组：否则全量覆盖会把内置 10 个全盖掉，
+  // 下次 status() 就返回空列表（0.8.1 一点刷新全没的原因）。
   try {
     const settings = await window.shangbo.settings.getAll()
-    const servers = (settings['agent.mcp.servers'] as { id: string; enabled?: boolean }[] | undefined) ?? []
-    const next = servers.map((s) => (s.id === item.id ? { ...s, enabled: item.enabled } : s))
-    await window.shangbo.settings.set('agent.mcp.servers', next)
+    const servers = settings['agent.mcp.servers'] as { id: string; enabled?: boolean }[] | undefined
+    if (Array.isArray(servers) && servers.length > 0) {
+      const next = servers.map((s) => (s.id === item.id ? { ...s, enabled: item.enabled } : s))
+      await window.shangbo.settings.set('agent.mcp.servers', next)
+    }
   } catch {
     // 白名单已写，刷新后至少状态一致；配置写失败下次打开再试
   }
