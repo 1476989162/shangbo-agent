@@ -28,8 +28,12 @@ export interface McpToolDef {
 export interface McpCallResult {
   content: string
   isError: boolean
+  /** MCP 返回的首张图片（生图/截图类工具）：透传给 tool_result 做主动展示与回传模型。 */
+  image?: { mimeType: string; dataUrl: string }
 }
 
+/** MCP 图片块 base64 上限：约 6MB 原图，超出则只留占位，避免 DB 与上下文被单张图打爆。 */
+const MCP_IMAGE_MAX_DATA_CHARS = 8_000_000
 export interface SpawnOptions {
   command: string
   args: string[]
@@ -59,22 +63,30 @@ function killProcessTree(pid: number): void {
     // execFile 同步抛错（如参数非法）时兜底回落到 proc.kill()
   }
 }
-/** MCP content 块压平成纯文本（图片/资源只留一句话占位，不污染上下文）。 */
+/** MCP content 块压平成纯文本（图片只留一句话占位，不污染上下文；首张图经 dataUrl 透传展示）。 */
 export function flattenContent(content: unknown, isError: unknown): McpCallResult {
   if (!Array.isArray(content)) return { content: '[MCP 返回了空内容]', isError: true }
   const parts: string[] = []
+  let image: { mimeType: string; dataUrl: string } | undefined
   for (const block of content) {
     if (typeof block !== 'object' || block === null) continue
     const b = block as Record<string, unknown>
     if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
-    else if (b.type === 'image') parts.push('[MCP 返回了一张图片，已省略]')
-    else if (b.type === 'resource') parts.push('[MCP 返回了一个资源引用，已省略]')
+    else if (b.type === 'image') {
+      parts.push('[MCP 返回了一张图片，见附图]')
+      if (!image && typeof b.data === 'string' && typeof b.mimeType === 'string') {
+        const data = b.data.trim()
+        const mime = b.mimeType.trim().toLowerCase()
+        if (data && /^image\/(png|jpe?g|webp|gif|bmp)$/.test(mime) && data.length <= MCP_IMAGE_MAX_DATA_CHARS) {
+          image = { mimeType: mime, dataUrl: `data:${mime};base64,${data}` }
+        }
+      }
+    } else if (b.type === 'resource') parts.push('[MCP 返回了一个资源引用，已省略]')
   }
   const text = parts.join('\n').trim()
   if (!text) return { content: '[MCP 返回了空内容]', isError: true }
-  return { content: text, isError: isError === true }
+  return { content: text, isError: isError === true, ...(image ? { image } : {}) }
 }
-
 export class McpClient {
   private proc: ChildProcess
   private nextId = 1

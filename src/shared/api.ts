@@ -94,6 +94,29 @@ export interface ShangboApi {
     pickFolder(): Promise<string | null>
   }
 
+  file: {
+    /** 受限读文件：仅当前会话工程目录内，返回 base64 / 文本 / 文档 HTML。 */
+    read(
+      conversationId: string,
+      relPath: string
+    ): Promise<{
+      name: string
+      mime: string
+      size: number
+      text: string | null
+      dataUrl: string | null
+      html: string | null
+      truncated: boolean
+    }>
+    /** 受限列目录：默认当前工程目录。 */
+    list(
+      conversationId: string,
+      relPath?: string
+    ): Promise<{ dir: string; entries: { name: string; isDirectory: boolean; size: number }[] }>
+    /** 用系统默认应用打开（仅工程目录内）。 */
+    open(conversationId: string, relPath: string): Promise<boolean>
+  }
+
   usage: {
     getStats(days: number): Promise<import('./types').UsageSummaryStats>
   }

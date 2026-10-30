@@ -577,7 +577,8 @@ export const useChatStore = defineStore('chat', () => {
           type: 'tool_result',
           toolUseId: event.toolUseId,
           content: event.content,
-          isError: event.isError
+          isError: event.isError,
+          ...(event.image ? { image: event.image } : {})
         })
         break
       }

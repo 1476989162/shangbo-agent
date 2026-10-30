@@ -32,6 +32,7 @@ import {
   saveImage,
   type ResolvedImage
 } from '../storage/images'
+import { listViewerDir, openViewerFile, readViewerFile, VIEWER_MAX_BYTES } from '../files/viewer'
 import type { AgentEvent, AppInfo, ProviderInput } from '../../shared/types'
 
 /* 渲染进程传来的一切数据都在这里做一次校验，主进程内部不再重复防御。 */
@@ -414,6 +415,33 @@ export function registerIpcHandlers(): void {
       properties: ['openDirectory', 'createDirectory']
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
+  /* 右侧查看器：受限文件通道（仅当前会话工程目录内） ------------------ */
+
+  ipcMain.handle(IPC.fileRead, async (_event, conversationId: unknown, relPath: unknown) => {
+    const convo = z.string().min(1).parse(conversationId)
+    const rel = z.string().min(1).max(2000).parse(relPath)
+    // 路径穿越在 resolveViewerPath 里二次校验：zod 只拦超长与空串
+    const file = await readViewerFile(convo, rel)
+    // IPC 序列化上限兜底：dataUrl 超 14MB 字符直接拒绝，避免窗口间传输卡死
+    if (file.dataUrl && file.dataUrl.length > 14_000_000) {
+      throw new Error('文件过大，无法在面板内预览，请用系统默认应用打开。')
+    }
+    void VIEWER_MAX_BYTES
+    return file
+  })
+
+  ipcMain.handle(IPC.fileList, async (_event, conversationId: unknown, relPath: unknown) => {
+    const convo = z.string().min(1).parse(conversationId)
+    const rel = relPath === undefined ? '.' : z.string().max(2000).parse(relPath)
+    return listViewerDir(convo, rel || '.')
+  })
+
+  ipcMain.handle(IPC.fileOpen, async (_event, conversationId: unknown, relPath: unknown) => {
+    const convo = z.string().min(1).parse(conversationId)
+    const rel = z.string().min(1).max(2000).parse(relPath)
+    return openViewerFile(convo, rel)
   })
 
   ipcMain.handle(IPC.windowQuit, () => {

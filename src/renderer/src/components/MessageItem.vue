@@ -3,8 +3,8 @@ import { computed, nextTick, ref } from 'vue'
 import type { ContentBlock, Message } from '@shared/types'
 import { imageFileUrl } from '@shared/imageUrl'
 import type { BranchInfo } from '../stores/chat'
+import { useViewerStore } from '../stores/viewer'
 import MarkdownBlock from './MarkdownBlock.vue'
-
 const props = defineProps<{
   message: Message
   isLast: boolean
@@ -114,11 +114,20 @@ const userImages = computed(() => {
 
 /** 点击放大：同一张图换成 img 标签直接铺满，Esc 或点击空白关闭。 */
 const previewImage = ref<string | null>(null)
+const viewer = useViewerStore()
 
 function onPreviewKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') previewImage.value = null
 }
 
+/** 聊天图片点一下进右侧查看器（大图细看），同时保留原全屏放大兜底。 */
+function openImageInViewer(src: string, index: number): void {
+  try {
+    viewer.openImage(`图片 ${index + 1}`, src)
+  } catch {
+    previewImage.value = src
+  }
+}
 const renderItems = computed<RenderItem[]>(() => {
   const results = new Map<
     string,
@@ -370,10 +379,9 @@ async function copy(): Promise<void> {
             :src="src"
             class="user-image"
             :alt="`图片 ${index + 1}`"
-            title="点击查看大图"
-            @click="previewImage = src"
-          />
-        </div>
+            title="点击在右侧查看器中打开"
+            @click="openImageInViewer(src, index)"
+          />        </div>
         <p v-if="textContent" class="user-text">{{ textContent }}</p>
       </div>
       <!-- 排队中：明确告诉用户这条已接收、会自动接力，而不是"发出去没反应" -->
@@ -471,7 +479,7 @@ async function copy(): Promise<void> {
             v-else
             class="codex-activity tool-activity"
             :class="[toolKindClass(item.name), { failed: item.result?.isError }]"
-            :open="props.workMode === 'code' || !item.result"
+            :open="props.workMode === 'code' || !item.result || !!item.result.image"
           >            <summary>
               <span class="activity-glyph">{{ toolIcon(item.name) }}</span>
               <span class="activity-title">{{ toolAction(item.name) }}</span>
@@ -501,8 +509,9 @@ async function copy(): Promise<void> {
                   :src="item.result.image.dataUrl"
                   class="activity-image"
                   alt="工具结果图片"
-                />
-                <pre class="activity-pre mono">{{ item.result.content }}</pre>
+                  title="点击在右侧查看器中打开"
+                  @click="item.result.image.dataUrl && viewer.openImage('工具结果图片', item.result.image.dataUrl)"
+                />                <pre class="activity-pre mono">{{ item.result.content }}</pre>
               </template>
             </div>
           </details>

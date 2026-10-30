@@ -43,8 +43,16 @@ describe('MCP stdio 客户端', () => {
       content: 'a\nb',
       isError: false
     })
-    expect(flattenContent([{ type: 'image' }], false).content).toContain('省略')
+    const withImage = flattenContent(
+      [{ type: 'text', text: 'ok' }, { type: 'image', mimeType: 'image/png', data: Buffer.from('img-bytes').toString('base64') }],
+      false
+    )
+    expect(withImage.content).toContain('附图')
+    expect(withImage.image?.mimeType).toBe('image/png')
+    expect(withImage.image?.dataUrl).toMatch(/^data:image\/png;base64,/)
+    // 非法图片块不透传：只留占位文本
+    expect(flattenContent([{ type: 'image' }], false).content).toContain('附图')
+    expect(flattenContent([{ type: 'image' }], false).image).toBeUndefined()
     expect(flattenContent([], false).isError).toBe(true)
     expect(flattenContent([{ type: 'text', text: 'boom' }], true).isError).toBe(true)
-  })
-})
+  })})

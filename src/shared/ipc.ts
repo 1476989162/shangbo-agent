@@ -43,6 +43,13 @@ export const IPC = {
   dialogPickFolder: 'dialog:pickFolder',
   usageGetStats: 'usage:getStats',
 
+  /** 右侧查看器：受限读文件（仅当前工程目录内，私有目录禁入）。 */
+  fileRead: 'file:read',
+  /** 右侧查看器：列目录（默认当前工程目录）。 */
+  fileList: 'file:list',
+  /** 用系统默认应用打开文件（仅当前工程目录内）。 */
+  fileOpen: 'file:open',
+
   mcpStatus: 'mcp:status',
 
   updateStatus: 'update:status',

@@ -1,6 +1,7 @@
 import log from 'electron-log/main'
 import { getSetting } from '../settings'
 import { McpClient } from './client'
+import type { McpCallResult } from './client'
 import { HttpMcpClient } from './httpClient'
 import type { ToolSchema } from '../providers/types'
 
@@ -286,7 +287,7 @@ export class McpManager {
     toolName: string,
     args: unknown,
     signal?: AbortSignal
-  ): Promise<{ content: string; isError: boolean }> {
+  ): Promise<McpCallResult> {
     const config = loadServerConfigs().find((s) => s.id === serverId)
     if (!config) return { content: `MCP 服务未配置或未启用：${serverId}`, isError: true }
     const live = await this.ensureStarted(config)

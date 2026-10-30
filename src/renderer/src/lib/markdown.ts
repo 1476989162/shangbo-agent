@@ -116,6 +116,14 @@ const renderToken = md.renderer.rules.link_open
 md.renderer.rules.link_open = (tokens, index, options, env, self) => {
   tokens[index].attrSet('target', '_blank')
   tokens[index].attrSet('rel', 'noopener noreferrer')
+  // 右侧查看器：http(s) 与工程内文件链接加标记，前端点击委托统一进右侧。
+  const rawHref = tokens[index].attrGet('href') ?? ''
+  const href = typeof rawHref === 'string' ? rawHref : String(rawHref)
+  if (/^https?:\/\//i.test(href)) {
+    tokens[index].attrSet('data-viewer', 'web')
+  } else if (/^[A-Za-z]:[\\/]/.test(href) || href.startsWith('/') || /^[^\s]+\.[A-Za-z0-9]{1,5}$/.test(href)) {
+    tokens[index].attrSet('data-viewer', 'file')
+  }
   return renderToken
     ? renderToken(tokens, index, options, env, self)
     : self.renderToken(tokens, index, options)
@@ -129,6 +137,37 @@ export function renderMarkdown(
   highlightTheme = options.dark ? 'dark' : 'light'
   const html = md.render(source)
   return DOMPurify.sanitize(html, {
-    ADD_ATTR: ['target', 'data-lang']
+    ADD_ATTR: ['target', 'data-lang', 'data-viewer']
   })
+}
+
+/**
+ * Markdown 内容区统一点击委托：
+ * - data-viewer=web：进右侧 iframe；
+ * - data-viewer=file：按工程内相对路径进右侧；
+ * 返回 true 表示已接管（调用方应 preventDefault）。
+ */
+export function handleViewerLinkClick(
+  event: MouseEvent,
+  open: { openWeb(url: string): void; openFile(conversationId: string, relPath: string): Promise<void> },
+  conversationId: string | null
+): boolean {
+  const target = (event.target as HTMLElement | null)?.closest?.('a[data-viewer]')
+  if (!target) return false
+  const anchor = target as HTMLAnchorElement
+  const kind = anchor.getAttribute('data-viewer')
+  const href = anchor.getAttribute('href') ?? ''
+  if (!href) return false
+  if (kind === 'web' && /^https?:\/\//i.test(href)) {
+    open.openWeb(href)
+    return true
+  }
+  if (kind === 'file' && conversationId) {
+    const rel = href.replace(/^[A-Za-z]:[\\/]/, '').replace(/^\/+/, '')
+    if (rel) {
+      void open.openFile(conversationId, decodeURIComponent(rel))
+      return true
+    }
+  }
+  return false
 }

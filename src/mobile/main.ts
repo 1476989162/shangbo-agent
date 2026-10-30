@@ -333,7 +333,7 @@ const app = createApp({
               <div v-for="(b, i) in m.blocks" :key="i" class="m-block">
                 <div v-if="b.type === 'text'" class="m-text">{{ b.text }}</div>
                 <div v-else-if="b.type === 'tool_use'" class="m-tool">🔧 {{ b.name }}</div>
-                <div v-else-if="b.type === 'tool_result'" :class="['m-result', { err: b.isError }]">{{ (b.content || '').slice(0, 500) }}</div>
+                <div v-else-if="b.type === 'tool_result'" :class="['m-result', { err: b.isError }]"><img v-if="b.image?.dataUrl" :src="b.image.dataUrl" style="max-width:100%;border-radius:8px;margin-bottom:6px;" alt="工具结果图片" />{{ (b.content || '').slice(0, 500) }}</div>
               </div>
             </div>
           </div>

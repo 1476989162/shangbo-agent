@@ -78,6 +78,15 @@ const api: ShangboApi = {
     pickFolder: () => ipcRenderer.invoke(IPC.dialogPickFolder)
   },
 
+  file: {
+    read: (conversationId: string, relPath: string) =>
+      ipcRenderer.invoke(IPC.fileRead, conversationId, relPath),
+    list: (conversationId: string, relPath?: string) =>
+      ipcRenderer.invoke(IPC.fileList, conversationId, relPath),
+    open: (conversationId: string, relPath: string) =>
+      ipcRenderer.invoke(IPC.fileOpen, conversationId, relPath)
+  },
+
   usage: {
     getStats: (days: number) => ipcRenderer.invoke(IPC.usageGetStats, days)
   },

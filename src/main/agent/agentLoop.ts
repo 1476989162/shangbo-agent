@@ -589,7 +589,8 @@ export async function runAgentLoop(
             messageId: assistantMessage.id,
             toolUseId: call.id,
             content: result.content,
-            isError: result.isError
+            isError: result.isError,
+            ...(result.image ? { image: result.image } : {})
           })
         }
 
@@ -696,7 +697,7 @@ export async function runAgentLoop(
                 requestCount += requests
               })
             blocks.push({ type: 'tool_result', toolUseId: call.id, content: result.content, isError: result.isError, ...(result.image ? { image: result.image } : {}) })
-            emit({ type: 'tool_result', runId, conversationId: conversation.id, messageId: assistantMessage.id, toolUseId: call.id, content: result.content, isError: result.isError })
+            emit({ type: 'tool_result', runId, conversationId: conversation.id, messageId: assistantMessage.id, toolUseId: call.id, content: result.content, isError: result.isError, ...(result.image ? { image: result.image } : {}) })
             contPairs.push({ call, result })
           }
           const contStuck = noteToolBatch(contPairs)

@@ -183,11 +183,11 @@ export class AgentRuntime {
           type: 'tool_result',
           toolUseId: event.toolUseId,
           content: event.content,
-          isError: event.isError
+          isError: event.isError,
+          ...(event.image ? { image: event.image } : {})
         })
         return
-      }
-      case 'message_done':
+      }      case 'message_done':
       case 'run_error':
       case 'run_end': {
         // 本轮收尾：实时副本已落库，内存副本没有保留价值
@@ -1085,7 +1085,7 @@ export class AgentRuntime {
     conversationId: string,
     emit: Emitter,
     controller: AbortController
-  ): Promise<{ content: string; isError: boolean }> {
+  ): Promise<{ content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }> {
     const wishActive = this.isWishMode(runId, conversationId)
     if (getSetting<boolean>('agent.readOnly', false) && !wishActive) {
       return { content: '当前是只读复查模式，不调用外部 MCP 服务。', isError: true }
@@ -1181,7 +1181,7 @@ export class AgentRuntime {
     controller: AbortController,
     onNotify?: (text: string) => void,
     onUsage?: (promptTokens: number, completionTokens: number, requests: number) => void
-  ): Promise<{ content: string; isError: boolean }> {
+  ): Promise<{ content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }> {
     const rawTask = (call.input as { task?: unknown } | null)?.task
     const task = typeof rawTask === 'string' ? rawTask.slice(0, 200) : ''
     emit({ type: 'subagent_start', runId, conversationId, messageId, toolUseId: call.id, task })

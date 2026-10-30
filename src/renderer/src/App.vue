@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useChatStore } from './stores/chat'
+import { useViewerStore } from './stores/viewer'
 import { applyThemeValue } from './lib/theme'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
+import FileViewer from './components/FileViewer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 
 type ThemeChoice = 'light' | 'dark' | 'system'
 
 const store = useChatStore()
+const viewer = useViewerStore()
 const settingsOpen = ref(false)
 const settingsInitialTab = ref('preferences')
 const theme = ref<ThemeChoice>('system')
@@ -58,9 +61,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app" :class="{ 'sidebar-collapsed': store.sidebarCollapsed }">
+  <div
+    class="app"
+    :class="{ 'sidebar-collapsed': store.sidebarCollapsed, 'viewer-open': viewer.open }"
+  >
     <Sidebar @open-settings="openSettings" />
     <ChatView @open-settings="openSettings" />
+    <FileViewer v-if="viewer.open" />
     <SettingsDialog
       v-model:open="settingsOpen"
       :initial-tab="settingsInitialTab"
@@ -79,7 +86,15 @@ onBeforeUnmount(() => {
   transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.app.viewer-open {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 420px;
+}
+
 .app.sidebar-collapsed {
   grid-template-columns: 0px minmax(0, 1fr);
+}
+
+.app.sidebar-collapsed.viewer-open {
+  grid-template-columns: 0px minmax(0, 1fr) 420px;
 }
 </style>

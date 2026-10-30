@@ -12,7 +12,7 @@ let quitting = false
 // 而不必把整张图以 base64 塞进页面内存。
 const CSP_IMG_SRC = `'self' data: blob: ${IMAGE_PROTOCOL}:`
 
-const DEV_CSP = `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src ${CSP_IMG_SRC}; font-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*`
+const DEV_CSP = `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src ${CSP_IMG_SRC}; font-src 'self' data:; frame-src 'self' data: blob: https: http:; connect-src 'self' ws://localhost:* http://localhost:*`
 
 let devCspRegistered = false
 

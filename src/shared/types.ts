@@ -377,6 +377,7 @@ export type AgentEvent =
       toolUseId: string
       content: string
       isError: boolean
+      image?: { mimeType: string; dataUrl: string }
     }
   | {
       type: 'approval_required'
