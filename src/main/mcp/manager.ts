@@ -152,10 +152,20 @@ export function parseMcpToolName(name: string): { serverId: string; toolName: st
  */
 export function mergeBuiltinServers(configured: McpServerConfig[]): McpServerConfig[] {
   if (!Array.isArray(configured) || configured.length === 0) return BUILTIN_MCP_SERVERS
+  const builtinById = new Map(BUILTIN_MCP_SERVERS.map((s) => [s.id, s]))
   const ids = new Set(configured.map((s) => s?.id).filter(Boolean))
+  // 已有条目用内置补齐缺失字段（前端开关只写 {id, enabled}，不能因此丢 url/command）；
+  // 用户改过的 enabled 保留，以传入值为准。
+  const enriched = configured
+    .filter((s) => s && s.id)
+    .map((s) => {
+      const builtin = builtinById.get(s.id)
+      if (!builtin) return s
+      return { ...builtin, ...s, id: builtin.id }
+    })
   const missing = BUILTIN_MCP_SERVERS.filter((s) => !ids.has(s.id))
-  if (missing.length === 0) return configured
-  return [...configured, ...missing]
+  if (missing.length === 0) return enriched
+  return [...enriched, ...missing]
 }
 
 export function loadServerConfigs(): McpServerConfig[] {
@@ -168,9 +178,10 @@ export function loadServerConfigs(): McpServerConfig[] {
     // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
     .filter((s) => s && s.id && (s.url || s.command))
     .map((s) => ({ ...s, id: slug(s.id) }))
-    .filter((s) => s.enabled && (!Array.isArray(legacy) || legacy.includes(s.id)))
+    // 开关白名单（设置页 toggles）存在时以它为准：预置 enabled:false 的服务
+    //（Magpie 识图/生图）点开白名单即生效，不再被配置 enabled 盖住。
+    .filter((s) => (Array.isArray(legacy) ? legacy.includes(s.id) : s.enabled))
 }
-
 interface LiveServer {
   client: McpClient | HttpMcpClient
   tools: { name: string; description?: string; inputSchema: Record<string, unknown> }[]
@@ -185,11 +196,11 @@ export class McpManager {
   private static readonly STATUS_TTL_MS = 30_000
 
   /** 设置页用的实时状态：开关、进程死活、工具清单，全部实测。 */
-  async status(): Promise<
+  async status(force = false): Promise<
     { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
   > {
     const now = Date.now()
-    if (this.statusCache && now - this.statusCache.at < McpManager.STATUS_TTL_MS) {
+    if (!force && this.statusCache && now - this.statusCache.at < McpManager.STATUS_TTL_MS) {
       return this.statusCache.data
     }
     const data = await this.statusUncached()
@@ -197,6 +208,10 @@ export class McpManager {
     return data
   }
 
+  /** 开关变更后清掉 status() 缓存，否则 30 秒内 refresh 看到的还是旧开关。 */
+  invalidateStatusCache(): void {
+    this.statusCache = null
+  }
   private async statusUncached(): Promise<
     { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
   > {
@@ -218,7 +233,8 @@ export class McpManager {
       .map((s) => ({ ...s, id: slug(s.id) }))
     const legacy = getSetting<string[] | null>('agent.mcpServers', null)
     for (const config of all) {
-      const enabled = config.enabled && (!Array.isArray(legacy) || legacy.includes(config.id))
+      // 与 loadServerConfigs 同规则：白名单存在时以它为准。
+      const enabled = Array.isArray(legacy) ? legacy.includes(config.id) : config.enabled
       if (!enabled) {
         out.push({ id: config.id, name: config.name, enabled: false, state: 'disabled', toolCount: 0, tools: [] })
         continue

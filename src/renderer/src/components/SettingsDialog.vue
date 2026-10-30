@@ -1165,12 +1165,17 @@ async function refreshMcp(): Promise<void> {
 async function toggleMcpServer(item: McpServerItem): Promise<void> {
   item.enabled = !item.enabled
   const enabledIds = mcpServers.value.filter((s) => s.enabled).map((s) => s.id)
-  await window.shangbo.settings.set('agent.mcpServers', enabledIds)
-  // 双写配置的 enabled：生效逻辑是白名单 ∩ 配置 enabled，
-  // 只写白名单的话，预置 enabled:false 的服务（Magpie 识图/生图）永远打不开。
-  // 库里没 agent.mcp.servers 时不写空数组：否则全量覆盖会把内置全盖掉，
-  // 下次 status() 就返回空列表（0.8.1 一点刷新全没的原因）。
-  // 库里是旧版全量快照（没有 Magpie 两条）时，按 status() 的全量列表补齐缺失项再写。
+  try {
+    await window.shangbo.settings.set('agent.mcpServers', enabledIds)
+  } catch (error) {
+    item.enabled = !item.enabled
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '开关保存失败' }
+    return
+  }
+  // 白名单存在时以后端白名单为准（预置 enabled:false 的服务如 Magpie 也能打开），
+  // 同时把配置 enabled 双写对齐，保证白名单缺失/回退时仍一致。
+  // 库里没 agent.mcp.servers 时按设置页全量列表落一份全量快照：
+  // 只写白名单的话，merge 回落内置的默认 enabled:false 会盖住白名单。
   try {
     const settings = await window.shangbo.settings.getAll()
     const servers = settings['agent.mcp.servers'] as { id: string; enabled?: boolean }[] | undefined
@@ -1185,11 +1190,16 @@ async function toggleMcpServer(item: McpServerItem): Promise<void> {
         'agent.mcp.servers',
         next.map((s) => (s.id === item.id ? { ...s, enabled: item.enabled } : s))
       )
+    } else {
+      // 无快照或残留空数组：按当前开关状态落全量，避免 merge 回落内置盖住刚打开的 Magpie
+      await window.shangbo.settings.set(
+        'agent.mcp.servers',
+        mcpServers.value.map((s) => ({ id: s.id, enabled: s.id === item.id ? item.enabled : s.enabled }))
+      )
     }
   } catch {
     // 白名单已写，刷新后至少状态一致；配置写失败下次打开再试
-  }
-  feedback.value = {
+  }  feedback.value = {
     ok: true,
     message: item.enabled ? `已启用 MCP 服务「${item.name}」` : `已停用 MCP 服务「${item.name}」`
   }

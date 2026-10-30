@@ -2,6 +2,12 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.5] - 2026-10-30
+
+### 修复
+
+- **Magpie 开关点了弹回去**：三处叠加——生效逻辑是白名单 ∩ 配置 `enabled`，Magpie 预置关闭所以只写白名单打不开；库里无快照时前端不写配置，merge 回落内置的 `enabled:false` 把刚打开的盖回去；`status()` 30 秒缓存让刷新看不到新状态。现在白名单存在时以白名单为准，`mergeBuiltinServers` 用内置补回 `url/command`（前端极简 `{id,enabled}` 不丢地址），开关变更清缓存，写白名单失败回滚 UI。旧快照用户升级即自愈。
+
 ## [0.8.4] - 2026-10-29
 
 ### 新增

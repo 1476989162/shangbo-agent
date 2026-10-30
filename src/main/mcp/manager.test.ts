@@ -66,6 +66,21 @@ describe('MCP 服务管理器', () => {
     expect(ids.length).toBeGreaterThan(0)
   })
 
+  it('白名单能打开预置关闭的 Magpie：点开关即生效', () => {
+    settingsStub.servers = null
+    settingsStub.legacy = ['magpie-vision', 'magpie-image']
+    const ids = loadServerConfigs().map((s) => s.id)
+    expect(ids).toEqual(expect.arrayContaining(['magpie-vision', 'magpie-image']))
+  })
+
+  it('前端极简条目不丢内置字段：{id,enabled} 回落补 url', () => {
+    // toggle 无快照时会落全量 {id,enabled}，merge 必须用内置补回 url/command
+    settingsStub.servers = BUILTIN_MCP_SERVERS.map((s) => ({ id: s.id, enabled: true }) as McpServerConfig)
+    settingsStub.legacy = null
+    const vision = loadServerConfigs().find((s) => s.id === 'magpie-vision')
+    expect(vision?.url).toBe('http://127.0.0.1:34254/mcp/magpie/vision')
+  })
+
   it('旧版快照自动补齐新增内置项，用户改过的保留', () => {
     const old = BUILTIN_MCP_SERVERS.filter((s) => s.id !== 'magpie-vision' && s.id !== 'magpie-image').map((s) => ({
       ...s,

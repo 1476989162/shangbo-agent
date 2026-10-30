@@ -318,6 +318,10 @@ export function registerIpcHandlers(): void {
     setSetting(name, parsed)
     // 更新开关改完立即生效，不必等重启
     if (name.startsWith('app.update.')) updateService.syncSettings()
+    // MCP 开关改完清掉 status() 30 秒缓存，下一次 refresh 立即可见
+    if (name === 'agent.mcpServers' || name === 'agent.mcp.servers') {
+      mcpManager.invalidateStatusCache()
+    }
     // 远程开关/地址/准入密钥/策略改完立即生效
     if (
       name === 'remote.enabled' ||
