@@ -276,6 +276,11 @@ export interface McpServerStatus {
   toolCount: number
   tools: { name: string; description?: string }[]
   error?: string
+  kind: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,6 +330,8 @@ export interface SendPayload {
   model?: string
   /** 发送时侧边栏的协同 / 代码模式，用于让 Token 统计按真实选择归类。 */
   viewMode?: UsageMode
+  /** 开启隔离分支 (Worktree) */
+  worktree?: boolean
 }
 
 /** 主进程内部使用的发送请求：图片已落盘，只剩路径。 */

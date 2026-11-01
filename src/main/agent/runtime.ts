@@ -1,4 +1,4 @@
-﻿import { randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -209,13 +209,15 @@ export class AgentRuntime {
     emit: Emitter,
     task: () => Promise<void>
   ): Promise<void> {
+    const startTime = Date.now()
     try {
       await task()
     } catch (error) {
       log.error('[agent] 回合失败', error)
       emit({ type: 'run_error', runId, conversationId, messageId: '', error: describeError(error) })
     } finally {
-      this.finishRun(runId, conversationId, emit)
+      const durationMs = Date.now() - startTime
+      this.finishRun(runId, conversationId, emit, durationMs)
     }
   }
 
@@ -223,7 +225,7 @@ export class AgentRuntime {
    * 收尾一轮：清看门狗、从 runs 摘掉、推进队列、发 run_end。
    * 看门狗触发的强制收尾与正常收尾共用，保证只发一次 run_end。
    */
-  private finishRun(runId: string, conversationId: string, emit: Emitter): void {
+  private finishRun(runId: string, conversationId: string, emit: Emitter, durationMs?: number): void {
     const active = this.runs.get(runId)
     if (active?.watchdog) clearTimeout(active.watchdog)
     if (!this.runs.has(runId)) {
@@ -237,6 +239,34 @@ export class AgentRuntime {
     const queued = this.queueLength(conversationId)
     this.advanceQueue(conversationId)
     emit({ type: 'run_end', runId, conversationId, queued })
+
+    // 桌面通知：耗时 > 15s 或窗口处于非聚焦后台时触发系统通知
+    try {
+      if (getSetting<boolean>('agent.notifyCompletion', true)) {
+        import('electron')
+          .then((electron) => {
+            const NotificationClass = electron?.Notification
+            const BrowserWindowClass = electron?.BrowserWindow
+            if (NotificationClass && typeof NotificationClass.isSupported === 'function' && NotificationClass.isSupported()) {
+              const durationSec = (durationMs ?? 0) / 1000
+              const allWindows = BrowserWindowClass && typeof BrowserWindowClass.getAllWindows === 'function'
+                ? BrowserWindowClass.getAllWindows()
+                : []
+              const isUnfocused = allWindows.length > 0 && allWindows.every((w) => typeof w.isFocused === 'function' && !w.isFocused())
+              if (durationSec > 15 || isUnfocused) {
+                const convo = repo.getConversation(conversationId)
+                new NotificationClass({
+                  title: '尚搏 Agent 任务已完成',
+                  body: `会话「${convo?.title ?? '新对话'}」回复已生成完毕${durationSec > 1 ? `（耗时 ${durationSec.toFixed(0)} 秒）` : ''}。`
+                }).show()
+              }
+            }
+          })
+          .catch(() => {})
+      }
+    } catch {
+      // 忽略通知异常，不影响主流程
+    }
   }
 
   /**
@@ -322,14 +352,71 @@ export class AgentRuntime {
     const baseSystem = DEFAULT_SYSTEM_PROMPT
     const custom = getSetting<string>('agent.instructions', '')
 
+    let memoryTokens = 0
+    let memoryText = ''
+    const globalInstructions = getSetting<string>('cowork.globalInstructions', '').trim()
+    if (globalInstructions) {
+      memoryText += `【全局协作约定】\n${globalInstructions.slice(0, 4000)}\n`
+    }
+    if (getSetting<boolean>('cowork.useMemory', false)) {
+      const memories = getSetting<{ title?: unknown; desc?: unknown }[]>('cowork.memories', [])
+      const lines = memories
+        .slice(0, 8)
+        .map((item) => {
+          const title = typeof item.title === 'string' ? item.title.trim() : ''
+          const desc = typeof item.desc === 'string' ? item.desc.trim() : ''
+          return title && desc ? `- ${title}：${desc}` : ''
+        })
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 2400)
+      if (lines) memoryText += `【长期记忆】\n${lines}\n`
+    }
+    try {
+      const { listLessons } = await import('../autonomous/store')
+      const lessons = listLessons({ limit: 6 })
+      if (lessons.length > 0) {
+        memoryText += `【经验库】\n${lessons.map((l) => `${l.title}: ${l.content}`).join('\n')}`
+      }
+    } catch {}
+    if (memoryText) memoryTokens = estimateTokens(memoryText)
+
+    let skillsTokens = 0
+    let skillsText = ''
+    try {
+      const { scanAllSkillPacks, buildSkillRouterPrompt } = await import('../skills/loader')
+      const packs = await scanAllSkillPacks()
+      const routerPrompt = buildSkillRouterPrompt(packs)
+      if (routerPrompt) skillsText += routerPrompt
+    } catch {}
+
+    const plugins = getSetting<string[]>('agent.plugins', [
+      'feature-dev',
+      'commit-commands',
+      'ralph-loop',
+      'security-guidance'
+    ])
+    const pluginDirectives: string[] = []
+    if (plugins.includes('feature-dev')) pluginDirectives.push('复杂改造先查结构、给规划再改。')
+    if (plugins.includes('commit-commands')) pluginDirectives.push('用户要提交时先 git status/diff 再写语义化信息。')
+    if (plugins.includes('ralph-loop')) pluginDirectives.push('改完代码有测试就跑，报错读栈自愈。')
+    if (plugins.includes('security-guidance')) pluginDirectives.push('注意密钥/SQL注入/命令拼接风险。')
+    if (plugins.includes('github')) pluginDirectives.push('GitHub 操作优先用本机 gh。')
+    if (plugins.includes('figma')) pluginDirectives.push('解析 Figma 设计稿标注、提取色值与尺寸规范，严格还原 UI 布局。')
+    if (plugins.includes('supabase')) pluginDirectives.push('Supabase 数据库迁移、Row Level Security (RLS) 与 Edge Functions 规范。')
+    if (plugins.includes('vercel')) pluginDirectives.push('遵循 Vercel 部署规范与 Serverless 边缘函数最佳实践。')
+    if (pluginDirectives.length > 0) {
+      skillsText += `\n${pluginDirectives.join(' ')}`
+    }
+    if (skillsText) skillsTokens = estimateTokens(skillsText)
+
     return {
       // 工具 schema 以 JSON 形式进请求体，按字符估算（CJK 约 1 token/字）
       systemTools: estimateTokens(JSON.stringify([...systemTools, SPAWN_SUBAGENT_SCHEMA])),
       mcp: estimateTokens(JSON.stringify(mcpTools)),
       systemPrompt: estimateTokens(custom ? `${baseSystem}\n\n${custom}` : baseSystem),
-      // Skills 与记忆文件当前没有接入请求，这里如实计 0 而不是编一个数
-      skills: 0,
-      memory: 0
+      skills: skillsTokens,
+      memory: memoryTokens
     }
   }
 
@@ -761,14 +848,43 @@ export class AgentRuntime {
     const conversation = repo.getConversation(payload.conversationId)
     if (!conversation) throw new Error('会话不存在或已被删除')
 
-    await this.runModel(
-      runId,
-      conversation,
-      userMessage,
-      { providerId: payload.providerId, model: payload.model },
-      emit,
-      controller
-    )
+    let activeWorkingDir = conversation.workingDir
+    let worktreeCleanup: (() => Promise<string>) | null = null
+    const useWorktree =
+      (payload.worktree || getSetting<boolean>('agent.worktree', false)) &&
+      !!conversation.workingDir
+
+    if (useWorktree && conversation.workingDir) {
+      try {
+        const isolation = await this.isolateSubagent(conversation.workingDir)
+        if (isolation) {
+          activeWorkingDir = isolation.workDir
+          worktreeCleanup = isolation.finalize
+        }
+      } catch (err) {
+        log.warn('[worktree] 创建隔离分支失败，原地执行:', err)
+      }
+    }
+
+    try {
+      await this.runModel(
+        runId,
+        { ...conversation, workingDir: activeWorkingDir },
+        userMessage,
+        { providerId: payload.providerId, model: payload.model },
+        emit,
+        controller
+      )
+    } finally {
+      if (worktreeCleanup) {
+        try {
+          const report = await worktreeCleanup()
+          log.info(`[worktree] ${report}`)
+        } catch (err) {
+          log.error('[worktree] 回收隔离工作区失败:', err)
+        }
+      }
+    }
   }
 
   /**
@@ -949,7 +1065,7 @@ export class AgentRuntime {
           isError: true
         }
       }
-      return this.invokeMcpTool(runId, messageId, call, conversationId, emit, controller)
+      return this.invokeMcpTool(runId, messageId, call, conversationId, emit, controller, workingDirectory)
     }
     const tool = toolRegistry.get(call.name)
     if (!tool) {
@@ -1084,7 +1200,8 @@ export class AgentRuntime {
     call: { id: string; name: string; input: unknown },
     conversationId: string,
     emit: Emitter,
-    controller: AbortController
+    controller: AbortController,
+    workingDirectory?: string | null
   ): Promise<{ content: string; isError: boolean; image?: { mimeType: string; dataUrl: string } }> {
     const wishActive = this.isWishMode(runId, conversationId)
     if (getSetting<boolean>('agent.readOnly', false) && !wishActive) {
@@ -1128,7 +1245,7 @@ export class AgentRuntime {
       }
     }
 
-    return mcpManager.callTool(parsed.serverId, parsed.toolName, call.input, controller.signal)
+    return mcpManager.callTool(parsed.serverId, parsed.toolName, call.input, controller.signal, workingDirectory ?? undefined)
   }
 
   /** git 直调（worktree 隔离用），失败返回 null 由调用方回落原地跑。 */  private async git(args: string[], cwd: string): Promise<string | null> {

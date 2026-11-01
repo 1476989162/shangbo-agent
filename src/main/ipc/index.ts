@@ -1,4 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import fs from 'node:fs'
+import log from 'electron-log/main'
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
 import { z } from 'zod'
 import { IPC } from '../../shared/ipc'
 import { bridgeEventsToWindow } from '../events/bus'
@@ -9,6 +11,7 @@ import { getDbPath } from '../db'
 import { getAllSettings, getSetting, setSetting } from '../settings'
 import { parseSettingValue } from '../settingsSchema'
 import { toolRegistry } from '../tools'
+import { checkTerminalCommand } from './terminalGuard'
 import { agentRuntime } from '../agent/runtime'
 import {
   adapterForKind,
@@ -72,7 +75,8 @@ const SendPayloadSchema = z
       .optional(),
     providerId: z.string().optional(),
     model: z.string().optional(),
-    viewMode: z.enum(['cowork', 'code']).optional()
+    viewMode: z.enum(['cowork', 'code']).optional(),
+    worktree: z.boolean().optional()
   })
   // 允许「只发图不发字」，但两者不能同时为空
   .refine((value) => value.content.trim().length > 0 || (value.images?.length ?? 0) > 0, {
@@ -124,12 +128,19 @@ export function registerIpcHandlers(): void {
           }
         | undefined
     ) => {
+      let workingDir = typeof input === 'object' ? (input?.workingDir ?? null) : null
+      if (!workingDir) {
+        const coworkPath = getSetting<string>('cowork.filesPath', '')
+        if (coworkPath && fs.existsSync(coworkPath)) {
+          workingDir = coworkPath
+        }
+      }
       if (typeof input === 'string') {
-        return repo.createConversation({ title: input })
+        return repo.createConversation({ title: input, workingDir })
       }
       return repo.createConversation({
         title: input?.title ?? '新对话',
-        workingDir: input?.workingDir ?? null,
+        workingDir,
         projectId: input?.projectId ?? null,
         mode: input?.mode ?? null
       })
@@ -387,7 +398,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.appGitBranch, async (_event, dir: unknown) => {
     const parsed = z.string().nullable().safeParse(dir)
-    if (!parsed.success || !parsed.data) return 'main'
+    if (!parsed.success || !parsed.data) return ''
     try {
       const { execFile } = await import('node:child_process')
       const { promisify } = await import('node:util')
@@ -396,10 +407,174 @@ export function registerIpcHandlers(): void {
         cwd: parsed.data,
         timeout: 2000
       })
-      return stdout.trim() || 'main'
+      return stdout.trim() || ''
     } catch {
-      return 'main'
+      return ''
     }
+  })
+
+  ipcMain.handle(IPC.appGitDiff, async (_event, dir: unknown) => {
+    const parsed = z.string().nullable().safeParse(dir)
+    if (!parsed.success || !parsed.data) return ''
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const exec = promisify(execFile)
+      const { stdout } = await exec('git', ['diff', 'HEAD'], {
+        cwd: parsed.data,
+        timeout: 5000
+      })
+      return stdout || ''
+    } catch {
+      return ''
+    }
+  })
+
+  ipcMain.handle(IPC.appGitStatus, async (_event, dir: unknown) => {
+    const parsed = z.string().nullable().safeParse(dir)
+    if (!parsed.success || !parsed.data) return ''
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const exec = promisify(execFile)
+      const { stdout } = await exec('git', ['status', '--short'], {
+        cwd: parsed.data,
+        timeout: 5000
+      })
+      return stdout || ''
+    } catch {
+      return ''
+    }
+  })
+
+  ipcMain.handle(IPC.browserClearData, async () => {
+    try {
+      const ses = session.defaultSession
+      await ses.clearStorageData()
+      await ses.clearCache()
+      return true
+    } catch (e) {
+      log.error('[browser] clearStorageData 失败', e)
+      return false
+    }
+  })
+
+  ipcMain.handle(IPC.appToggleDevTools, () => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (win) {
+      win.webContents.toggleDevTools()
+      return true
+    }
+    return false
+  })
+
+  ipcMain.handle(IPC.appOpenPath, async (_event, targetPath: unknown) => {
+    const p = z.string().min(1).parse(targetPath)
+    return shell.openPath(p)
+  })
+
+  ipcMain.handle(IPC.appExecCommand, async (_event, cmdRaw: unknown, dirRaw?: unknown) => {
+    const cmd = z.string().min(1).parse(cmdRaw)
+    const cwd = typeof dirRaw === 'string' && dirRaw ? dirRaw : process.cwd()
+    // 工作台终端与工具层共用同一套护栏，原因见 terminalGuard.ts。
+    const guard = checkTerminalCommand(cmd, cwd)
+    if (guard.blocked) {
+      return { stdout: '', stderr: guard.reason ?? '已拒绝执行。', exitCode: 1 }
+    }
+    const { exec } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const execAsync = promisify(exec)
+    const configuredShell = getSetting<string>('code.defaultShell', '').trim()
+    const shellExe = configuredShell || (process.platform === 'win32' ? 'powershell.exe' : '/bin/sh')
+    try {
+      const { stdout, stderr } = await execAsync(cmd, {
+        cwd,
+        timeout: 30000,
+        maxBuffer: 10 * 1024 * 1024,
+        shell: shellExe
+      })
+      return { stdout: stdout ?? '', stderr: stderr ?? '', exitCode: 0 }
+    } catch (err: any) {
+      return {
+        stdout: err.stdout ?? '',
+        stderr: err.stderr ?? err.message ?? String(err),
+        exitCode: typeof err.code === 'number' ? err.code : 1
+      }
+    }
+  })
+
+  ipcMain.handle(IPC.configExport, async () => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
+      title: '导出配置与经验库',
+      defaultPath: `shangbo-config-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }]
+    }
+    const { canceled, filePath } = win
+      ? await dialog.showSaveDialog(win, opts)
+      : await dialog.showSaveDialog(opts)
+    if (canceled || !filePath) return { ok: false, message: '已取消' }
+    const settings = getAllSettings()
+    const lessons = autonomousStore.listLessons({})
+    const payload = { version: app.getVersion(), exportedAt: Date.now(), settings, lessons }
+    const fsPromises = await import('node:fs/promises')
+    await fsPromises.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8')
+    return { ok: true, path: filePath }
+  })
+
+  ipcMain.handle(IPC.configImport, async () => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
+      title: '选择恢复配置文件',
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }],
+      properties: ['openFile' as const]
+    }
+    const { canceled, filePaths } = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
+    if (canceled || filePaths.length === 0) return { ok: false, message: '已取消' }
+    const fsPromises = await import('node:fs/promises')
+    const raw = await fsPromises.readFile(filePaths[0], 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (parsed.settings && typeof parsed.settings === 'object') {
+      for (const [k, v] of Object.entries(parsed.settings)) {
+        try {
+          const val = parseSettingValue(k, v)
+          setSetting(k, val)
+        } catch {}
+      }
+    }
+    if (Array.isArray(parsed.lessons)) {
+      for (const item of parsed.lessons) {
+        if (item && item.title && item.content) {
+          try {
+            autonomousStore.upsertLesson(item)
+          } catch {}
+        }
+      }
+    }
+    return { ok: true, message: '配置与经验库已恢复' }
+  })
+
+  ipcMain.handle(IPC.conversationsExportAll, async () => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
+      title: '导出全部会话记录',
+      defaultPath: `shangbo-conversations-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }]
+    }
+    const { canceled, filePath } = win
+      ? await dialog.showSaveDialog(win, opts)
+      : await dialog.showSaveDialog(opts)
+    if (canceled || !filePath) return { ok: false, message: '已取消' }
+    const convs = repo.listConversations()
+    const all = convs.map((c) => ({
+      conversation: c,
+      messages: repo.listMessages(c.id)
+    }))
+    const fsPromises = await import('node:fs/promises')
+    await fsPromises.writeFile(filePath, JSON.stringify(all, null, 2), 'utf-8')
+    return { ok: true, path: filePath }
   })
 
   ipcMain.handle(IPC.windowHide, () => {
@@ -409,11 +584,14 @@ export function registerIpcHandlers(): void {
 
   /** 系统目录选择对话框；取消时返回 null。 */
   ipcMain.handle(IPC.dialogPickFolder, async () => {
-    const focused = BrowserWindow.getFocusedWindow() ?? undefined
-    const result = await dialog.showOpenDialog(focused!, {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
       title: '选择项目文件夹',
-      properties: ['openDirectory', 'createDirectory']
-    })
+      properties: ['openDirectory' as const, 'createDirectory' as const]
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
@@ -561,7 +739,9 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.lessonsList, (_event, projectPath: unknown) => {
     const parsed = z.string().max(2000).nullable().optional().parse(projectPath)
-    return autonomousStore.listLessons({ projectPath: parsed ?? null })
+    return parsed
+      ? autonomousStore.listLessons({ projectPath: parsed })
+      : autonomousStore.listLessons({ all: true })
   })
 
   ipcMain.handle(IPC.lessonsSave, (_event, input: unknown) =>

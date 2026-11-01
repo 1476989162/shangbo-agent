@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import log from 'electron-log/main'
 import { getSetting } from '../settings'
 import { McpClient } from './client'
@@ -12,6 +14,21 @@ import type { ToolSchema } from '../providers/types'
  * 存活：进程一旦拉起就常驻复用，回合结束不杀，避免每轮重复握手。
  * 失败：单个服务起不来只记日志跳过，不炸整轮（与网关降级同一哲学）。
  */
+
+export interface McpServerStatus {
+  id: string
+  name: string
+  enabled: boolean
+  state: 'ready' | 'error' | 'disabled'
+  toolCount: number
+  tools: { name: string; description?: string }[]
+  error?: string
+  kind: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+}
 
 export interface McpServerConfig {
   id: string
@@ -169,12 +186,76 @@ export function mergeBuiltinServers(configured: McpServerConfig[]): McpServerCon
   return [...enriched, ...missing]
 }
 
-export function loadServerConfigs(): McpServerConfig[] {
+export function loadProjectMcpConfigs(workingDir: string): McpServerConfig[] {
+  const configs: McpServerConfig[] = []
+  const candidates = [
+    path.join(workingDir, '.mcp.json'),
+    path.join(workingDir, '.trae', 'mcp.json')
+  ]
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) continue
+      const content = fs.readFileSync(filePath, 'utf-8')
+      const parsed = JSON.parse(content)
+      const rawServers = parsed.mcpServers || parsed.servers || parsed
+      if (rawServers && typeof rawServers === 'object') {
+        if (Array.isArray(rawServers)) {
+          for (const item of rawServers) {
+            if (item && (item.command || item.url)) {
+              configs.push({
+                id: slug(item.id || item.name || 'project-mcp'),
+                name: item.name || item.id || 'Project MCP',
+                command: item.command || '',
+                args: Array.isArray(item.args) ? item.args : [],
+                env: item.env,
+                url: item.url,
+                enabled: item.enabled !== false
+              })
+            }
+          }
+        } else {
+          for (const [key, val] of Object.entries<Record<string, unknown>>(rawServers)) {
+            if (val && typeof val === 'object' && ((val as any).command || (val as any).url)) {
+              const obj = val as any
+              configs.push({
+                id: slug(key),
+                name: obj.name || key,
+                command: obj.command || '',
+                args: Array.isArray(obj.args) ? obj.args : [],
+                env: obj.env,
+                url: obj.url,
+                enabled: obj.disabled !== true && obj.enabled !== false
+              })
+            }
+          }
+        }
+      }
+    } catch (e) {
+      log.warn(`[MCP] Failed to parse project MCP config at ${filePath}:`, e)
+    }
+  }
+  return configs
+}
+
+export function loadServerConfigs(workingDir?: string): McpServerConfig[] {
   const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
   const legacy = getSetting<string[] | null>('agent.mcpServers', null)
-  // 0.8.1 的开关双写 bug 会在库里留下一个空数组（把内置全盖掉）：
-  // 空数组视为“没配过”，回落内置避免设置页一点刷新就全空。
-  const effective = mergeBuiltinServers(configured)
+  let effective = mergeBuiltinServers(configured)
+
+  if (workingDir && getSetting<boolean>('agent.mcp.projectLevel', true)) {
+    const projectConfigs = loadProjectMcpConfigs(workingDir)
+    if (projectConfigs.length > 0) {
+      const existingIds = new Set(effective.map((s) => s.id))
+      for (const p of projectConfigs) {
+        if (existingIds.has(p.id)) {
+          effective = effective.map((s) => (s.id === p.id ? { ...s, ...p } : s))
+        } else {
+          effective.push(p)
+        }
+      }
+    }
+  }
+
   return effective
     // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
     .filter((s) => s && s.id && (s.url || s.command))
@@ -197,9 +278,7 @@ export class McpManager {
   private static readonly STATUS_TTL_MS = 30_000
 
   /** 设置页用的实时状态：开关、进程死活、工具清单，全部实测。 */
-  async status(force = false): Promise<
-    { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
-  > {
+  async status(force = false): Promise<McpServerStatus[]> {
     const now = Date.now()
     if (!force && this.statusCache && now - this.statusCache.at < McpManager.STATUS_TTL_MS) {
       return this.statusCache.data
@@ -213,18 +292,8 @@ export class McpManager {
   invalidateStatusCache(): void {
     this.statusCache = null
   }
-  private async statusUncached(): Promise<
-    { id: string; name: string; enabled: boolean; state: 'ready' | 'error' | 'disabled'; toolCount: number; tools: { name: string; description?: string }[]; error?: string }[]
-  > {
-    const out: {
-      id: string
-      name: string
-      enabled: boolean
-      state: 'ready' | 'error' | 'disabled'
-      toolCount: number
-      tools: { name: string; description?: string }[]
-      error?: string
-    }[] = []
+  private async statusUncached(): Promise<McpServerStatus[]> {
+    const out: McpServerStatus[] = []
     // 关掉的服务不拉进程，直接标 disabled（不验证死活）。
     const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
     // 与 loadServerConfigs 同规则：空数组回落内置，旧快照补齐新增内置项。
@@ -236,8 +305,21 @@ export class McpManager {
     for (const config of all) {
       // 与 loadServerConfigs 同规则：白名单存在时以它为准。
       const enabled = Array.isArray(legacy) ? legacy.includes(config.id) : config.enabled
+      const kind: 'stdio' | 'http' = config.url ? 'http' : 'stdio'
       if (!enabled) {
-        out.push({ id: config.id, name: config.name, enabled: false, state: 'disabled', toolCount: 0, tools: [] })
+        out.push({
+          id: config.id,
+          name: config.name,
+          enabled: false,
+          state: 'disabled',
+          toolCount: 0,
+          tools: [],
+          kind,
+          command: config.command,
+          args: config.args,
+          url: config.url,
+          env: config.env
+        })
         continue
       }
       const live = await this.ensureStarted(config)
@@ -249,7 +331,12 @@ export class McpManager {
           state: 'error',
           toolCount: 0,
           tools: [],
-          error: this.lastError.get(config.id) ?? '启动失败'
+          error: this.lastError.get(config.id) ?? '启动失败',
+          kind,
+          command: config.command,
+          args: config.args,
+          url: config.url,
+          env: config.env
         })
         continue
       }
@@ -259,16 +346,21 @@ export class McpManager {
         enabled: true,
         state: 'ready',
         toolCount: live.tools.length,
-        tools: live.tools.map((t) => ({ name: t.name, description: t.description }))
+        tools: live.tools.map((t) => ({ name: t.name, description: t.description })),
+        kind,
+        command: config.command,
+        args: config.args,
+        url: config.url,
+        env: config.env
       })
     }
     return out
   }
 
   /** 聚合所有已启用服务的工具清单（顺手拉起还没起的进程）。 */
-  async toolSchemas(): Promise<ToolSchema[]> {
+  async toolSchemas(workingDir?: string): Promise<ToolSchema[]> {
     const out: ToolSchema[] = []
-    for (const config of loadServerConfigs()) {
+    for (const config of loadServerConfigs(workingDir)) {
       const live = await this.ensureStarted(config)
       if (!live) continue
       for (const tool of live.tools) {
@@ -286,9 +378,10 @@ export class McpManager {
     serverId: string,
     toolName: string,
     args: unknown,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    workingDir?: string
   ): Promise<McpCallResult> {
-    const config = loadServerConfigs().find((s) => s.id === serverId)
+    const config = loadServerConfigs(workingDir).find((s) => s.id === serverId)
     if (!config) return { content: `MCP 服务未配置或未启用：${serverId}`, isError: true }
     const live = await this.ensureStarted(config)
     if (!live) return { content: `MCP 服务启动失败：${config.name}，已跳过`, isError: true }

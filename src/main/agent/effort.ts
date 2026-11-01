@@ -35,6 +35,22 @@ export function isSenseNova(model: string): boolean {
   return /sensenova/i.test(model)
 }
 
+export function isOpenAIReasoning(model: string): boolean {
+  return /(o1|o3|o4|gpt-5)/i.test(model)
+}
+
+export function isClaudeReasoning(model: string): boolean {
+  return /(claude-3-7|claude-3\.7|claude-4|claude-sonnet-4|claude-opus-4)/i.test(model)
+}
+
+export function isQwenReasoning(model: string): boolean {
+  return /(qwq|qwen3)/i.test(model)
+}
+
+export function isGeminiReasoning(model: string): boolean {
+  return /(gemini-2\.5|gemini-3)/i.test(model)
+}
+
 function normalizeEffort(effort: string): EffortSetting {
   if (effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'max') {
     return effort
@@ -88,6 +104,42 @@ export function resolveEffort(model: string, effort: string): ResolvedEffort {
           : level === 'max' || level === 'high'
             ? '\n\n【极限】推理深度已由 reasoning_effort=high 接管，直接给结论与工具调用。'
             : ''
+    }
+  }
+
+  if (isOpenAIReasoning(model)) {
+    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : 'high'
+    return {
+      reasoningEffort: mapped,
+      maxTokens: 65_536,
+      hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
+    }
+  }
+
+  if (isClaudeReasoning(model)) {
+    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : level === 'max' ? 'max' : 'high'
+    return {
+      reasoningEffort: mapped,
+      maxTokens: 64_000,
+      hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
+    }
+  }
+
+  if (isQwenReasoning(model)) {
+    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : level === 'max' ? 'max' : 'high'
+    return {
+      reasoningEffort: mapped,
+      maxTokens: 32_768,
+      hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
+    }
+  }
+
+  if (isGeminiReasoning(model)) {
+    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : 'high'
+    return {
+      reasoningEffort: mapped,
+      maxTokens: 65_536,
+      hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
     }
   }
 

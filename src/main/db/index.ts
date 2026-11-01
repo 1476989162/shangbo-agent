@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
 import log from 'electron-log/main'
 
 let db: Database.Database | null = null
@@ -228,7 +229,13 @@ function migrate(database: Database.Database): void {
 export function getDb(): Database.Database {
   if (db) return db
 
-  dbFilePath = join(app.getPath('userData'), 'shangbo-agent.db')
+  const dir = app.getPath('userData')
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    // 忽略目录已存在或创建失败
+  }
+  dbFilePath = join(dir, 'shangbo-agent.db')
   db = new Database(dbFilePath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')

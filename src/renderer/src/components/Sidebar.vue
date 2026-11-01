@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { UpdateState } from '@shared/types'
 import { useChatStore } from '../stores/chat'
+import { t } from '../i18n'
 import logoImg from '../assets/logo.png'
 
 const emit = defineEmits<{ openSettings: [tab?: string] }>()
@@ -134,17 +135,18 @@ function openTab(tab: string): void {
             <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3" />
             <path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
           </svg>
-          协同
+          {{ t('nav.cowork') }}
         </button>
         <button
           class="mode-btn"
           :class="{ active: store.viewMode === 'code' }"
           title="代码视图：以代码/路径/命令为第一语言，直接改文件、给完整命令与真实输出，界面加宽并默认展开工具详情"
           @click="store.setViewMode('code')"
-        >          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
             <path d="M5.5 5L2.5 8L5.5 11M10.5 5L13.5 8L10.5 11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
-          代码
+          {{ t('nav.code') }}
         </button>
       </div>
     </header>
@@ -155,7 +157,7 @@ function openTab(tab: string): void {
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         </svg>
-        <span>新建会话</span>
+        <span>{{ t('nav.newChat') }}</span>
       </button>
 
       <div class="action-row">

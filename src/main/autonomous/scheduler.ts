@@ -251,7 +251,13 @@ class AutonomousScheduler {
       this.verifyingConversations.delete(conversationId)
       if (getSetting<boolean>('agent.wish.evolve', true)) {
         const lesson = this.extractLesson(task, result.output)
-      if (lesson) store.upsertLesson(lesson)
+        if (lesson) {
+          const existing = store.lessonForTask(task.id)
+          store.upsertLesson({
+            ...lesson,
+            id: existing?.id
+          })
+        }
       }
       this.finishSuccess(taskId, runRecordId, conversationId, result.output)
       return

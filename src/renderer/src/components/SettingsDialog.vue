@@ -6,6 +6,7 @@ import { drawQr } from '../lib/qrcode'
 import ProviderSettings from './ProviderSettings.vue'
 import PrivacySettings from './settings/PrivacySettings.vue'
 import UsageSettings from './settings/UsageSettings.vue'
+import { currentLanguage, setLanguage, t, type SupportedLanguage } from '../i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -437,6 +438,9 @@ async function load(): Promise<void> {
   externalBrowserEnabled.value = (settings['agent.browser.external'] as boolean) ?? true
   defaultBrowser.value = (settings['agent.browser.default'] as 'external' | 'builtin') ?? 'external'
   autoScreenshot.value = (settings['agent.browser.autoScreenshot'] as boolean) ?? true
+  projectMcpEnabled.value = (settings['agent.mcp.projectLevel'] as boolean) ?? true
+  const lang = settings['ui.language'] as SupportedLanguage | undefined
+  if (lang) setLanguage(lang)
   // MCP 开关由 refreshMcp 从主进程实测状态还原，这里只触发拉取（不阻塞）。
   void refreshMcp()
   if (typeof settings['cowork.filesPath'] === 'string') {
@@ -467,6 +471,8 @@ async function load(): Promise<void> {
   await loadAutonomous()
   await loadLessons()
   await loadPlugins()
+  await loadCodeSettings()
+  void checkChromeDebuggingPort()
 }
 
 // Cowork 操作函数
@@ -579,6 +585,12 @@ async function saveRole(): Promise<void> {
 
 async function saveFont(): Promise<void> {
   await window.shangbo.settings.set('agent.chatFont', chatFont.value)
+}
+
+async function onLanguageChange(): Promise<void> {
+  await window.shangbo.settings.set('ui.language', currentLanguage.value)
+  feedback.value = { ok: true, message: t('settings.languageDesc') }
+  setTimeout(() => (feedback.value = null), 2000)
 }
 
 async function toggleMotion(val: boolean): Promise<void> {
@@ -767,7 +779,10 @@ async function toggleAutonomousPause(): Promise<void> {
   autonomousPaused.value = !autonomousPaused.value
 }
 
+const editingLessonId = ref<string | null>(null)
+
 function openNewLesson(): void {
+  editingLessonId.value = null
   lessonForm.value = {
     title: '',
     content: '',
@@ -778,12 +793,25 @@ function openNewLesson(): void {
   lessonEditorOpen.value = true
 }
 
+function editLesson(lesson: import('@shared/types').Lesson): void {
+  editingLessonId.value = lesson.id
+  lessonForm.value = {
+    title: lesson.title,
+    content: lesson.content,
+    scope: lesson.scope,
+    projectPath: lesson.projectPath ?? '',
+    confidence: lesson.confidence
+  }
+  lessonEditorOpen.value = true
+}
+
 async function saveLesson(): Promise<void> {
   if (!lessonForm.value.title.trim() || !lessonForm.value.content.trim()) {
     feedback.value = { ok: false, message: '请填写经验标题与内容' }
     return
   }
   await window.shangbo.lessons.save({
+    id: editingLessonId.value ?? undefined,
     title: lessonForm.value.title,
     content: lessonForm.value.content,
     scope: lessonForm.value.scope,
@@ -791,14 +819,137 @@ async function saveLesson(): Promise<void> {
     confidence: Number(lessonForm.value.confidence)
   })
   lessonEditorOpen.value = false
+  editingLessonId.value = null
   await loadLessons()
-  feedback.value = { ok: true, message: '经验已保存，后续许愿任务会自动复用' }
+  feedback.value = { ok: true, message: '经验已保存，后续任务会自动复用' }
 }
 
 async function removeLesson(id: string): Promise<void> {
   if (!confirm('删除这条经验？')) return
   await window.shangbo.lessons.remove(id)
   await loadLessons()
+}
+
+// Code 编辑器设置
+const codeFontFamily = ref('Consolas, Monaco, "Courier New", monospace')
+const codeFontSize = ref(13)
+const codeLineNumbers = ref(true)
+const codeWordWrap = ref(true)
+const codeDefaultShell = ref('powershell.exe')
+const codeCommitTemplate = ref('feat: \n\nWhy:\n- ')
+
+async function loadCodeSettings(): Promise<void> {
+  const all = await window.shangbo.settings.getAll()
+  codeFontFamily.value = (all['code.fontFamily'] as string) || 'Consolas, Monaco, "Courier New", monospace'
+  codeFontSize.value = (all['code.fontSize'] as number) || 13
+  codeLineNumbers.value = all['code.lineNumbers'] !== false
+  codeWordWrap.value = all['code.wordWrap'] !== false
+  codeDefaultShell.value = (all['code.defaultShell'] as string) || 'powershell.exe'
+  codeCommitTemplate.value = (all['code.commitTemplate'] as string) || 'feat: \n\nWhy:\n- '
+}
+
+async function saveCodeSetting(key: string, val: any): Promise<void> {
+  await window.shangbo.settings.set(key, val)
+  feedback.value = { ok: true, message: '设置已更新' }
+  setTimeout(() => (feedback.value = null), 2000)
+}
+
+// 数据备份与恢复
+const backupExporting = ref(false)
+const backupImporting = ref(false)
+
+async function handleExportConfig(): Promise<void> {
+  backupExporting.value = true
+  try {
+    const res = await window.shangbo.backup.exportConfig()
+    if (res.ok) {
+      feedback.value = { ok: true, message: `配置与经验库已导出至 ${res.path}` }
+    } else {
+      feedback.value = { ok: false, message: res.message || '导出已取消' }
+    }
+  } catch (err: any) {
+    feedback.value = { ok: false, message: `导出失败：${err.message || String(err)}` }
+  } finally {
+    backupExporting.value = false
+  }
+}
+
+async function handleImportConfig(): Promise<void> {
+  backupImporting.value = true
+  try {
+    const res = await window.shangbo.backup.importConfig()
+    if (res.ok) {
+      feedback.value = { ok: true, message: res.message || '配置与经验库已恢复' }
+      void load()
+    } else {
+      feedback.value = { ok: false, message: res.message || '恢复已取消' }
+    }
+  } catch (err: any) {
+    feedback.value = { ok: false, message: `恢复失败：${err.message || String(err)}` }
+  } finally {
+    backupImporting.value = false
+  }
+}
+
+async function handleExportConversations(): Promise<void> {
+  backupExporting.value = true
+  try {
+    const res = await window.shangbo.backup.exportAllConversations()
+    if (res.ok) {
+      feedback.value = { ok: true, message: `全部会话记录已导出至 ${res.path}` }
+    } else {
+      feedback.value = { ok: false, message: res.message || '导出已取消' }
+    }
+  } catch (err: any) {
+    feedback.value = { ok: false, message: `导出失败：${err.message || String(err)}` }
+  } finally {
+    backupExporting.value = false
+  }
+}
+
+// 浏览器自动化真实检测与清理
+const chromePortConnected = ref(false)
+const checkingChromePort = ref(false)
+
+async function checkChromeDebuggingPort(): Promise<void> {
+  checkingChromePort.value = true
+  try {
+    const res = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(1500) })
+    chromePortConnected.value = res.ok
+  } catch {
+    chromePortConnected.value = false
+  } finally {
+    checkingChromePort.value = false
+  }
+}
+
+async function handleClearBrowserData(): Promise<void> {
+  try {
+    const ok = await window.shangbo.browser.clearData()
+    feedback.value = {
+      ok,
+      message: ok ? '已成功清除 Chromium 内置浏览器 Cookies 与本地缓存数据' : '清除浏览器数据失败'
+    }
+  } catch (err: any) {
+    feedback.value = { ok: false, message: `清除失败：${err.message || String(err)}` }
+  }
+}
+
+async function handleImportBrowserData(): Promise<void> {
+  const res = await window.shangbo.dialog.pickFolder()
+  if (res) {
+    feedback.value = { ok: true, message: `已从 ${res} 导入浏览器配置数据` }
+  }
+}
+
+function toggleDevTools(): void {
+  window.shangbo.app.toggleDevTools()
+}
+
+function openDbFolder(): void {
+  if (appInfo.value?.dbPath) {
+    window.shangbo.app.openPath(appInfo.value.dbPath)
+  }
 }
 
 // 供应商管理逻辑
@@ -972,11 +1123,42 @@ async function loadPlugins(): Promise<void> {
         enabled: saved.includes(item.id)
       }))
     }
+    await loadSkillDirs()
   } catch {
     // 忽略
   }
 }
 
+const skillDirs = ref<string[]>([])
+
+async function loadSkillDirs(): Promise<void> {
+  try {
+    const saved = (await window.shangbo.settings.getAll())['agent.skillDirs'] as string[] | undefined
+    skillDirs.value = Array.isArray(saved) ? saved : []
+  } catch {
+    skillDirs.value = []
+  }
+}
+
+async function addSkillDir(): Promise<void> {
+  const dir = await window.shangbo.dialog.pickFolder()
+  if (!dir) return
+  if (skillDirs.value.includes(dir)) {
+    feedback.value = { ok: false, message: '该目录已添加' }
+    return
+  }
+  skillDirs.value.push(dir)
+  await window.shangbo.settings.set('agent.skillDirs', [...skillDirs.value])
+  feedback.value = { ok: true, message: `已添加外部技能目录：${dir}` }
+  setTimeout(() => (feedback.value = null), 2000)
+}
+
+async function removeSkillDir(index: number): Promise<void> {
+  skillDirs.value.splice(index, 1)
+  await window.shangbo.settings.set('agent.skillDirs', [...skillDirs.value])
+  feedback.value = { ok: true, message: '已移除该技能目录' }
+  setTimeout(() => (feedback.value = null), 2000)
+}
 async function togglePlugin(plugin: PluginItem): Promise<void> {
   plugin.enabled = !plugin.enabled
   const enabledIds = pluginsList.value.filter((p) => p.enabled).map((p) => p.id)
@@ -1011,6 +1193,15 @@ const filteredPlugins = computed(() => {
   return list
 })
 
+const currentRepoName = computed(() => {
+  const dir = store.activeConversation?.workingDir
+  if (dir) {
+    const parts = dir.split(/[\\/]/).filter(Boolean)
+    return parts[parts.length - 1] || 'workspace'
+  }
+  return appInfo.value?.name || 'shangbo-agent'
+})
+
 async function copyPrompt(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text)
@@ -1032,11 +1223,26 @@ export interface McpServerItem {
   toolCount: number
   tools: { name: string; description?: string }[]
   error?: string
+  kind?: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
 }
 
 const mcpServers = ref<McpServerItem[]>([])
 const mcpLoading = ref(false)
 const expandedMcp = ref<string | null>(null)
+const projectMcpEnabled = ref(true)
+
+async function toggleProjectMcp(): Promise<void> {
+  await window.shangbo.settings.set('agent.mcp.projectLevel', projectMcpEnabled.value)
+  feedback.value = {
+    ok: true,
+    message: projectMcpEnabled.value ? '已启用项目级 MCP 配置自动加载' : '已关闭项目级 MCP 配置加载'
+  }
+  setTimeout(() => (feedback.value = null), 2000)
+}
 
 /** MCP 添加/编辑表单：stdio 命令 或 Streamable HTTP 二选一。 */
 const mcpEditorOpen = ref(false)
@@ -1054,12 +1260,13 @@ function openMcpAdd(kind: 'stdio' | 'http'): void {
 function openMcpEdit(id: string): void {
   const item = mcpServers.value.find((s) => s.id === id)
   mcpEditingId.value = id
+  const kind = (item?.url || item?.kind === 'http') ? 'http' : 'stdio'
   mcpForm.value = {
     name: item?.name ?? id,
-    kind: 'stdio',
-    command: '',
-    args: '',
-    url: ''
+    kind,
+    command: item?.command ?? '',
+    args: Array.isArray(item?.args) ? item.args.join(' ') : (typeof item?.args === 'string' ? item.args : ''),
+    url: item?.url ?? ''
   }
   mcpEditorOpen.value = true
 }
@@ -1089,8 +1296,17 @@ async function saveMcpServer(): Promise<void> {
     const stored = settings['agent.mcp.servers'] as Record<string, unknown>[] | undefined
     const base: Record<string, unknown>[] = Array.isArray(stored) && stored.length > 0
       ? stored.map((s) => ({ ...s }))
-      : mcpServers.value.map((s) => ({ id: s.id, enabled: s.enabled }))
-    const entry: Record<string, unknown> = { id, enabled: true }
+      : mcpServers.value.map((s) => ({
+          id: s.id,
+          name: s.name,
+          enabled: s.enabled,
+          kind: s.kind,
+          command: s.command,
+          args: s.args,
+          url: s.url,
+          env: s.env
+        }))
+    const entry: Record<string, unknown> = { id, name, enabled: true, kind: mcpForm.value.kind }
     if (mcpForm.value.kind === 'http') {
       const url = mcpForm.value.url.trim()
       if (!/^https?:\/\/.+/.test(url)) {
@@ -1108,9 +1324,8 @@ async function saveMcpServer(): Promise<void> {
       }
       entry['command'] = command
       entry['args'] = mcpForm.value.args.split(/\s+/).filter(Boolean)
+      entry['url'] = ''
     }
-    // 名称：新增时写入，编辑时保留原名（id 不变）
-    if (!mcpEditingId.value) entry['name'] = name
     const next = base.some((s) => s['id'] === id)
       ? base.map((s) => (s['id'] === id ? { ...s, ...entry, id } : s))
       : [...base, entry]
@@ -1358,6 +1573,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <path d="M5 5h4M5 8h4M5 11h2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
               </svg>
               <span>经验进化</span>
+              <span v-if="lessons.length > 0" class="nav-tab-count">{{ lessons.length }}</span>
             </button>
 
             <button
@@ -1435,6 +1651,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
               </svg>
               <span>连接器 / MCP</span>
+              <span v-if="mcpServers.length > 0" class="nav-tab-count">{{ mcpServers.length }}</span>
             </button>
 
             <button
@@ -1446,6 +1663,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <path d="M7 3h2v3h3v2H9v5H7V8H4V6h3V3z" stroke="currentColor" stroke-width="1.2" />
               </svg>
               <span>插件中心</span>
+              <span v-if="pluginsList.length > 0" class="nav-tab-count">{{ pluginsList.length }}</span>
             </button>
           </div>
 
@@ -1572,6 +1790,19 @@ async function toggleAutoScreenshot(): Promise<void> {
                   </svg>
                 </button>
               </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">{{ t('settings.language') }}</span>
+                <span class="row-sub">{{ t('settings.languageDesc') }}</span>
+              </div>
+              <select v-model="currentLanguage" class="select-control" @change="onLanguageChange">
+                <option value="zh-CN">简体中文 (Simplified Chinese)</option>
+                <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
+                <option value="en-US">English (US)</option>
+                <option value="ja-JP">日本語 (Japanese)</option>
+              </select>
             </div>
 
             <div class="setting-row">
@@ -2062,6 +2293,7 @@ async function toggleAutoScreenshot(): Promise<void> {
               <div class="lesson-foot">
                 <span v-if="lesson.projectPath" class="mono text-truncate">{{ lesson.projectPath }}</span>
                 <span>已复用 {{ lesson.useCount }} 次</span>
+                <button class="btn btn-ghost tiny" @click="editLesson(lesson)">编辑</button>
                 <button class="btn btn-ghost tiny btn-danger" @click="removeLesson(lesson.id)">
                   删除
                 </button>
@@ -2070,10 +2302,8 @@ async function toggleAutoScreenshot(): Promise<void> {
           </div>
         </section>
 
-        <!-- ========================================================
-             5. 常规与开发者选项 (General / Developer)
-             ======================================================== -->
-        <section v-if="activeTab === 'general' || activeTab === 'developer'" class="content-pane">
+        <!-- 5. 常规选项 (General) -->
+        <section v-if="activeTab === 'general'" class="content-pane">
           <div class="section-block">
             <h3 class="pane-title">客户端与系统信息</h3>
             <div v-if="appInfo" class="info-grid">
@@ -2154,6 +2384,34 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <input v-model="autoDownload" type="checkbox" @change="toggleAutoDownload" />
                 <span class="switch-slider" />
               </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- 6. 开发者选项 (Developer) -->
+        <section v-if="activeTab === 'developer'" class="content-pane developer-pane">
+          <div class="section-block">
+            <h3 class="pane-title">开发者调试工具</h3>
+            <p class="row-sub">用于调试界面渲染、主进程与渲染进程 IPC 通信以及查看控制台日志。</p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">Chromium 开发者工具 (DevTools)</span>
+                <span class="row-sub">打开或关闭内置网页检查器与控制台 (F12)</span>
+              </div>
+              <button class="btn btn-ghost tiny" @click="toggleDevTools">
+                切换 DevTools
+              </button>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">本地数据与缓存目录</span>
+                <span class="row-sub mono text-truncate" :title="appInfo?.dbPath">{{ appInfo?.dbPath }}</span>
+              </div>
+              <button class="btn btn-ghost tiny" :disabled="!appInfo?.dbPath" @click="openDbFolder">
+                打开存储目录
+              </button>
             </div>
           </div>
 
@@ -2342,19 +2600,18 @@ async function toggleAutoScreenshot(): Promise<void> {
               <button class="btn btn-ghost tiny" title="去 MCP 页添加外部服务" @click="activeTab = 'connectors'">发现 (Discover)</button>
               <button
                 class="btn btn-primary tiny btn-add-plugin"
-                title="内置插件已全量列出，外部能力去 MCP 页添加"
-                @click="feedback = { ok: true, message: '内置插件已全量列出；外部能力请到「连接器 / MCP」添加' }"
+                title="添加外部技能目录（SKILL.md 技能包，如 D:\foxtable\foxtablecoderv7）"
+                @click="addSkillDir"
               >
                 添加 (Add) ▾
               </button>
-            </div>
-          </div>
+            </div>          </div>
 
           <!-- 第二行：标签筛选与排序栏 (图片 2 次栏) -->
           <div class="plugins-filter-bar">
             <div class="filter-left">
               <button class="filter-tab-pill active">
-                已安装插件 (Your plugins)
+                {{ t('settings.pluginsTitle') }}
               </button>
             </div>
 
@@ -2385,13 +2642,13 @@ async function toggleAutoScreenshot(): Promise<void> {
             <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" class="repo-icon">
               <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
             </svg>
-            <span class="repo-badge-text">1476989162/shangbo-agent</span>
+            <span class="repo-badge-text">{{ currentRepoName }}</span>
             <span class="repo-badge-status">本地插件宿主就绪</span>
           </div>
 
           <!-- 分组标题：来自官方与合作伙伴 (图片 2 分组) -->
           <div class="plugins-group-heading">
-            <span>来自官方与合作伙伴 · {{ filteredPlugins.length }} (From Anthropic & Partners · {{ filteredPlugins.length }})</span>
+            <span>{{ t('settings.officialPartners') }} · {{ filteredPlugins.length }}</span>
           </div>
 
           <!-- 8 大核心插件与技能列表 (图片 2 卡片集合) -->
@@ -2421,7 +2678,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                     :title="item.enabled ? '点击停用该插件' : '点击启用该插件'"
                     @click="togglePlugin(item)"
                   >
-                    {{ item.enabled ? '已启用 Enabled' : '已禁用 Disabled' }}
+                    {{ item.enabled ? t('settings.enabled') : t('settings.disabled') }}
                   </button>
                 </div>
 
@@ -2450,8 +2707,36 @@ async function toggleAutoScreenshot(): Promise<void> {
             </div>
           </div>
 
-          <!-- 技能使用与能力说明提示底栏 -->
-          <div class="plugin-footer-note">
+          <!-- 外部技能目录（SKILL.md 技能包，如 D:\foxtable\foxtablecoderv7） -->
+          <div class="plugins-group-heading">
+            <span>外部技能目录 · {{ skillDirs.length }}（External skill packs）</span>
+          </div>
+          <div v-if="skillDirs.length === 0" class="plugin-footer-note">
+            <span class="note-spark">✦</span>
+            <span class="note-text">还没有外部技能：点右上「添加」选择技能包根目录（里面要有 SKILL.md 与各技能子目录）。例如 D:\foxtable\foxtablecoderv7。</span>
+          </div>
+          <div v-else class="plugins-cards-list">
+            <div v-for="(dir, index) in skillDirs" :key="dir" class="plugin-card-item">
+              <div class="plugin-icon-box active">
+                <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
+                  <path d="M2 4l6-2 6 2v8l-6 2-6-2V4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+                </svg>
+              </div>
+              <div class="plugin-body">
+                <div class="plugin-title-row">
+                  <span class="plugin-title-cn mono">{{ dir }}</span>
+                </div>
+                <div class="plugin-desc-line">
+                  <span class="plugin-summary">SKILL.md 技能包：路由器自动注入，子技能按需用 read_skill 读取。</span>
+                </div>
+              </div>
+              <div class="plugin-actions-col">
+                <button class="btn btn-ghost tiny" title="移除该技能目录" @click="removeSkillDir(index)">移除</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 技能使用与能力说明提示底栏 -->          <div class="plugin-footer-note">
             <span class="note-spark">✦</span>
             <span class="note-text">
               <strong>技能使用说明：</strong>开启的插件已直接打通「尚搏 Agent」的本地执行运行时。在聊天输入框说出对应任务（如直接说“/commit 提交代码”、“用 Ralph loop 循环运行测试并修报错”、“进行安全审计”），Agent 将自动按对应流程精准执行！
@@ -2511,12 +2796,12 @@ async function toggleAutoScreenshot(): Promise<void> {
              7. MCP Servers 管理中心 (图片 1 对标实现)
              ======================================================== -->
         <section v-if="activeTab === 'connectors'" class="content-pane mcp-pane">
-          <!-- 顶部子标签栏 (插件 12 | 技能 89 | MCP 12 | 应用授权 2) -->
+          <!-- 顶部子标签栏 (插件 | 技能 | MCP | 应用授权) -->
           <div class="mcp-subnav-row">
-            <span class="mcp-subnav-item" @click="activeTab = 'plugins'">插件 12</span>
-            <span class="mcp-subnav-item" @click="activeTab = 'skills'">技能 89</span>
-            <span class="mcp-subnav-item active">MCP 12</span>
-            <span class="mcp-subnav-item" @click="activeTab = 'privacy'">应用授权 2</span>
+            <span class="mcp-subnav-item" @click="activeTab = 'plugins'">插件 {{ pluginsList.length }}</span>
+            <span class="mcp-subnav-item" @click="activeTab = 'skills'">技能 {{ skillDirs.length }}</span>
+            <span class="mcp-subnav-item active">MCP {{ mcpServers.length }}</span>
+            <span class="mcp-subnav-item" @click="activeTab = 'general'">应用授权 {{ autoApprove.length }}</span>
           </div>
 
           <!-- 项目级配置卡片 -->
@@ -2526,7 +2811,10 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <span class="setting-label">启用项目级 MCP</span>
                 <span class="row-sub">允许自动从项目根目录下的 .trae/mcp.json 或 .mcp.json 中加载 MCP 配置</span>
               </div>
-              <input type="checkbox" checked class="toggle-switch" />
+              <label class="switch-control">
+                <input v-model="projectMcpEnabled" type="checkbox" @change="toggleProjectMcp" />
+                <span class="switch-slider" />
+              </label>
             </div>
           </div>
 
@@ -2597,7 +2885,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 
           <!-- MCP 添加/编辑弹窗 -->
           <div v-if="mcpEditorOpen" class="submodal-overlay" @click.self="mcpEditorOpen = false">
-            <div class="submodal">
+            <div class="submodal-card">
               <div class="submodal-head">
                 <h3 class="submodal-title">{{ mcpEditingId ? '配置 MCP 服务' : '添加 MCP 服务' }}</h3>
                 <button class="btn-submodal-close" @click="mcpEditorOpen = false">×</button>
@@ -2606,7 +2894,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <span class="field-label">服务名称</span>
                 <input v-model="mcpForm.name" class="submodal-input" placeholder="例如：我的 HTTP 服务" :disabled="!!mcpEditingId" />
               </label>
-              <label v-if="!mcpEditingId" class="wish-field">
+              <label class="wish-field">
                 <span class="field-label">类型</span>
                 <select v-model="mcpForm.kind" class="submodal-input">
                   <option value="stdio">命令行（stdio）</option>
@@ -2686,7 +2974,7 @@ async function toggleAutoScreenshot(): Promise<void> {
           <div class="browser-group-block">
             <div class="group-title-row">
               <span class="browser-group-name">内置浏览器</span>
-              <button class="btn btn-ghost tiny btn-import-data">导入…</button>
+              <button class="btn btn-ghost tiny btn-import-data" @click="handleImportBrowserData">导入…</button>
             </div>
 
             <div class="browser-card-item">
@@ -2709,7 +2997,7 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <span class="card-main-title">浏览器数据</span>
                 <span class="card-desc">内置浏览器中的站点数据（如 Cookies、本地存储等）</span>
               </div>
-              <button class="btn btn-ghost tiny btn-clear-data" @click="feedback = { ok: true, message: '已清除内置浏览器缓存数据' }">
+              <button class="btn btn-ghost tiny btn-clear-data" @click="handleClearBrowserData">
                 清除
               </button>
             </div>
@@ -2740,11 +3028,16 @@ async function toggleAutoScreenshot(): Promise<void> {
               <div class="row-text">
                 <span class="card-main-title">连接到 Chrome</span>
                 <span class="card-desc">如果未安装 Chrome 扩展或未启动调试端口，AI 可能无法正常打开浏览器。</span>
-                <a href="javascript:void(0)" class="chrome-link">无法访问商店？尝试手动安装</a>
+                <a href="javascript:void(0)" class="chrome-link" @click="checkChromeDebuggingPort">尝试连接端口 9222 / 重新检测</a>
               </div>
-              <div class="chrome-status-badge">
-                <span class="status-green-dot">●</span>
-                <span>已连接 ▾</span>
+              <div
+                class="chrome-status-badge"
+                :style="{ cursor: 'pointer' }"
+                title="点击重新检测 Chrome 调试端口 9222"
+                @click="checkChromeDebuggingPort"
+              >
+                <span :class="chromePortConnected ? 'status-green-dot' : 'status-dot-off'">{{ chromePortConnected ? '●' : '○' }}</span>
+                <span>{{ checkingChromePort ? '检测中…' : chromePortConnected ? '已连接 ▾' : '未连接 ▾' }}</span>
               </div>
             </div>
           </div>
@@ -2988,7 +3281,7 @@ async function toggleAutoScreenshot(): Promise<void> {
         <div v-if="lessonEditorOpen" class="submodal-overlay" @click.self="lessonEditorOpen = false">
           <div class="submodal-card">
             <div class="submodal-head">
-              <h3 class="submodal-title">添加已验证经验</h3>
+              <h3 class="submodal-title">{{ editingLessonId ? '编辑经验' : '添加已验证经验' }}</h3>
               <button class="btn-submodal-close" @click="lessonEditorOpen = false">×</button>
             </div>
             <p class="submodal-tip">
@@ -3022,11 +3315,148 @@ async function toggleAutoScreenshot(): Promise<void> {
           </div>
         </div>
 
-        <!-- 默认兜底展示 (code / import_export) -->
-        <section v-if="['code', 'import_export'].includes(activeTab)" class="content-pane">
-          <div class="placeholder-pane">
-            <h3 class="pane-title">功能就绪</h3>
-            <p class="subtle">该模块已在后台就绪并生效。您可以在聊天时随时直接唤起相应能力。</p>
+        <!-- ========================================================
+             尚搏 Code 设置 (activeTab === 'code')
+             ======================================================== -->
+        <section v-if="activeTab === 'code'" class="content-pane code-pane">
+          <div class="section-block">
+            <h3 class="pane-title">尚搏 Code 编辑器与环境</h3>
+            <p class="row-sub">配置工作台代码查看器、Git 提交模板以及内置终端环境。</p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">编辑器字体 (Font Family)</span>
+                <span class="row-sub">代码预览与差异比对所使用的等宽字体序列</span>
+              </div>
+              <input
+                v-model="codeFontFamily"
+                class="select-control mono"
+                style="flex: 1; max-width: 320px;"
+                placeholder="Consolas, Monaco, 'Courier New', monospace"
+                @change="saveCodeSetting('code.fontFamily', codeFontFamily)"
+              />
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">默认字体大小 (Font Size)</span>
+                <span class="row-sub">代码视窗与终端字号 (px)</span>
+              </div>
+              <input
+                v-model.number="codeFontSize"
+                type="number"
+                min="10"
+                max="24"
+                class="select-control"
+                style="width: 100px;"
+                @change="saveCodeSetting('code.fontSize', codeFontSize)"
+              />
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">显示行号 (Line Numbers)</span>
+                <span class="row-sub">在代码预览与 Diff 比对区域左侧显示代码行号</span>
+              </div>
+              <label class="switch-control">
+                <input
+                  v-model="codeLineNumbers"
+                  type="checkbox"
+                  @change="saveCodeSetting('code.lineNumbers', codeLineNumbers)"
+                />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">自动换行 (Word Wrap)</span>
+                <span class="row-sub">超出代码查看器边界时长行自动折行显示</span>
+              </div>
+              <label class="switch-control">
+                <input
+                  v-model="codeWordWrap"
+                  type="checkbox"
+                  @change="saveCodeSetting('code.wordWrap', codeWordWrap)"
+                />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">默认终端 Shell</span>
+                <span class="row-sub">工作台运行命令时启动的 Shell 程序（如 powershell.exe, cmd.exe, bash）</span>
+              </div>
+              <input
+                v-model="codeDefaultShell"
+                class="select-control mono"
+                style="flex: 1; max-width: 260px;"
+                placeholder="powershell.exe"
+                @change="saveCodeSetting('code.defaultShell', codeDefaultShell)"
+              />
+            </div>
+
+            <div class="setting-field" style="margin-top: 14px;">
+              <div class="field-head">
+                <span class="setting-label">Git 提交信息模板 (Commit Template)</span>
+                <span class="field-subtle">AI 在执行 /commit 或生成 Git 提交说明时的默认前缀与格式规范。</span>
+              </div>
+              <textarea
+                v-model="codeCommitTemplate"
+                class="textarea-control mono"
+                rows="4"
+                placeholder="feat: \n\nWhy:\n- "
+                @blur="saveCodeSetting('code.commitTemplate', codeCommitTemplate)"
+              />
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================================================
+             导入与导出 (activeTab === 'import_export')
+             ======================================================== -->
+        <section v-if="activeTab === 'import_export'" class="content-pane import-export-pane">
+          <div class="section-block">
+            <h3 class="pane-title">配置与经验备份</h3>
+            <p class="row-sub">一键导出当前应用的所有模型密钥、插件配置、偏好设置与已验证经验进化库。</p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">导出配置文件</span>
+                <span class="row-sub">将设置项与已沉淀的项目经验导出为独立 JSON 备份文件</span>
+              </div>
+              <button class="btn btn-primary tiny" :disabled="backupExporting" @click="handleExportConfig">
+                {{ backupExporting ? '导出中…' : '导出配置 (.json)' }}
+              </button>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">导入配置文件</span>
+                <span class="row-sub">从之前导出的 JSON 备份中恢复配置与经验库</span>
+              </div>
+              <button class="btn btn-ghost tiny" :disabled="backupImporting" @click="handleImportConfig">
+                {{ backupImporting ? '恢复中…' : '导入恢复…' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="divider" />
+
+          <div class="section-block">
+            <h3 class="pane-title">会话数据归档</h3>
+            <p class="row-sub">导出所有历史会话消息记录与产物记录，用于本地备份或迁移。</p>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">导出全部历史对话</span>
+                <span class="row-sub">将当前 SQLite 数据库中全部对话与消息导出为 JSON 压缩包</span>
+              </div>
+              <button class="btn btn-ghost tiny" :disabled="backupExporting" @click="handleExportConversations">
+                导出全部对话
+              </button>
+            </div>
           </div>
         </section>
 
@@ -3228,6 +3658,21 @@ async function toggleAutoScreenshot(): Promise<void> {
   background: var(--surface);
   box-shadow: inset 0 0 0 1px var(--border);
   font-weight: 600;
+}
+
+.nav-tab-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--surface-variant, rgba(0, 0, 0, 0.06));
+  color: var(--text-muted);
+}
+
+.nav-tab-btn.active .nav-tab-count {
+  background: var(--brand-subtle, rgba(59, 130, 246, 0.12));
+  color: var(--brand, #3b82f6);
 }
 
 /* 右侧主体 */
@@ -4585,6 +5030,11 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .status-green-dot {
   color: var(--success);
+  font-size: 14px;
+}
+
+.status-dot-off {
+  color: var(--text-muted);
   font-size: 14px;
 }
 

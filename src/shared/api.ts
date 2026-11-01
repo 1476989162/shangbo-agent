@@ -83,10 +83,25 @@ export interface ShangboApi {
     info(): Promise<AppInfo>
     contextStatics(): Promise<ContextStatics>
     getGitBranch(dir: string | null): Promise<string>
+    getGitDiff(dir: string | null): Promise<string>
+    getGitStatus(dir: string | null): Promise<string>
+    toggleDevTools(): Promise<boolean>
+    openPath(path: string): Promise<string>
+    execCommand(command: string, dir?: string | null): Promise<{ stdout: string; stderr: string; exitCode: number }>
     /** 让原生标题栏跟随应用主题，避免深色界面配浅色窗口按钮。 */
     setWindowTheme(theme: 'light' | 'dark'): Promise<boolean>
     hideWindow(): Promise<boolean>
     quit(): Promise<boolean>
+  }
+
+  browser: {
+    clearData(): Promise<boolean>
+  }
+
+  backup: {
+    exportConfig(): Promise<{ ok: boolean; path?: string; message?: string }>
+    importConfig(): Promise<{ ok: boolean; message?: string }>
+    exportAllConversations(): Promise<{ ok: boolean; path?: string; message?: string }>
   }
 
   dialog: {

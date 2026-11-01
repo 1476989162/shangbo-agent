@@ -180,4 +180,24 @@ describe('MCP 服务管理器', () => {
     expect(() => manager.shutdownSync()).not.toThrow()
     expect(() => manager.shutdownSync()).not.toThrow()
   })
+
+  it('status 返回完整的原始配置字段 (kind, command, args, url)', async () => {
+    settingsStub.servers = [
+      { id: 'stdio1', name: 'Stdio 1', command: 'node', args: ['-v'], enabled: false },
+      { id: 'http1', name: 'Http 1', url: 'http://127.0.0.1:34254', enabled: false, command: '', args: [] }
+    ]
+    settingsStub.legacy = []
+    const manager = new McpManager()
+    const statuses = await manager.status(true)
+    const stdio = statuses.find((s) => s.id === 'stdio1')
+    expect(stdio).toBeDefined()
+    expect(stdio?.kind).toBe('stdio')
+    expect(stdio?.command).toBe('node')
+    expect(stdio?.args).toEqual(['-v'])
+
+    const http = statuses.find((s) => s.id === 'http1')
+    expect(http).toBeDefined()
+    expect(http?.kind).toBe('http')
+    expect(http?.url).toBe('http://127.0.0.1:34254')
+  })
 })

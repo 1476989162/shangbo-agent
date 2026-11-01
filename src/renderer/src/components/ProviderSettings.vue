@@ -284,8 +284,40 @@ async function fetchModels(): Promise<void> {
       priority: 50,
       headers: parseHeaders(form.headersText)
     })
-    form.modelsText = models.join('\n')
-    feedback.value = { ok: true, message: `成功拉取到 ${models.length} 个模型` }
+    // 合并而非覆盖：已勾选的模型只要上游还在就保留，新出现的一并选中，
+    // 用户先前一个个挑的勾选不会因为一次刷新被清空。
+    const previous = parseModels(form.modelsText)
+    const merged = [...models]
+    for (const old of previous) {
+      if (!merged.includes(old)) merged.push(old)
+    }
+    form.modelsText = merged.join('\n')
+
+    const added = models.filter((m) => !previous.includes(m)).length
+    const summary = `成功拉取到 ${models.length} 个模型（新增 ${added} 个）`
+
+    // 关键修复：拉取结果必须落盘。此前只写进表单文本框，不点「保存」就等于没生效，
+    // 表现为「重新获取成功但列表里还是旧数量」。
+    if (!isNew.value && form.id) {
+      const saved = await window.shangbo.provider.upsert({
+        id: form.id,
+        name: form.name.trim(),
+        kind: form.kind,
+        baseUrl: form.baseUrl.trim(),
+        apiKey: form.apiKey.trim() || undefined,
+        models: merged,
+        enabled: form.enabled,
+        priority: Number(form.priority) || 50,
+        headers: parseHeaders(form.headersText)
+      })
+      await store.loadProviders()
+      await load()
+      selectedId.value = saved.id
+      startEdit(saved)
+      feedback.value = { ok: true, message: `${summary}，已自动保存` }
+    } else {
+      feedback.value = { ok: true, message: `${summary}，请点「保存」完成创建` }
+    }
   } catch (e) {
     feedback.value = { ok: false, message: `拉取失败：${e instanceof Error ? e.message : String(e)}` }
   } finally {

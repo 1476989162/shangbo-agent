@@ -152,8 +152,13 @@ export const useChatStore = defineStore('chat', () => {
   }
   const sidebarCollapsed = ref(false)
   const userName = ref('Administrator')
-  const currentBranch = ref('main')
+  const currentBranch = ref('')
   const worktreeEnabled = ref(false)
+
+  async function setWorktreeEnabled(value: boolean): Promise<void> {
+    worktreeEnabled.value = value
+    await window.shangbo.settings.set('agent.worktree', value)
+  }
   /**
    * 自治等级（主进程持久化）：决定工作区内/常规软风险操作是否免确认。
    * 硬红线（删 .git、删库、格式化磁盘）不受它影响，永远人工确认或直接拒绝。
@@ -832,10 +837,10 @@ export const useChatStore = defineStore('chat', () => {
       try {
         currentBranch.value = await window.shangbo.app.getGitBranch(currentConv.workingDir)
       } catch {
-        currentBranch.value = 'main'
+        currentBranch.value = ''
       }
     } else {
-      currentBranch.value = 'main'
+      currentBranch.value = ''
     }
   }
 
@@ -923,7 +928,8 @@ export const useChatStore = defineStore('chat', () => {
         ...(attachments.length > 0 ? { images: attachments } : {}),
         providerId: selectedProviderId.value || undefined,
         model: selectedModel.value || undefined,
-        viewMode: viewMode.value
+        viewMode: viewMode.value,
+        worktree: worktreeEnabled.value
       })
       // 先乐观占位：主进程很快会下发 run_start 或 run_queued 覆盖它
       setRun(conversationId, {
@@ -1073,10 +1079,10 @@ export const useChatStore = defineStore('chat', () => {
         try {
           currentBranch.value = await window.shangbo.app.getGitBranch(dir)
         } catch {
-          currentBranch.value = 'main'
+          currentBranch.value = ''
         }
       } else {
-        currentBranch.value = 'main'
+        currentBranch.value = ''
       }
     }
   }
@@ -1126,6 +1132,7 @@ export const useChatStore = defineStore('chat', () => {
       const savedAutonomy = settings['agent.autonomy'] as AutonomyLevel | undefined
       if (savedAutonomy) autonomy.value = savedAutonomy
       autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
+      worktreeEnabled.value = (settings['agent.worktree'] as boolean) ?? false
       const savedHidden = settings['chat.hiddenModels'] as string[] | undefined
       if (Array.isArray(savedHidden)) hiddenModels.value = savedHidden
       const savedViewMode = settings['ui.viewMode'] as UsageMode | undefined
@@ -1210,6 +1217,7 @@ export const useChatStore = defineStore('chat', () => {
     regenerate,
     switchBranch,
     setWorkingDir,
+    setWorktreeEnabled,
     exportConversation,
     decideApproval,
     dismissError,

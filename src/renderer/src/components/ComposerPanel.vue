@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ContextStatics, ImageAttachment } from '@shared/types'
 import { useChatStore } from '../stores/chat'
 import logoImg from '../assets/logo.png'
+import { t } from '../i18n'
 import {
   formatTokensK,
   IMAGE_MIME_RE,
@@ -42,7 +43,6 @@ const contextWindowOpen = ref(false)
 const mcpExpanded = ref(false)
 const memoryExpanded = ref(false)
 const modelSearchQuery = ref('')
-const isManagingModelVisibility = ref(false)
 
 const userContextBudget = ref<number | null>(null)
 const contextStatics = ref<ContextStatics>({
@@ -322,11 +322,43 @@ const sessionMessagesTokens = computed(() => {
   return count
 })
 
+const mcpServersList = ref<{ name: string; toolsCount: number; tokens: number }[]>([])
+const memoryItemsList = ref<{ title: string; tokens: number }[]>([])
+const mcpTotalTools = computed(() => mcpServersList.value.reduce((acc, s) => acc + s.toolsCount, 0))
+
 async function loadContextStatics(): Promise<void> {
   try {
     contextStatics.value = await window.shangbo.app.contextStatics()
   } catch {
     // 取不到就保持 0：宁可少算，也不要显示一个编造的数字
+  }
+  try {
+    const servers = await window.shangbo.mcp.status()
+    mcpServersList.value = (servers || [])
+      .filter((s) => s.state === 'ready' || (s.tools && s.tools.length > 0))
+      .map((s) => ({
+        name: s.name,
+        toolsCount: s.tools?.length || 0,
+        tokens: Math.round((s.tools?.length || 0) * 350)
+      }))
+  } catch {
+    mcpServersList.value = []
+  }
+  try {
+    const all = await window.shangbo.settings.getAll()
+    const memories = all['cowork.memories'] as any[]
+    if (Array.isArray(memories)) {
+      memoryItemsList.value = memories
+        .filter((m) => m && (m.title || m.desc))
+        .map((m) => ({
+          title: String(m.title || '长期记忆'),
+          tokens: Math.round((String(m.title || '').length + String(m.desc || '').length) * 1.2)
+        }))
+    } else {
+      memoryItemsList.value = []
+    }
+  } catch {
+    memoryItemsList.value = []
   }
 }
 
@@ -367,13 +399,13 @@ const contextBreakdown = computed(() => {
     systemPromptPct: pctOf(systemPrompt),
     memoryPct: pctOf(memory),
     messagesPct: pctOf(messages),
-    freePct: '0.0'
+    freePct: isOver ? '0.0' : Math.max(0, 100 - Number(((used / max) * 100).toFixed(1))).toFixed(1)
   }
 })
 
 function openUsageSettings(): void {
   contextWindowOpen.value = false
-  emit('openSettings', 'preferences')
+  emit('openSettings', 'usage')
 }
 
 function selectProviderAndModel(providerId: string, model: string): void {
@@ -386,11 +418,8 @@ const filteredProviders = computed(() => {
   const list: { id: string; name: string; models: string[] }[] = []
 
   for (const provider of store.usableProviders) {
-    let models = provider.models
-    // 如果不是在显隐管理模式下，过滤掉被标记隐藏的模型
-    if (!isManagingModelVisibility.value) {
-      models = models.filter((m) => !store.isModelHidden(provider.id, m))
-    }
+    // 已隐藏的模型不进快速切换列表；恢复走路尾眼睛或下方「一键恢复」
+    let models = provider.models.filter((m) => !store.isModelHidden(provider.id, m))
     // 关键词搜索过滤（支持模型名包含）
     if (query) {
       models = models.filter((m) => m.toLowerCase().includes(query))
@@ -520,7 +549,7 @@ defineExpose({ editMessage, setDraft })
                   <circle cx="11.5" cy="6.5" r="2" stroke="currentColor" stroke-width="1.2" />
                   <path d="M4.5 6.5v3M11.5 8.5v1a2 2 0 01-2 2H6.5" stroke="currentColor" stroke-width="1.2" />
                 </svg>
-                {{ store.currentBranch }}
+                {{ store.currentBranch || t('composer.noGit') }}
               </span>
 
               <!-- Worktree 隔离分支开关 -->
@@ -530,7 +559,7 @@ defineExpose({ editMessage, setDraft })
                   type="checkbox"
                   class="worktree-checkbox"
                 />
-                隔离分支
+                {{ t('composer.worktree') }}
               </label>
 
               <!-- 工作模式：智能 / 建造者 / 许愿 / 问答 -->
@@ -688,16 +717,7 @@ defineExpose({ editMessage, setDraft })
                 <div v-if="modelMenuOpen" class="model-dropdown" @click.stop>
                   <div class="dropdown-header-row">
                     <span class="dropdown-header-title">选择模型与供应商</span>
-                    <button
-                      class="manage-vis-btn"
-                      :class="{ active: isManagingModelVisibility }"
-                      :title="isManagingModelVisibility ? '完成设置并保存' : '管理各个模型是否在此快速切换列表中显示'"
-                      @click.stop="isManagingModelVisibility = !isManagingModelVisibility"
-                    >
-                      {{ isManagingModelVisibility ? '完成' : '⚙ 管理显示' }}
-                    </button>
                   </div>
-
                   <!-- 图片 1 红框位置：实时搜索输入框 -->
                   <div class="model-search-box">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" class="search-icon">
@@ -720,11 +740,10 @@ defineExpose({ editMessage, setDraft })
                     </button>
                   </div>
 
-                  <!-- 管理模式下的提示说明 -->
-                  <div v-if="isManagingModelVisibility" class="visibility-guide-tip">
-                    <span>💡 点击模型右侧状态可隐藏/恢复显示</span>
+                  <!-- 常驻提示：点行即选中，行尾眼睛只切显隐 -->
+                  <div class="visibility-guide-tip">
+                    <span>💡 点击模型名即选中；点行尾眼睛只隐藏/恢复显示</span>
                   </div>
-
                   <div class="dropdown-scroll">
                     <template v-if="filteredProviders.length > 0">
                       <div
@@ -738,25 +757,29 @@ defineExpose({ editMessage, setDraft })
                           :key="m"
                           class="model-option-row"
                         >
-                          <button
+                          <!-- 行：点行永远等于选中；行尾眼睛独立负责显隐，两者语义不再互相覆盖。
+                               改用 div 承载点击，避免 button 套 button 的非法结构。 -->
+                          <div
                             class="model-option"
                             :class="{
                               selected: provider.id === store.selectedProviderId && m === store.selectedModel,
                               'is-hidden-opt': store.isModelHidden(provider.id, m)
                             }"
-                            @click="isManagingModelVisibility ? store.toggleModelHidden(provider.id, m) : selectProviderAndModel(provider.id, m)"
+                            role="button"
+                            tabindex="0"
+                            @click="selectProviderAndModel(provider.id, m)"
+                            @keydown.enter.prevent="selectProviderAndModel(provider.id, m)"
                           >
                             <span class="option-name text-truncate" :title="m">{{ m }}</span>
 
-                            <!-- 正常模式：当前选中勾选标记 -->
+                            <!-- 当前选中勾选标记 -->
                             <span
-                              v-if="!isManagingModelVisibility && provider.id === store.selectedProviderId && m === store.selectedModel"
+                              v-if="provider.id === store.selectedProviderId && m === store.selectedModel"
                               class="option-check"
                             >✓</span>
 
-                            <!-- 管理模式：显隐状态切换胶囊 -->
+                            <!-- 显隐开关：与选中完全解耦，点它不会改变当前选中模型 -->
                             <button
-                              v-if="isManagingModelVisibility"
                               class="model-vis-badge"
                               :class="{ hidden: store.isModelHidden(provider.id, m) }"
                               :title="store.isModelHidden(provider.id, m) ? '当前已隐藏，点击恢复显示' : '当前显示中，点击隐藏'"
@@ -764,7 +787,7 @@ defineExpose({ editMessage, setDraft })
                             >
                               {{ store.isModelHidden(provider.id, m) ? '已隐藏 🚫' : '显示中 👁' }}
                             </button>
-                          </button>
+                          </div>
                         </div>
                       </div>
                     </template>
@@ -847,7 +870,7 @@ defineExpose({ editMessage, setDraft })
                 <div v-if="contextWindowOpen" class="context-window-popup" @click.stop>
                   <!-- 顶部标题行: Context window   60k / 1M (6%) ▾ -->
                   <div class="cw-header" @click="contextWindowOpen = false">
-                    <span class="cw-title">Context window</span>
+                    <span class="cw-title">{{ t('context.window') }}</span>
                     <div class="cw-summary">
                       <span class="cw-ratio">{{ formatTokensK(contextBreakdown.used) }} / {{ formatTokensK(contextBreakdown.max) }} ({{ contextBreakdown.pct }}%)</span>
         <span v-if="contextBreakdown.isOver" class="cw-over">超出 {{ formatTokensK(contextBreakdown.overBy) }}</span>
@@ -890,13 +913,13 @@ defineExpose({ editMessage, setDraft })
 
                   <!-- 彩色分段进度条 (对标图 2) -->
                   <div class="cw-bar-track">
-                    <div class="cw-seg seg-mcp" :style="{ width: `${contextBreakdown.mcpPct}%` }" title="MCP tools" />
-                    <div class="cw-seg seg-system-tools" :style="{ width: `${contextBreakdown.systemToolsPct}%` }" title="System tools" />
-                    <div class="cw-seg seg-skills" :style="{ width: `${contextBreakdown.skillsPct}%` }" title="Skills" />
-                    <div class="cw-seg seg-prompt" :style="{ width: `${contextBreakdown.systemPromptPct}%` }" title="System prompt" />
-                    <div class="cw-seg seg-memory" :style="{ width: `${contextBreakdown.memoryPct}%` }" title="Memory files" />
-                    <div class="cw-seg seg-messages" :style="{ width: `${contextBreakdown.messagesPct}%` }" title="Messages" />
-                    <div class="cw-seg seg-free" :style="{ width: `${contextBreakdown.freePct}%` }" title="Free space" />
+                    <div class="cw-seg seg-mcp" :style="{ width: `${contextBreakdown.mcpPct}%` }" :title="t('context.mcpTools')" />
+                    <div class="cw-seg seg-system-tools" :style="{ width: `${contextBreakdown.systemToolsPct}%` }" :title="t('context.systemTools')" />
+                    <div class="cw-seg seg-skills" :style="{ width: `${contextBreakdown.skillsPct}%` }" :title="t('context.skills')" />
+                    <div class="cw-seg seg-prompt" :style="{ width: `${contextBreakdown.systemPromptPct}%` }" :title="t('context.systemPrompt')" />
+                    <div class="cw-seg seg-memory" :style="{ width: `${contextBreakdown.memoryPct}%` }" :title="t('context.memoryFiles')" />
+                    <div class="cw-seg seg-messages" :style="{ width: `${contextBreakdown.messagesPct}%` }" :title="t('context.messages')" />
+                    <div class="cw-seg seg-free" :style="{ width: `${contextBreakdown.freePct}%` }" :title="t('context.freeSpace')" />
                   </div>
 
                   <!-- 分项明细数据表格 -->
@@ -904,7 +927,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-mcp" />
-                        <span>MCP tools</span>
+                        <span>{{ t('context.mcpTools') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.mcp) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.mcpPct }}%</div>
@@ -913,7 +936,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-system-tools" />
-                        <span>System tools</span>
+                        <span>{{ t('context.systemTools') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.systemTools) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.systemToolsPct }}%</div>
@@ -922,7 +945,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-skills" />
-                        <span>Skills</span>
+                        <span>{{ t('context.skills') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.skills) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.skillsPct }}%</div>
@@ -931,7 +954,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-prompt" />
-                        <span>System prompt</span>
+                        <span>{{ t('context.systemPrompt') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.systemPrompt) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.systemPromptPct }}%</div>
@@ -940,7 +963,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-memory" />
-                        <span>Memory files</span>
+                        <span>{{ t('context.memoryFiles') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.memory) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.memoryPct }}%</div>
@@ -949,7 +972,7 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-messages" />
-                        <span>Messages</span>
+                        <span>{{ t('context.messages') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.messages) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.messagesPct }}%</div>
@@ -958,51 +981,56 @@ defineExpose({ editMessage, setDraft })
                     <div class="cw-row cw-row-free">
                       <div class="cw-col-name">
                         <span class="cw-dot seg-free" />
-                        <span>Free space</span>
+                        <span>{{ t('context.freeSpace') }}</span>
                       </div>
                       <div class="cw-col-val">{{ formatTokensK(contextBreakdown.free) }}</div>
                       <div class="cw-col-pct">{{ contextBreakdown.freePct }}%</div>
                     </div>
                   </div>
 
-                  <!-- 可展开子项 (对标图 2: > MCP tools / > Memory files) -->
+                  <!-- 可展开子项 (真实动态 MCP 与 长期记忆) -->
                   <div class="cw-expandable-section">
                     <div class="cw-exp-item" @click="mcpExpanded = !mcpExpanded">
                       <div class="cw-exp-left">
                         <span class="cw-exp-arrow" :class="{ open: mcpExpanded }">›</span>
-                        <span>MCP tools</span>
+                        <span>{{ t('context.mcpTools') }}</span>
                       </div>
                       <div class="cw-exp-right">
                         <span class="cw-exp-tokens">{{ formatTokensK(contextBreakdown.mcp) }}</span>
-                        <span class="cw-exp-count">79</span>
+                        <span class="cw-exp-count">{{ mcpTotalTools }}</span>
                       </div>
                     </div>
                     <div v-if="mcpExpanded" class="cw-exp-sublist">
-                      <div class="cw-sub-row"><span>· chrome-devtools-mcp (28 工具)</span><span>14.2k</span></div>
-                      <div class="cw-sub-row"><span>· local-filesystem-mcp (22 工具)</span><span>11.8k</span></div>
-                      <div class="cw-sub-row"><span>· web-search-fetch-mcp (15 工具)</span><span>8.6k</span></div>
-                      <div class="cw-sub-row"><span>· terminal-task-manager (14 工具)</span><span>6.8k</span></div>
+                      <div v-for="srv in mcpServersList" :key="srv.name" class="cw-sub-row">
+                        <span>· {{ srv.name }} ({{ srv.toolsCount }} 工具)</span>
+                        <span>{{ formatTokensK(srv.tokens) }}</span>
+                      </div>
+                      <div v-if="mcpServersList.length === 0" class="cw-sub-empty">暂无启用的 MCP 服务</div>
                     </div>
 
                     <div class="cw-exp-item" @click="memoryExpanded = !memoryExpanded">
                       <div class="cw-exp-left">
                         <span class="cw-exp-arrow" :class="{ open: memoryExpanded }">›</span>
-                        <span>Memory files</span>
+                        <span>{{ t('context.memoryFiles') }}</span>
                       </div>
                       <div class="cw-exp-right">
                         <span class="cw-exp-tokens">{{ formatTokensK(contextBreakdown.memory) }}</span>
-                        <span class="cw-exp-count">1</span>
+                        <span class="cw-exp-count">{{ memoryItemsList.length }}</span>
                       </div>
                     </div>
                     <div v-if="memoryExpanded" class="cw-exp-sublist">
-                      <div class="cw-sub-row"><span>· memory-project-context.md</span><span>88 tokens</span></div>
+                      <div v-for="item in memoryItemsList" :key="item.title" class="cw-sub-row">
+                        <span>· {{ item.title }}</span>
+                        <span>{{ item.tokens }} tokens</span>
+                      </div>
+                      <div v-if="memoryItemsList.length === 0" class="cw-sub-empty">暂无启用的长期记忆条目</div>
                     </div>
                   </div>
 
                   <!-- 底部详细分析链接 -->
                   <div class="cw-footer">
                     <button class="cw-detail-link" @click="openUsageSettings">
-                      <span>查看用量详细分析与预算设置 (See detailed breakdown)</span>
+                      <span>{{ t('context.seeDetailed') }}</span>
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                         <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
                       </svg>
@@ -1669,30 +1697,6 @@ defineExpose({ editMessage, setDraft })
   color: var(--text-muted);
 }
 
-.manage-vis-btn {
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  transition: all 0.12s ease;
-  cursor: pointer;
-}
-
-.manage-vis-btn:hover {
-  background: var(--surface-hover);
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.manage-vis-btn.active {
-  background: var(--accent);
-  color: #ffffff;
-  border-color: var(--accent);
-  font-weight: 500;
-}
-
 /* 搜索框 (图片 1 红框) */
 .model-search-box {
   position: relative;
@@ -1785,10 +1789,18 @@ defineExpose({ editMessage, setDraft })
   text-align: left;
   transition: background 0.1s ease, opacity 0.15s ease;
   gap: 8px;
+  /* 由 button 改为 div 承载点击：显式补回指针与盒模型，避免默认值差异 */
+  box-sizing: border-box;
+  cursor: pointer;
+  user-select: none;
 }
 
-.model-option:hover {
-  background: var(--surface-hover);
+.model-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.model-option:hover {  background: var(--surface-hover);
 }
 
 .model-option.selected {

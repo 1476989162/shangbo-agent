@@ -698,6 +698,54 @@ const globFilesTool = createGlobFilesTool(toolHost)
 const multiPatchFileTool = createMultiPatchFileTool(toolHost)
 const todoWriteTool = createTodoWriteTool()
 
+/* ------------------------------------------------------------------ */
+/* 外部技能：按需读 SKILL.md（Foxtable 这类 Markdown 技能包）            */
+/* ------------------------------------------------------------------ */
+
+const listSkills: ToolDefinition = {
+  name: 'list_skills',
+  description:
+    '列出已配置外部技能包里的全部技能（id/名称/简介）。当用户问题涉及外部技能领域、或不确定该加载哪个技能时先调它。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute() {
+    const { scanAllSkillPacks } = await import('../skills/loader')
+    const packs = await scanAllSkillPacks()
+    if (packs.length === 0) return '尚未配置外部技能目录：请到 设置 → 技能中心 添加（如 D:\\foxtable\\foxtablecoderv7）。'
+    return packs
+      .map((pack) => `【${pack.name}】${pack.root}\n${pack.skills.map((s) => `- ${s.id}：${s.name}——${s.description}`).join('\n')}`)
+      .join('\n\n')
+  }
+}
+
+const readSkill: ToolDefinition = {
+  name: 'read_skill',
+  description:
+    '读取指定外部技能的 SKILL.md 全文（含 references 索引）。按路由器指引命中某个技能后调它拿 API、示例与陷阱；深度细节再用 skillDoc 参数读 references 文档。',
+  parameters: {
+    type: 'object',
+    properties: {
+      skillId: { type: 'string', description: '技能目录名，如 DataTable、Excel报表' },
+      doc: { type: 'string', description: 'references 下的相对路径，如 references/01-DataTable概述.md；不填则只读 SKILL.md' }
+    },
+    required: ['skillId']
+  },
+  requiresApproval: false,
+  async execute(input) {
+    const { skillId, doc } = z
+      .object({ skillId: z.string().min(1), doc: z.string().optional() })
+      .parse(input)
+    const { scanAllSkillPacks, readSkillEntry, readSkillDoc } = await import('../skills/loader')
+    const packs = await scanAllSkillPacks()
+    for (const pack of packs) {
+      const hit = pack.skills.find((s) => s.id === skillId || s.name === skillId)
+      if (!hit) continue
+      if (doc) return readSkillDoc(pack.root, doc)
+      return readSkillEntry(hit.entry, pack.root)
+    }
+    return `未找到技能：${skillId}。请先调 list_skills 看可用技能 id。`
+  }
+}
 /**
  * Freebuff 级系统命令安全审计与护栏规则库
  * 检测毁灭性擦盘、格式化、删库、系统密码影子文件读取等高危操作
@@ -1137,8 +1185,9 @@ const definitions: ToolDefinition[] = [
   patchFileTool,
   multiPatchFileTool,
   todoWriteTool,
-  runCommand,
-  qoderAsk,
+  listSkills,
+  readSkill,
+  runCommand,  qoderAsk,
   qoderStatus,
   codexAsk,
   codexStatus,
@@ -1159,9 +1208,10 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'list_directory',
   'read_file',
   'search_files',
-  'glob_files'
+  'glob_files',
+  'list_skills',
+  'read_skill'
 ])
-
 export const toolRegistry = {
   all(): ToolDefinition[] {
     return definitions

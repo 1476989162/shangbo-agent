@@ -69,9 +69,25 @@ const api: ShangboApi = {
     info: () => ipcRenderer.invoke(IPC.appInfo),
     contextStatics: () => ipcRenderer.invoke(IPC.appContextStatics),
     getGitBranch: (dir: string | null) => ipcRenderer.invoke(IPC.appGitBranch, dir),
+    getGitDiff: (dir: string | null) => ipcRenderer.invoke(IPC.appGitDiff, dir),
+    getGitStatus: (dir: string | null) => ipcRenderer.invoke(IPC.appGitStatus, dir),
+    toggleDevTools: () => ipcRenderer.invoke(IPC.appToggleDevTools),
+    openPath: (path: string) => ipcRenderer.invoke(IPC.appOpenPath, path),
+    execCommand: (command: string, dir?: string | null) =>
+      ipcRenderer.invoke(IPC.appExecCommand, command, dir),
     setWindowTheme: (theme: 'light' | 'dark') => ipcRenderer.invoke(IPC.appWindowTheme, theme),
     hideWindow: () => ipcRenderer.invoke(IPC.windowHide),
     quit: () => ipcRenderer.invoke(IPC.windowQuit)
+  },
+
+  browser: {
+    clearData: () => ipcRenderer.invoke(IPC.browserClearData)
+  },
+
+  backup: {
+    exportConfig: () => ipcRenderer.invoke(IPC.configExport),
+    importConfig: () => ipcRenderer.invoke(IPC.configImport),
+    exportAllConversations: () => ipcRenderer.invoke(IPC.conversationsExportAll)
   },
 
   dialog: {

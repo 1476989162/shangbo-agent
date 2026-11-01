@@ -21,7 +21,7 @@ import type {
 import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { buildTaskContract, classifyIntent, matchTaskPlaybook } from './intent'
-import { listLessons, markLessonsUsed } from '../autonomous/store'
+import { lessonForTask, listLessons, markLessonsUsed, upsertLesson } from '../autonomous/store'
 import { resolveAgentMode } from './wishMode'
 import { buildWorkModeDirective } from './workMode'
 import type { AgentMode, UsageMode } from '../../shared/types'
@@ -64,6 +64,142 @@ export interface AgentLoopHooks {
     turnCacheReadTokens?: number,
     turnCacheWriteTokens?: number
   ): Usage | null
+}
+
+async function findWishVerifyCommand(workingDir: string | null, triggerText: string): Promise<string | null> {
+  const configured = getSetting<string>('agent.wish.verifyCommand', '').trim()
+  if (configured) return configured
+  const match = triggerText.match(/(npm run [a-z0-9_-]+|npm test|cargo test|pytest|go test[^\n\r]*|make test)/i)
+  if (match) return match[1]
+  if (workingDir) {
+    try {
+      const fsPromises = await import('node:fs/promises')
+      const pathMod = await import('node:path')
+      const pkgPath = pathMod.join(workingDir, 'package.json')
+      const raw = await fsPromises.readFile(pkgPath, 'utf8')
+      const pkg = JSON.parse(raw)
+      if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
+        return 'npm test'
+      }
+    } catch {}
+  }
+  return null
+}
+
+function createStreamChunkProcessor(
+  emit: LoopEmitter,
+  runId: string,
+  conversationId: string,
+  assistantMessageId: string,
+  blocks: ContentBlock[]
+) {
+  let textStreamSnapshot = ''
+  let reasoningStreamSnapshot = ''
+  let inThinkTag = false
+  let tagBuffer = ''
+
+  const emitText = (text: string) => {
+    if (!text) return
+    appendBlock(blocks, { type: 'text', text })
+    emit({
+      type: 'text_delta',
+      runId,
+      conversationId,
+      messageId: assistantMessageId,
+      text
+    })
+  }
+
+  const emitReasoning = (text: string) => {
+    if (!text) return
+    appendBlock(blocks, { type: 'reasoning', text })
+    emit({
+      type: 'reasoning_delta',
+      runId,
+      conversationId,
+      messageId: assistantMessageId,
+      text
+    })
+  }
+
+  const handleTextChunk = (rawText: string) => {
+    const normalized = normalizeIncomingDelta(rawText, textStreamSnapshot)
+    textStreamSnapshot = normalized.snapshot
+    if (!normalized.delta) return
+
+    let current = tagBuffer + normalized.delta
+    tagBuffer = ''
+
+    while (current.length > 0) {
+      if (!inThinkTag) {
+        const thinkStart = current.indexOf('<think>')
+        if (thinkStart === -1) {
+          let partial = ''
+          for (let len = Math.min(6, current.length); len >= 1; len--) {
+            const sub = current.slice(-len)
+            if ('<think>'.startsWith(sub)) {
+              partial = sub
+              break
+            }
+          }
+          if (partial) {
+            tagBuffer = partial
+            emitText(current.slice(0, -partial.length))
+          } else {
+            emitText(current)
+          }
+          break
+        } else {
+          emitText(current.slice(0, thinkStart))
+          inThinkTag = true
+          current = current.slice(thinkStart + 7)
+        }
+      } else {
+        const thinkEnd = current.indexOf('</think>')
+        if (thinkEnd === -1) {
+          let partial = ''
+          for (let len = Math.min(7, current.length); len >= 1; len--) {
+            const sub = current.slice(-len)
+            if ('</think>'.startsWith(sub)) {
+              partial = sub
+              break
+            }
+          }
+          if (partial) {
+            tagBuffer = partial
+            emitReasoning(current.slice(0, -partial.length))
+          } else {
+            emitReasoning(current)
+          }
+          break
+        } else {
+          emitReasoning(current.slice(0, thinkEnd))
+          inThinkTag = false
+          current = current.slice(thinkEnd + 8)
+        }
+      }
+    }
+  }
+
+  const handleReasoningChunk = (rawText: string) => {
+    const normalized = normalizeIncomingDelta(rawText, reasoningStreamSnapshot)
+    reasoningStreamSnapshot = normalized.snapshot
+    if (!normalized.delta) return
+    emitReasoning(normalized.delta)
+  }
+
+  const flush = () => {
+    if (tagBuffer) {
+      if (inThinkTag) {
+        emitReasoning(tagBuffer)
+      } else {
+        emitText(tagBuffer)
+      }
+      tagBuffer = ''
+    }
+  }
+
+  return { handleTextChunk, handleReasoningChunk, flush }
 }
 
 export async function runAgentLoop(
@@ -116,14 +252,13 @@ export async function runAgentLoop(
     let turnCacheReadTokens = 0
     let turnCacheWriteTokens = 0
     let requestCount = 0
-    // 流式通道快照：跨供应商/跨步共享同一份，确保累计全文不会被二次追加。
-    let textStreamSnapshot = ''
-    let reasoningStreamSnapshot = ''
     // 跨供应商降级后，实际服务的可能不是首选；最终落库以实际值为准。
     let servedProviderId = resolved.providerId
     let servedModel = resolved.model
     let status: MessageStatus = 'done'
     let errorText: string | null = null
+    let wishRetryCount = 0
+    let wishVerified = false
 
     let finalStopReason = 'stop'
 
@@ -152,6 +287,9 @@ export async function runAgentLoop(
     if (plugins.includes('ralph-loop')) pluginDirectives.push('改完代码有测试就跑，报错读栈自愈。')
     if (plugins.includes('security-guidance')) pluginDirectives.push('注意密钥/SQL注入/命令拼接风险。')
     if (plugins.includes('github')) pluginDirectives.push('GitHub 操作优先用本机 gh。')
+    if (plugins.includes('figma')) pluginDirectives.push('解析 Figma 设计稿标注、提取色值与尺寸规范，严格还原 UI 布局。')
+    if (plugins.includes('supabase')) pluginDirectives.push('Supabase 数据库迁移、Row Level Security (RLS) 与 Edge Functions 规范。')
+    if (plugins.includes('vercel')) pluginDirectives.push('遵循 Vercel 部署规范与 Serverless 边缘函数最佳实践。')
 
     const triggerText = textOf(userMessage.blocks)
     const intent = classifyIntent(triggerText)
@@ -235,20 +373,35 @@ export async function runAgentLoop(
     const taskPlaybook = substantive ? matchTaskPlaybook(triggerText, agentMode) : ''
     if (taskPlaybook) system += taskPlaybook
 
-    // 项目经验对所有模式都注入：建造者同样需要知道上次是怎么验证通过的。
-    if (conversation.workingDir) {
-      const lessons = listLessons({
-        projectPath: conversation.workingDir,
+    // 经验库对所有模式注入：无工程绑定时也加载并注入 scope === 'global' 的高频经验
+    let activeLessons: import('@shared/types').Lesson[] = []
+    try {
+      activeLessons = listLessons({
+        projectPath: conversation.workingDir || undefined,
         limit: agentMode === 'wish' ? 12 : 6
       })
-      if (lessons.length > 0) {
-        system += `\n\n【已验证的项目经验（优先复用）】\n${lessons
-          .map((lesson, index) => `${index + 1}. ${lesson.title}\n${lesson.content}`)
-          .join('\n')}`
-        markLessonsUsed(lessons.map((lesson) => lesson.id))
-      }
+    } catch {
+      activeLessons = []
+    }
+    if (activeLessons.length > 0) {
+      system += `\n\n【已验证的经验库（优先复用）】\n${activeLessons
+        .map((lesson, index) => `${index + 1}. [${lesson.scope === 'global' ? '全局' : '项目'}] ${lesson.title}\n${lesson.content}`)
+        .join('\n')}`
     }
     if (pluginDirectives.length > 0) system += `\n已启用技能：${pluginDirectives.join(' ')}`
+
+    // 外部技能包（Foxtable 这类 SKILL.md 目录）：只注入路由器索引，
+    // 子技能全文由模型按需调 list_skills / read_skill 拉取，避免上下文爆炸。
+    try {
+      const { scanAllSkillPacks, buildSkillRouterPrompt } = await import('../skills/loader')
+      const packs = await scanAllSkillPacks()
+      const routerPrompt = buildSkillRouterPrompt(packs)
+      if (routerPrompt) {
+        system += `\n\n【外部技能路由（按需加载）】\n${routerPrompt}\n用法：先看路由器命中哪个技能，再调 read_skill(skillId) 读全文；深度细节按 SKILL.md 里的 references 索引用 read_skill(skillId, doc) 再读。`
+      }
+    } catch {
+      // 技能目录不可读不该炸轮
+    }
 
     // 方法论注入：本轮是复查任务才给打法，平时不打扰。
     if (matchReviewIntent(triggerText)) {
@@ -307,7 +460,7 @@ export async function runAgentLoop(
     const offeredSchemas = [
       ...toolRegistry.schemas({ readOnly }).filter((t) => computerOn || !t.name.startsWith('computer_')),
       SPAWN_SUBAGENT_SCHEMA,
-      ...(await mcpManager.toolSchemas())
+      ...(await mcpManager.toolSchemas(conversation.workingDir ?? undefined))
     ]
     if (computerOn && !readOnly) {
       system += '\n\n【桌面操作】需要操作本机桌面应用时：先 computer_screenshot 看屏，按截图像素坐标 computer_click，必要时 computer_type / computer_press_key / computer_scroll。每次键鼠操作都要用户确认。'
@@ -427,6 +580,13 @@ export async function runAgentLoop(
         const firstByteTimeoutMs = resolveFirstByteTimeoutMs(firstByteTimeoutRaw)
         // Anthropic 提示词缓存默认开启；兼容网关不支持时可在设置里关掉
         const promptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
+        const streamProcessor = createStreamChunkProcessor(
+          emit,
+          runId,
+          conversation.id,
+          assistantMessage.id,
+          blocks
+        )
         for await (const chunk of streamWithFallback(
           {
             model: resolved.model,
@@ -442,29 +602,9 @@ export async function runAgentLoop(
           { firstByteTimeoutMs }
         )) {
           if (chunk.type === 'text') {
-            const normalized = normalizeIncomingDelta(chunk.text, textStreamSnapshot)
-            textStreamSnapshot = normalized.snapshot
-            if (!normalized.delta) continue
-            appendBlock(blocks, { type: 'text', text: normalized.delta })
-            emit({
-              type: 'text_delta',
-              runId,
-              conversationId: conversation.id,
-              messageId: assistantMessage.id,
-              text: normalized.delta
-            })
+            streamProcessor.handleTextChunk(chunk.text)
           } else if (chunk.type === 'reasoning') {
-            const normalized = normalizeIncomingDelta(chunk.text, reasoningStreamSnapshot)
-            reasoningStreamSnapshot = normalized.snapshot
-            if (!normalized.delta) continue
-            appendBlock(blocks, { type: 'reasoning', text: normalized.delta })
-            emit({
-              type: 'reasoning_delta',
-              runId,
-              conversationId: conversation.id,
-              messageId: assistantMessage.id,
-              text: normalized.delta
-            })
+            streamProcessor.handleReasoningChunk(chunk.text)
           } else if (chunk.type === 'tool_use') {
             toolUses.push({ id: chunk.id, name: chunk.name, input: chunk.input })
           } else if (chunk.type === 'stop') {
@@ -517,6 +657,7 @@ export async function runAgentLoop(
             })
           }
         }
+        streamProcessor.flush()
 
         finalStopReason = stopReason
 
@@ -534,6 +675,77 @@ export async function runAgentLoop(
         }
 
         if (toolUses.length === 0) {
+          const autoVerify = getSetting<boolean>('agent.wish.autoVerify', true)
+          const maxRetries = getSetting<number>('agent.wish.verifyRetries', 3)
+          if (
+            agentMode === 'wish' &&
+            autoVerify &&
+            conversation.workingDir &&
+            wishRetryCount < maxRetries &&
+            !wishVerified
+          ) {
+            const verifyCmd = await findWishVerifyCommand(conversation.workingDir, triggerText)
+            if (verifyCmd) {
+              const { exec } = await import('node:child_process')
+              const { promisify } = await import('node:util')
+              const execAsync = promisify(exec)
+              const customShell = getSetting<string>('code.defaultShell', '').trim()
+              const shell = customShell || (process.platform === 'win32' ? 'powershell.exe' : '/bin/sh')
+              try {
+                await execAsync(verifyCmd, {
+                  cwd: conversation.workingDir,
+                  timeout: 45000,
+                  maxBuffer: 10 * 1024 * 1024,
+                  shell
+                })
+                wishVerified = true
+                if (getSetting<boolean>('agent.wish.evolve', true)) {
+                  const modifiedFiles = Array.from(
+                    new Set(
+                      blocks
+                        .filter(
+                          (b): b is Extract<ContentBlock, { type: 'tool_use' }> =>
+                            b.type === 'tool_use' &&
+                            (b.name === 'write_file' || b.name === 'patch_file' || b.name === 'create_file')
+                        )
+                        .map((b) => (b.input as any)?.path || (b.input as any)?.TargetFile || (b.input as any)?.file)
+                        .filter(Boolean)
+                    )
+                  )
+                  const filesPart = modifiedFiles.length > 0 ? ` 涉及文件：${modifiedFiles.join('、')}。` : ''
+                  const summary = `【任务目标】${triggerText.slice(0, 80)}\n【验收命令】${verifyCmd}\n【经验总结】执行 ${verifyCmd} 成功通过验收。${filesPart}在类似项目中应遵循相同构建与校验规则。`
+                  const existing = lessonForTask(conversation.id)
+                  upsertLesson({
+                    id: existing?.id,
+                    title: `${triggerText.slice(0, 30).trim() || '会话'} 验证经验`,
+                    content: summary,
+                    projectPath: conversation.workingDir,
+                    scope: 'project',
+                    sourceTaskId: conversation.id,
+                    confidence: 0.85
+                  })
+                }
+                break
+              } catch (testErr: any) {
+                wishRetryCount++
+                const errOutput = (testErr.stderr || testErr.stdout || testErr.message || String(testErr)).slice(0, 4000)
+                const fixFeedback = `【许愿模式自动验收未通过（第 ${wishRetryCount}/${maxRetries} 次）】\n执行验收命令 \`${verifyCmd}\` 失败，错误输出：\n\`\`\`\n${errOutput}\n\`\`\`\n请仔细分析报错并调用工具修复，直至验收通过。`
+                appendBlock(blocks, {
+                  type: 'text',
+                  text: `\n\n_（自动执行验收命令 \`${verifyCmd}\` 失败，正在进行第 ${wishRetryCount}/${maxRetries} 次自愈重试...）_`
+                })
+                emit({
+                  type: 'text_delta',
+                  runId,
+                  conversationId: conversation.id,
+                  messageId: assistantMessage.id,
+                  text: `\n\n_（自动执行验收命令 \`${verifyCmd}\` 失败，正在进行第 ${wishRetryCount}/${maxRetries} 次自愈重试...）_`
+                })
+                appendBlock(blocks, { type: 'text', text: fixFeedback })
+                continue
+              }
+            }
+          }
           break
         }
 
@@ -644,7 +856,14 @@ export async function runAgentLoop(
           let contStop = 'stop'
           // 续写沿用实际服务模型的档位映射，避免降级后用错上限。
           const contEffort = resolveEffort(servedModel, effort)
-            const contPromptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
+          const contPromptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
+          const contStreamProcessor = createStreamChunkProcessor(
+            emit,
+            runId,
+            conversation.id,
+            assistantMessage.id,
+            blocks
+          )
           for await (const chunk of streamWithFallback(
             {
               model: servedModel,
@@ -652,24 +871,16 @@ export async function runAgentLoop(
               messages: [...contextNow.messages, ...toLLMMessages(inMemoryNow)],
               tools: offeredSchemas,
               maxTokens: contEffort.maxTokens,
-                reasoningEffort: contEffort.reasoningEffort,
-                promptCache: contPromptCache
+              reasoningEffort: contEffort.reasoningEffort,
+              promptCache: contPromptCache
             },
             controller.signal,
             servedProviderId
           )) {
             if (chunk.type === 'text') {
-              const normalized = normalizeIncomingDelta(chunk.text, textStreamSnapshot)
-              textStreamSnapshot = normalized.snapshot
-              if (!normalized.delta) continue
-              appendBlock(blocks, { type: 'text', text: normalized.delta })
-              emit({ type: 'text_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: normalized.delta })
+              contStreamProcessor.handleTextChunk(chunk.text)
             } else if (chunk.type === 'reasoning') {
-              const normalized = normalizeIncomingDelta(chunk.text, reasoningStreamSnapshot)
-              reasoningStreamSnapshot = normalized.snapshot
-              if (!normalized.delta) continue
-              appendBlock(blocks, { type: 'reasoning', text: normalized.delta })
-              emit({ type: 'reasoning_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: normalized.delta })
+              contStreamProcessor.handleReasoningChunk(chunk.text)
             } else if (chunk.type === 'tool_use') {
               continued.push({ id: chunk.id, name: chunk.name, input: chunk.input })
             } else if (chunk.type === 'stop') {
@@ -684,6 +895,7 @@ export async function runAgentLoop(
               emit({ type: 'usage', runId, conversationId: conversation.id, messageId: assistantMessage.id, usage: chunk.usage })
             }
           }
+          contStreamProcessor.flush()
           for (const call of continued) {
             blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input })
             emit({ type: 'tool_use', runId, conversationId: conversation.id, messageId: assistantMessage.id, toolUseId: call.id, name: call.name, input: call.input })
@@ -759,6 +971,31 @@ export async function runAgentLoop(
           messageId: assistantMessage.id,
           error: errorText
         })
+      }
+    }
+
+    if (status === 'done' && activeLessons.length > 0) {
+      const fullResponseText = blocks
+        .map((b) => (b.type === 'text' || b.type === 'reasoning' ? b.text : ''))
+        .join(' ')
+      const fullContextText = `${triggerText} ${fullResponseText}`
+      const hitIds = activeLessons
+        .filter((l) => {
+          const title = l.title.trim()
+          if (!title) return false
+          if (fullResponseText.includes(title)) return true
+          const words = title
+            .split(/[\s,，:：_\-—/|]+/)
+            .map((w) => w.trim())
+            .filter((w) => w.length >= 4)
+          return (
+            words.length > 0 &&
+            words.some((w) => fullResponseText.includes(w) && fullContextText.includes(w))
+          )
+        })
+        .map((l) => l.id)
+      if (hitIds.length > 0) {
+        markLessonsUsed(hitIds)
       }
     }
 

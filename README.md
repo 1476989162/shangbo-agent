@@ -2,7 +2,7 @@
 
 运行在本机的个人 Agent 桌面应用：多模型接入、工具调用、会话以树形存储（支持分支与重新生成）。
 
-当前版本：**0.7.0**
+当前版本：**0.9.0**
 
 - [功能说明](./docs/功能说明.md) —— 这个版本能做什么（面向使用者）
 - [更新日志](./CHANGELOG.md) —— 每个版本改了什么（面向开发者）
@@ -58,7 +58,7 @@
 发版流程（一键，版本号以 package.json 为准）：
 
 ```bash
-npm run release -- 0.3.1   # 校验→打包到Temp→验sha→拷回release→打tag→gh传三件套
+npm run release -- 0.9.0   # 校验→打包到Temp→验sha→拷回release→打tag→gh传三件套
 ```
 
 产物名为 ASCII `shangbo-agent-setup-<版本>.exe`（与 latest.yml 的 path 一致，缺 latest.yml 自动更新 404）：
@@ -76,7 +76,7 @@ npx electron-builder --win --config.directories.output=C:/Users/<你>/AppData/Lo
 若打包停在 `unpacking default Electron distribution` 长时间不动（部分 Windows 环境解压官方 zip 会卡住），可先手动解压 Electron 缓存，再用 `ELECTRON_DIST` 指向该目录：
 
 ```bash
-ELECTRON_DIST=C:/Users/<你>/AppData/Local/Temp/electron-dist-44 npm run release -- 0.7.0
+ELECTRON_DIST=C:/Users/<你>/AppData/Local/Temp/electron-dist-44 npm run release -- 0.9.0
 ```
 
 `scripts/release.mjs` 会自动把 `ELECTRON_DIST` 转成 `--config.electronDist`。

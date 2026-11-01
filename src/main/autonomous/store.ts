@@ -453,9 +453,16 @@ export function countRunsToday(taskId: string): number {
 export function listLessons(options?: {
   projectPath?: string | null
   limit?: number
+  all?: boolean
 }): Lesson[] {
   const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 100)))
   const projectPath = options?.projectPath?.trim()
+  if (options?.all) {
+    const rows = getDb()
+      .prepare('SELECT * FROM lessons ORDER BY confidence DESC, updated_at DESC LIMIT ?')
+      .all(limit) as LessonRow[]
+    return rows.map(toLesson)
+  }
   const rows = projectPath
     ? (getDb()
         .prepare(
@@ -465,7 +472,11 @@ export function listLessons(options?: {
         )
         .all(projectPath, limit) as LessonRow[])
     : (getDb()
-        .prepare('SELECT * FROM lessons ORDER BY confidence DESC, updated_at DESC LIMIT ?')
+        .prepare(
+          `SELECT * FROM lessons
+           WHERE scope = 'global'
+           ORDER BY confidence DESC, updated_at DESC LIMIT ?`
+        )
         .all(limit) as LessonRow[])
   return rows.map(toLesson)
 }

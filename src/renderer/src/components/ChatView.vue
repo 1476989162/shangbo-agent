@@ -2,7 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { Message } from '@shared/types'
 import { useChatStore } from '../stores/chat'
+import { useViewerStore } from '../stores/viewer'
 import type { BranchInfo } from '../stores/chat'
+import { t } from '../i18n'
 import MessageItem from './MessageItem.vue'
 import ApprovalPanel from './ApprovalPanel.vue'
 import ComposerPanel from './ComposerPanel.vue'
@@ -16,6 +18,7 @@ interface ComposerPanelExpose {
 
 const emit = defineEmits<{ openSettings: [tab?: string] }>()
 const store = useChatStore()
+const viewer = useViewerStore()
 const composerRef = ref<ComposerPanelExpose | null>(null)
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -186,16 +189,16 @@ const suggestions = [
 ]
 
 const modeLabel = computed(() => {
-  if (store.agentMode === 'auto') return '智能模式'
-  if (store.agentMode === 'wish') return '许愿模式'
-  if (store.agentMode === 'builder') return '建造者'
-  return '问答模式'
+  if (store.agentMode === 'auto') return t('mode.auto')
+  if (store.agentMode === 'wish') return t('mode.wish')
+  if (store.agentMode === 'builder') return t('mode.builder')
+  return t('mode.chat')
 })
 
 const autonomyLabel = computed(() => {
-  if (store.autonomy === 'strict') return '严格确认'
-  if (store.autonomy === 'trusted') return '完全信任'
-  return '智能自治'
+  if (store.autonomy === 'strict') return t('autonomy.strict')
+  if (store.autonomy === 'trusted') return t('autonomy.trusted')
+  return t('autonomy.balanced')
 })
 
 const capabilities = [
@@ -265,6 +268,22 @@ const capabilities = [
             <path d="M4 12h8M8 3v6M5.5 6.5L8 9l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
           导出
+        </button>
+
+        <button
+          class="btn btn-ghost tiny workbench-toggle-btn"
+          :class="{ active: viewer.isOpen && !viewer.collapsed }"
+          title="打开或折叠 WorkBuddy 工作台"
+          @click="viewer.isOpen ? viewer.toggleCollapsed() : viewer.openWorkbench('new-tab')"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.3" />
+            <line x1="9" y1="2" x2="9" y2="14" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+          {{ t('workbench.title') }}
+          <span v-if="viewer.sessionArtifacts.length > 0" class="badge-count">
+            {{ viewer.sessionArtifacts.length }}
+          </span>
         </button>
 
         <button class="btn btn-ghost tiny" title="打开系统设置" @click="emit('openSettings', 'preferences')">
@@ -869,6 +888,31 @@ const capabilities = [
 
 .header-autonomy {
   color: var(--accent-strong);
+}
+
+.workbench-toggle-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.workbench-toggle-btn.active {
+  color: var(--primary, #3b82f6);
+  background: var(--surface-hover);
+}
+.badge-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 9999px;
+  font-size: 10px;
+  background: var(--primary, #3b82f6);
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
 }
 
 @media (max-width: 900px) {

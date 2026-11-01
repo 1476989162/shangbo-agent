@@ -96,6 +96,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.browser.default': z.enum(['external', 'builtin']),
   // 字符串数组
   'agent.plugins': z.array(z.string().max(100)).max(50),
+  // 外部技能包目录（SKILL.md 技能包根目录，最多 10 个，如 D:\foxtable\foxtablecoderv7）
+  'agent.skillDirs': z.array(z.string().max(1000)).max(10),
   'agent.mcpServers': z.array(z.string().max(200)).max(200),
   'chat.hiddenModels': z.array(z.string().max(200)).max(1000),
   'cowork.trustedFolders': z.array(z.string().max(1000)).max(1000),
@@ -105,6 +107,15 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 结构化数组：元素必须是对象，具体字段由各自读取方容错
   'agent.mcp.servers': z.array(z.record(z.string(), z.unknown())).max(100),
   'cowork.memories': z.array(z.record(z.string(), z.unknown())).max(500),
+  'agent.mcp.projectLevel': z.boolean(),
+  'ui.language': z.enum(['zh-CN', 'zh-TW', 'en-US', 'ja-JP']),
+  'agent.worktree': z.boolean(),
+  'code.fontFamily': z.string().max(200),
+  'code.fontSize': z.number().int().min(8).max(36),
+  'code.lineNumbers': z.boolean(),
+  'code.wordWrap': z.boolean(),
+  'code.commitTemplate': z.string().max(2000),
+  'code.defaultShell': z.string().max(200),
   'agent.wish.verifyCommand': z.string().max(2000),
   'agent.wish.acceptance': z.string().max(10_000)
 }

@@ -4,6 +4,7 @@ import type { ContentBlock, Message } from '@shared/types'
 import { imageFileUrl } from '@shared/imageUrl'
 import type { BranchInfo } from '../stores/chat'
 import { useViewerStore } from '../stores/viewer'
+import { t } from '../i18n'
 import MarkdownBlock from './MarkdownBlock.vue'
 const props = defineProps<{
   message: Message
@@ -148,7 +149,40 @@ const renderItems = computed<RenderItem[]>(() => {
 
   for (const block of props.message.blocks) {
     if (block.type === 'text') {
-      items.push({ kind: 'text', key: `t${index++}`, text: block.text })
+      const text = block.text
+      if (text.includes('<think>') || text.includes('</think>')) {
+        let remaining = text
+        while (remaining.length > 0) {
+          const thinkStart = remaining.indexOf('<think>')
+          if (thinkStart === -1) {
+            const cleanText = remaining.replace(/<\/think>/g, '')
+            if (cleanText.trim()) {
+              items.push({ kind: 'text', key: `t${index++}`, text: cleanText })
+            }
+            break
+          }
+          const before = remaining.slice(0, thinkStart).replace(/<\/think>/g, '')
+          if (before.trim()) {
+            items.push({ kind: 'text', key: `t${index++}`, text: before })
+          }
+          const thinkEnd = remaining.indexOf('</think>', thinkStart + 7)
+          if (thinkEnd === -1) {
+            const thinkText = remaining.slice(thinkStart + 7)
+            if (thinkText.trim()) {
+              items.push({ kind: 'reasoning', key: `r${index++}`, text: thinkText })
+            }
+            break
+          } else {
+            const thinkText = remaining.slice(thinkStart + 7, thinkEnd)
+            if (thinkText.trim()) {
+              items.push({ kind: 'reasoning', key: `r${index++}`, text: thinkText })
+            }
+            remaining = remaining.slice(thinkEnd + 8)
+          }
+        }
+      } else {
+        items.push({ kind: 'text', key: `t${index++}`, text: block.text })
+      }
     } else if (block.type === 'reasoning') {
       items.push({ kind: 'reasoning', key: `r${index++}`, text: block.text })
     } else if (block.type === 'tool_use') {
@@ -591,6 +625,14 @@ async function copy(): Promise<void> {
             @click="emit('regenerate', message.id)"
           >
             重新生成
+          </button>
+          <button
+            v-if="viewer.sessionArtifacts.length > 0"
+            class="btn btn-ghost tiny artifact-view-btn"
+            title="在右侧工作台查看全部会话产物"
+            @click="viewer.openWorkbench('new-tab')"
+          >
+            📦 {{ t('workbench.viewAllArtifacts') }} ({{ viewer.sessionArtifacts.length }}) &gt;
           </button>
           <span v-if="usageLabel" class="usage subtle" :title="usageTitle">{{ usageLabel }}</span>
         </footer>
@@ -1451,5 +1493,13 @@ async function copy(): Promise<void> {
 .btn-regenerate-subtle:hover {
   background: var(--surface-hover);
   color: var(--text);
+}
+.artifact-view-btn {
+  color: var(--primary, #3b82f6);
+  font-weight: 500;
+}
+.artifact-view-btn:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary-hover, #60a5fa);
 }
 </style>
