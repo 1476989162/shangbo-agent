@@ -2,6 +2,26 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.4] - 2026-11-04
+
+安全对齐与后台复核版本：SSH 直连免审批、Claude Desktop 删除防护对齐、双 LLM 分类器（默认关闭）。
+
+### 新增
+
+- **SSH 直连免审批**：单条 `ssh` 开头命令自动放行，`-i` 密钥路径与远端 `wget/docker` 不再二次拦截；`ssh` 带删除/格式化写法、复合命令后半段仍走常规确认。
+- **LLM 后台动作复核**：`src/main/agent/actionClassifier.ts`，规则常开零成本，高风险才可调 LLM（`agent.safety.actionClassifierLlm`），只收紧不放宽，失败默认要问。
+- **注入内容扫描**：`src/main/agent/injectionDetector.ts`，本地工具与 MCP 回包统一扫描，高危直接告警，`low` 且开 `agent.safety.injectionLlm` 才做 LLM 二次确认。
+- **设置页开关**：安全区新增「后台动作复核」「注入二次确认」两个开关，默认关闭。
+
+### 安全
+
+- **系统关键目录永久禁止**：`C:\Windows/Program Files/ProgramData`、`/etc//usr//bin//sbin//var//home//root`、系统环境变量路径的删除直接 `blocked`。
+- **删除永不免审批**：`isAutoAllowed` 加删除动词纵深兜底，`auto` 判定带删除也落回确认；SSH 远端带删除不免。
+
+### 测试
+
+- 新增 `actionClassifier.test.ts`、`injectionDetector.test.ts`，补系统目录/SSH 远端删除/删除永不自动用例；相关单测通过，`typecheck(node)` 通过。
+
 ## [0.9.1] - 2026-11-04
 
 会话性能优化版本：首字延迟与长会话卡顿修复，59 个测试文件、415 个用例全部通过。

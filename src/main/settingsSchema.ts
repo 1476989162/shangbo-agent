@@ -49,6 +49,9 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.autonomy': z.enum(['strict', 'balanced', 'trusted']),
   // 渲染层自动同意普通审批（硬红线 critical 永不自动同意），默认关闭
   'agent.autoApproveSoft': z.boolean(),
+  // 后台分类器：动作为 LLM 复核（只收紧不放宽），注入为 LLM 二次确认（仅 low 触发）；默认关闭，不花钱
+  'agent.safety.actionClassifierLlm': z.boolean(),
+  'agent.safety.injectionLlm': z.boolean(),
   // 轮间摘要默认关闭：开启后调用当前模型生成摘要，会产生额外请求
   'agent.context.summarize': z.boolean(),
   'agent.wish.enabled': z.boolean(),

@@ -329,8 +329,10 @@ export function classifyToolCall(
 }
 
 /** 该判定是否允许在本轮直接执行，不再弹确认。 */
-export function isAutoAllowed(verdict: SafetyVerdict, autonomy: AutonomyLevel): boolean {
+export function isAutoAllowed(verdict: SafetyVerdict, autonomy: AutonomyLevel, command?: string): boolean {
   if (verdict.tier === 'blocked' || verdict.tier === 'hard') return false
+  // 对标 Claude Desktop 删除永不免审批：即使判定是 auto，带删除动词一律落回确认，做纵深兜底。
+  if (command && /\b(?:rm|rmdir|rd|del|erase|remove-item|ri|unlink|shred)\b/i.test(command)) return false
   if (verdict.tier === 'auto') return true
   if (!verdict.autoApprovable) return false
   if (autonomy === 'trusted') return true

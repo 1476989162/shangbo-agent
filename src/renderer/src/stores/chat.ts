@@ -190,6 +190,20 @@ export const useChatStore = defineStore('chat', () => {
   function toggleAutoApproveSoft(): void {
     void setAutoApproveSoft(!autoApproveSoft.value)
   }
+
+  /** 后台分类器开关：默认关闭，打开后多一次 LLM 复核，会产生额外请求。 */
+  const actionClassifierLlm = ref(false)
+  const injectionLlm = ref(false)
+
+  async function setActionClassifierLlm(value: boolean): Promise<void> {
+    actionClassifierLlm.value = value
+    await window.shangbo.settings.set('agent.safety.actionClassifierLlm', value)
+  }
+
+  async function setInjectionLlm(value: boolean): Promise<void> {
+    injectionLlm.value = value
+    await window.shangbo.settings.set('agent.safety.injectionLlm', value)
+  }
   const collapsedProjects = ref<Record<string, boolean>>({})
 
   // 思考强度 (Effort)
@@ -1211,6 +1225,10 @@ export const useChatStore = defineStore('chat', () => {
     autoApproveSoft,
     setAutoApproveSoft,
     toggleAutoApproveSoft,
+    actionClassifierLlm,
+    setActionClassifierLlm,
+    injectionLlm,
+    setInjectionLlm,
     collapsedProjects,
     effortLevel,
     agentMode,

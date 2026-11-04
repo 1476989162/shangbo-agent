@@ -26,6 +26,7 @@ const ALLOWED_COMMANDS = new Set([
   'tsc',
   'vitest',
   'git',
+  'ssh',
   'python',
   'pip',
   'pytest',
@@ -107,11 +108,18 @@ const ESCAPE_PATTERN =
 export function commandStaysInsideWorkspace(command: string, workspace: string): boolean {
   const cmd = command.trim()
   if (!cmd) return false
-  if (ESCAPE_PATTERN.test(cmd)) return false
-  if (DANGEROUS_PATTERNS.some((pattern) => pattern.test(cmd))) return false
-
   const segments = splitCommand(cmd)
   if (segments.length === 0) return false
+  // SSH 直连免审批：单条 ssh 远端载荷本地无法审计，以首词判定；-i 密钥路径与远端 wget/docker 不再二次拦截。
+  // ssh 开头的复合命令仍走常规检查，避免 `ssh host && rm -rf /` 绕过后半段。
+  // 对标 Claude Desktop 删除永不免审批：ssh 远端带删除/格式化写法时不免，落回人工确认。
+  // 私有数据与 CRITICAL 仍由 safety/tools 层独立拦截。
+  if (segments.length === 1 && /^ssh(?:\.exe)?(?=\s|$)/i.test(cmd)) {
+    if (/\b(?:rm|rmdir|rd|del|erase|remove-item|ri|unlink|shred|format|diskpart|mkfs|dd)\b/i.test(cmd)) return false
+    return true
+  }
+  if (ESCAPE_PATTERN.test(cmd)) return false
+  if (DANGEROUS_PATTERNS.some((pattern) => pattern.test(cmd))) return false
 
   for (const segment of segments) {
     if (!segmentStaysInside(segment, workspace)) return false
@@ -512,6 +520,10 @@ export interface DestructiveVerdict {
 /** 删除目标本身就是根目录/盘符根/当前目录/裸通配。 */
 const ROOT_TARGET = /^(?:[a-z]:[\\/]\*?|\\|\/|\/\*|\.|\.\.|\*|~\/?\*?)$/i
 
+/** 系统关键目录：对标 Claude Desktop dangerous-path，删改即永久禁止。 */
+const SYSTEM_DIR_PATTERN =
+  /^(?:[a-z]:[\\/](?:windows|program\s?files(?:\s*\(x86\))?|programdata)\b|\/(?:etc|usr|bin|sbin|var|home|root)\b|%systemroot%|%windir%|\$env:(?:systemroot|windir))/i
+
 /** candidate 是否是 root 的上级目录（或等于 root）。 */
 function isAncestorOrSelf(root: string, candidate: string): boolean {
   try {
@@ -563,6 +575,13 @@ export function classifyDestructiveCommand(
         tier: 'blocked',
         category: 'disk',
         reason: '【Freebuff 安全护栏】检测到删除根目录、盘符根、当前目录或裸通配符：这是永久禁止的红线。'
+      }
+    }
+    if (SYSTEM_DIR_PATTERN.test(target)) {
+      return {
+        tier: 'blocked',
+        category: 'system',
+        reason: '【Freebuff 安全护栏】检测到删除系统关键目录（Windows/Program Files/系统环境变量或 /etc//usr 等）：这是永久禁止的红线。'
       }
     }
     if (!ws) continue

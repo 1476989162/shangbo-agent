@@ -33,7 +33,9 @@ describe('commandStaysInsideWorkspace 白名单', () => {
       'ls src',
       'dir src',
       'type G:\\repo\\src\\a.ts',
-      'mkdir tmp'
+      'mkdir tmp',
+      'ssh host',
+      'ssh -o StrictHostKeyChecking=no -i C:\\Users\\Administrator\\.ssh\\key -p 5829 root@43.240.223.64 "docker exec trial wget -qO /tmp/svc.json http://127.0.0.1:8080/api/status"'
     ]
     for (const command of allowed) {
       expect(commandStaysInsideWorkspace(command, WS), command).toBe(true)
@@ -47,7 +49,6 @@ describe('commandStaysInsideWorkspace 白名单', () => {
       'rm -rf node_modules',
       'del /f x.txt',
       'format c:',
-      'ssh host',
       'reg add HKCU\\x',
       'start notepad.exe'
     ]
@@ -226,6 +227,30 @@ describe('cmd 删除目标分析', () => {
       const verdict = classifyDestructiveCommand(command, ws)
       expect(verdict?.tier, command).toBe('hard')
     }
+  })
+
+  it('系统关键目录删除直接 blocked', () => {
+    const ws = 'C:\\repo'
+    for (const command of [
+      'rmdir /s /q C:\\Windows\\Temp',
+      'rd /s /q "C:\\Program Files\\app"',
+      'rm -rf /etc',
+      'rm -rf /usr/local/bin'
+    ]) {
+      const verdict = classifyDestructiveCommand(command, ws)
+      expect(verdict?.tier, command).toBe('blocked')
+    }
+  })
+
+  it('SSH 远端带删除写法不免审批', () => {
+    const ws = 'G:\\repo'
+    expect(commandStaysInsideWorkspace('ssh host "rm -rf /"', ws)).toBe(false)
+    expect(
+      commandStaysInsideWorkspace(
+        'ssh -o StrictHostKeyChecking=no -i C:\\Users\\Administrator\\.ssh\\key -p 5829 root@43.240.223.64 "docker exec trial wget -qO /tmp/svc.json http://127.0.0.1:8080/api/status"',
+        ws
+      )
+    ).toBe(true)
   })
 })
 

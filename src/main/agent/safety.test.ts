@@ -210,13 +210,34 @@ describe('工作区自治与自动放行', () => {
 
   it('不在白名单的命令即使完全信任也不自动放行', () => {
     const dir = workspace()
-    const verdict = classifyToolCall('run_command', { command: 'ssh example.com' }, {
+    const verdict = classifyToolCall('run_command', { command: 'curl https://example.com' }, {
       workingDirectory: dir,
       autonomy: 'trusted'
     })
     expect(verdict.tier).toBe('soft')
     expect(verdict.autoApprovable).toBe(false)
     expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+  })
+
+  it('SSH 直连在工作区内自动放行', () => {
+    const dir = workspace()
+    const verdict = classifyToolCall('run_command', { command: 'ssh example.com' }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('auto')
+    expect(isAutoAllowed(verdict, 'trusted', 'ssh example.com')).toBe(true)
+  })
+
+  it('删除动词永不免审批：即使判定是 auto 也落回确认', () => {
+    const dir = workspace()
+    const verdict = classifyToolCall('run_command', { command: 'npm test' }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('auto')
+    expect(isAutoAllowed(verdict, 'trusted', 'rmdir /s /q build')).toBe(false)
+    expect(isAutoAllowed(verdict, 'trusted', 'npm test')).toBe(true)
   })
 
   it('触碰私有数据直接 blocked', () => {

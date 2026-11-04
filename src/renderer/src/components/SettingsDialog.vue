@@ -89,6 +89,26 @@ const notifyOnCompletion = ref(true)
 const readOnlyReview = ref(false)
 const autonomyLevel = ref<'strict' | 'balanced' | 'trusted'>('balanced')
 const autoApproveSoft = ref(false)
+const actionClassifierLlm = ref(false)
+const injectionLlm = ref(false)
+
+async function toggleActionClassifierLlm(value: boolean): Promise<void> {
+  actionClassifierLlm.value = value
+  await store.setActionClassifierLlm(value)
+  feedback.value = {
+    ok: true,
+    message: value ? '已开启后台动作复核；高风险动作会多一次模型复核。' : '已关闭后台动作复核。'
+  }
+}
+
+async function toggleInjectionLlm(value: boolean): Promise<void> {
+  injectionLlm.value = value
+  await store.setInjectionLlm(value)
+  feedback.value = {
+    ok: true,
+    message: value ? '已开启注入二次确认；可疑外部内容会多一次模型确认。' : '已关闭注入二次确认，只走规则扫描。'
+  }
+}
 
 async function toggleAutoApproveSoft(value: boolean): Promise<void> {
   autoApproveSoft.value = value
@@ -420,6 +440,8 @@ async function load(): Promise<void> {
   autonomyLevel.value =
     (settings['agent.autonomy'] as 'strict' | 'balanced' | 'trusted') ?? 'balanced'
   autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
+  actionClassifierLlm.value = (settings['agent.safety.actionClassifierLlm'] as boolean) ?? false
+  injectionLlm.value = (settings['agent.safety.injectionLlm'] as boolean) ?? false
   unlimitedSteps.value = (settings['agent.unlimitedSteps'] as boolean) ?? false
   subagentTarget.value = (settings['agent.subagent.target'] as string) ?? ''
   wishEnabled.value = (settings['agent.wish.enabled'] as boolean) ?? true
@@ -1945,6 +1967,40 @@ async function toggleAutoScreenshot(): Promise<void> {
                   v-model="autoApproveSoft"
                   type="checkbox"
                   @change="toggleAutoApproveSoft(autoApproveSoft)"
+                />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">后台动作复核 (LLM Action Review)</span>
+                <span class="row-sub">
+                  开启后高风险动作会多一次模型复核，只收紧不放宽；失败默认要问，会产生额外请求。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input
+                  v-model="actionClassifierLlm"
+                  type="checkbox"
+                  @change="toggleActionClassifierLlm(actionClassifierLlm)"
+                />
+                <span class="switch-slider" />
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">注入二次确认 (Injection LLM Check)</span>
+                <span class="row-sub">
+                  开启后可疑外部回包会多一次模型确认；高危规则命中直接告警，不花钱。
+                </span>
+              </div>
+              <label class="switch-control">
+                <input
+                  v-model="injectionLlm"
+                  type="checkbox"
+                  @change="toggleInjectionLlm(injectionLlm)"
                 />
                 <span class="switch-slider" />
               </label>
