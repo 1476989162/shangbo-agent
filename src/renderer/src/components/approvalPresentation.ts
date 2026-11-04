@@ -10,10 +10,12 @@ export function isSecurityCriticalApproval(reason: string): boolean {
  * 其余普通审批在开关打开时直接放行。开关默认关闭，且状态持久化在主进程设置里。
  */
 export function shouldAutoApproveApproval(
-  event: { severity?: 'normal' | 'critical' },
+  event: { severity?: 'normal' | 'critical'; autoApprovable?: boolean },
   enabled: boolean
 ): boolean {
   if (!enabled) return false
+  // 主进程标记为不可自动放行的审批（如任意 shell 命令）即使开关打开也不代点。
+  if (event.autoApprovable === false) return false
   return (event.severity ?? 'normal') !== 'critical'
 }
 

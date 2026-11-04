@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { auditCommandSecurity, commandTouchesPrivateData, toolRegistry } from './index'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -105,6 +105,53 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
     const benign = ['rm -rf ~/docs', 'Remove-Item C:\\projects -Recurse -Force', 'rd /s /q E:\\temp']
     for (const cmd of benign) {
       expect(auditCommandSecurity(cmd).isDangerous, cmd).toBe(false)
+    }
+  })
+
+  const itWin = process.platform === 'win32' ? it : it.skip
+
+  itWin('事故命令：cmd 下 ; 被判为 CRITICAL', () => {
+    const res = auditCommandSecurity(
+      'rmdir /s /q C:\\router\\deploy\\__pycache__ 2>&1; git -C C:\\router diff --stat',
+      'C:\\router'
+    )
+    expect(res.isDangerous).toBe(true)
+    expect(res.severity).toBe('CRITICAL')
+  })
+
+  itWin('run_command 在 cmd 下拒绝 ; 分隔符', async () => {
+    const tool = toolRegistry.get('run_command')!
+    const ctx = {
+      conversationId: 't',
+      runId: 'r',
+      workingDirectory: null,
+      signal: new AbortController().signal
+    }
+    await expect(tool.execute({ command: 'echo a; echo b' }, ctx)).rejects.toThrow('不支持 `;`')
+  })
+
+  itWin('删除命令清空工作区时触发保险丝', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'shangbo-guard-'))
+    try {
+      await mkdir(join(dir, 'a'))
+      await mkdir(join(dir, 'b'))
+      await writeFile(join(dir, 'a', 'x.txt'), 'x')
+      await writeFile(join(dir, 'b', 'y.txt'), 'y')
+      const tool = toolRegistry.get('run_command')!
+      const ctx = {
+        conversationId: 't',
+        runId: 'r',
+        workingDirectory: dir,
+        signal: new AbortController().signal
+      }
+      const result = await tool.execute({ command: 'rmdir /s /q a & rmdir /s /q b' }, ctx)
+      expect(typeof result).toBe('object')
+      if (typeof result === 'object') {
+        expect(result.isError).toBe(true)
+        expect(result.content).toContain('安全保险丝')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
     }
   })
 

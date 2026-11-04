@@ -422,7 +422,7 @@ export async function runVerification(task: AutonomousTask): Promise<Verificatio
   if (commandTouchesPrivateData(task.verifyCommand, task.workingDir)) {
     return { ok: false, output: '验收命令触碰应用私有数据，已拒绝执行。' }
   }
-  const audit = auditCommandSecurity(task.verifyCommand)
+  const audit = auditCommandSecurity(task.verifyCommand, task.workingDir)
   if (audit.isDangerous) {
     return {
       ok: false,

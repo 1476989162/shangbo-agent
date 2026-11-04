@@ -1,11 +1,12 @@
 import { exec } from 'node:child_process'
-import { createReadStream } from 'node:fs'
+import { createReadStream, readdirSync } from 'node:fs'
 import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { app } from 'electron'
 import { z } from 'zod'
+import { analyzeCmdCommand, classifyDestructiveCommand } from '../agent/commandGuard'
 import { createGlobFilesTool } from './globFiles'
 import { createMultiPatchFileTool } from './multiPatch'
 import { createTodoWriteTool } from './todo'
@@ -365,6 +366,16 @@ const MAX_OUTPUT_CHARS = 16_000
 export function truncate(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS) return text
   return `${text.slice(0, MAX_OUTPUT_CHARS)}\n\n…（输出过长已截断，共 ${text.length} 字符）`
+}
+
+/** 工作区顶层条目数；目录不存在或无权限时返回 null（删除命令的保险丝用）。 */
+function countTopLevelEntries(dir: string | undefined): number | null {
+  if (!dir) return null
+  try {
+    return readdirSync(dir).length
+  } catch {
+    return null
+  }
 }
 
 export function describeError(error: unknown): string {
@@ -793,8 +804,19 @@ const RMITEM_PATH_FIRST_RE = new RegExp(
   'i'
 )
 
-export function auditCommandSecurity(cmd: string): SecurityAuditResult {
+export function auditCommandSecurity(cmd: string, workspace?: string | null): SecurityAuditResult {
   const trimmed = cmd.trim().toLowerCase()
+
+  // cmd 语义兜底：`;` 不是分隔符；工作区根/上级目录/多个递归目标。
+  const destructive = classifyDestructiveCommand(cmd, workspace)
+  if (destructive) {
+    return {
+      isDangerous: true,
+      severity: destructive.tier === 'blocked' ? 'CRITICAL' : 'HIGH',
+      reason: destructive.reason
+    }
+  }
+
   // 1. 全盘或根目录致命清除命令
   if (
     RM_ROOT_RE.test(trimmed) ||
@@ -915,7 +937,7 @@ export function commandTouchesPrivateData(command: string, cwd?: string): boolea
 const runCommand: ToolDefinition = {
   name: 'run_command',
   description:
-    '执行 shell 命令并返回标准输出与错误输出，默认工作目录是当前项目目录。适合运行构建、测试、git 等命令，不要用于长时间驻留的交互式程序。',
+    '执行 shell 命令并返回标准输出与错误输出，默认工作目录是当前项目目录。Windows 下固定使用 cmd.exe：多条命令用 && 连接，不要用 ;；删除类命令只写一个目标。适合运行构建、测试、git 等命令，不要用于长时间驻留的交互式程序。',
   parameters: {
     type: 'object',
     properties: {
@@ -936,45 +958,82 @@ const runCommand: ToolDefinition = {
       })
       .parse(input)
 
+    const resolvedCwd = cwd ? resolveUserPath(context, cwd) : context.workingDirectory ?? undefined
+    const analysis = analyzeCmdCommand(command)
+
+    // cmd 与 POSIX 的语法差异是 2026-11-04 事故的根因：`;` 在 cmd 里不是分隔符，
+    // 会把后面的路径变成 rmdir/del 的额外目标。这里直接拒绝，要求模型改写。
+    if (process.platform === 'win32' && analysis.posixSemicolon) {
+      throw new Error('当前 shell 是 cmd.exe，不支持 `;`。请用 `&&` 连接多条命令，或分两次调用。')
+    }
+
+    // 工作区根目录/上级目录/多个递归目标：工具层自保，直接拒绝。
+    // hard 级（工作区外、多个目标）交给 runtime 审批，不在工具层拦。
+    for (const root of new Set([context.workingDirectory, resolvedCwd])) {
+      if (!root) continue
+      const destructive = classifyDestructiveCommand(command, root)
+      if (destructive?.tier === 'blocked') {
+        throw new Error(destructive.reason)
+      }
+    }
+
     // 工具层自保：私有目录与 CRITICAL 级命令在执行前直接拦截，不依赖调用方是否记得审计。
     // HIGH 级（drop database 等）由 runtime 弹窗审批——用户批准后可执行，
     // 这里再拦就会出现「批准了却执行不了」的自相矛盾。
     // 抛错走工具错误通道（调用方展示给模型/用户），不进 exec。
-    if (commandTouchesPrivateData(command, cwd ? resolveUserPath(context, cwd) : context.workingDirectory ?? undefined)) {
+    if (commandTouchesPrivateData(command, resolvedCwd)) {
       throw new Error(
         '禁止访问应用私有数据：该命令触碰存放密钥与数据库的位置，不作为工具的执行对象。'
       )
     }
-    const audit = auditCommandSecurity(command)
+    const audit = auditCommandSecurity(command, resolvedCwd)
     if (audit.isDangerous && audit.severity === 'CRITICAL') {
       throw new Error(audit.reason ?? '【Freebuff 安全护栏拦截】检测到高危系统级操作！')
     }
+
+    // 删除类命令执行前记下工作区顶层条目数；执行后若被清空，触发保险丝。
+    const beforeCount = analysis.destructive ? countTopLevelEntries(resolvedCwd) : null
 
     // 有意设计：命令失败不抛异常，而是把退出码、stdout、stderr 作为正常观察结果回给模型。
     // 命令失败（在不存在的目录里执行、测试没通过、某个工具没装）是探索过程的常态，
     // 模型需要读到真实报错才能自己纠正下一步；若在这里抛出，整轮工具链会被中断，
     // 模型只能看到一句"工具执行失败"，反而失去了自救的依据。
+    let result: string
     try {
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: cwd ? resolveUserPath(context, cwd) : context.workingDirectory ?? undefined,
+      const execOptions = {
+        cwd: resolvedCwd,
         timeout: timeoutMs ?? 60_000,
         maxBuffer: 8 * 1024 * 1024,
         signal: context.signal,
-        windowsHide: true
-      })
+        windowsHide: true,
+        ...(process.platform === 'win32' ? { shell: process.env.ComSpec || 'cmd.exe' } : {})
+      }
+      const { stdout, stderr } = await execAsync(command, execOptions)
       const parts = [`$ ${command}`]
       if (stdout.trim()) parts.push(`--- 标准输出 ---\n${stdout.trim()}`)
       if (stderr.trim()) parts.push(`--- 标准错误 ---\n${stderr.trim()}`)
       if (parts.length === 1) parts.push('（命令执行成功，没有输出）')
-      return truncate(parts.join('\n\n'))
+      result = truncate(parts.join('\n\n'))
     } catch (error) {
       const failure = error as { stdout?: string; stderr?: string; code?: number }
       const parts = [`$ ${command}`, `--- 执行失败（退出码 ${failure.code ?? '未知'}）---`]
       if (failure.stdout?.trim()) parts.push(failure.stdout.trim())
       if (failure.stderr?.trim()) parts.push(failure.stderr.trim())
       if (parts.length === 2) parts.push(describeError(error))
-      return truncate(parts.join('\n\n'))
+      result = truncate(parts.join('\n\n'))
     }
+
+    if (analysis.destructive && beforeCount !== null) {
+      const afterCount = countTopLevelEntries(resolvedCwd)
+      if (afterCount === null || (beforeCount > 0 && afterCount === 0)) {
+        return {
+          content: `⚠️ 安全保险丝：执行删除命令后，工作区 ${resolvedCwd ?? '(未绑定)'} 的顶层条目从 ${beforeCount} 变为 ${afterCount === null ? '不可访问' : '0'}。\n命令：${command}\n\n请立即检查工作区并从备份恢复，不要再执行任何删除/写入操作。`,
+          isError: true
+        }
+      }
+    }
+
+    return result
   }
 }
 

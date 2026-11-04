@@ -1,6 +1,11 @@
 import { isAbsolute, resolve } from 'node:path'
 import type { AutonomyLevel } from '../../shared/types'
-import { commandStaysInsideWorkspace, isPathInsideResolved, touchesPrivateData } from './commandGuard'
+import {
+  classifyDestructiveCommand,
+  commandStaysInsideWorkspace,
+  isPathInsideResolved,
+  touchesPrivateData
+} from './commandGuard'
 
 /**
  * 工具调用的安全分级。
@@ -239,6 +244,22 @@ function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext)
   const hardLine = auditHardLines(cmd)
   if (hardLine) return hardLine
 
+  const baseDir = cwd || ctx.workingDirectory
+
+  // cmd 语义兜底：`;` 不是分隔符；工作区根/上级目录/多个递归目标
+  // 即使「完全信任」也不能自动放行。
+  const roots = Array.from(
+    new Set([ctx.workingDirectory, baseDir].filter((value): value is string => Boolean(value)))
+  )
+  for (const root of roots) {
+    const destructive = classifyDestructiveCommand(cmd, root)
+    if (destructive) {
+      return destructive.tier === 'blocked'
+        ? blocked(destructive.category, destructive.reason)
+        : hard(destructive.category, destructive.reason)
+    }
+  }
+
   // 递归删除工作区外的绝对路径：即使「完全信任」也必须确认。
   // 根目录/整盘删除已在上面的硬红线里永久拒绝，这里兜住 C:\Users 这类系统目录。
   if (RECURSIVE_DELETE.test(cmd)) {
@@ -247,18 +268,18 @@ function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext)
       (target) => !ctx.workingDirectory || !isPathInsideResolved(ctx.workingDirectory, target)
     )
     if (outside) {
-      return hard('system', '检测到递归删除工作区外的绝对路径，可能破坏系统目录，必须人工确认。')
+      return hard('system', '【Freebuff 安全护栏】检测到递归删除工作区外的绝对路径，可能破坏系统目录，必须人工确认。')
     }
   }
 
-  const baseDir = cwd || ctx.workingDirectory
   const inside =
     !!baseDir &&
     commandStaysInsideWorkspace(cmd, baseDir) &&
     (!ctx.workingDirectory || isPathInsideResolved(ctx.workingDirectory, baseDir))
 
   if (!inside) {
-    return soft('workspace', '命令超出工作区边界或不在安全白名单内，需要你确认。', ctx.autonomy === 'trusted')
+    // 任意 shell 命令都不自动放行：完全信任只对白名单里的构建/查看命令生效。
+    return soft('workspace', '命令不在安全白名单内，需要你确认。', false)
   }
   if (ctx.autonomy === 'strict') {
     return soft('workspace', '当前为严格模式：工作区内命令也需要确认。')

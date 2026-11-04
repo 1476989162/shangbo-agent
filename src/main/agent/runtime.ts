@@ -1151,7 +1151,10 @@ export class AgentRuntime {
     // CRITICAL 直接拒绝；HIGH 按 critical 审批处理（不允许“始终允许”绕过）。
     let securityConfirmReason = ''
     if (call.name === 'run_command' && typeof (call.input as Record<string, unknown>)?.command === 'string') {
-      const audit = auditCommandSecurity(String((call.input as Record<string, unknown>).command))
+      const audit = auditCommandSecurity(
+        String((call.input as Record<string, unknown>).command),
+        workingDirectory
+      )
       if (audit.isDangerous) {
         if (audit.severity === 'CRITICAL') {
           return {

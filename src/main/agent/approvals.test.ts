@@ -96,6 +96,16 @@ describe('ApprovalBroker', () => {
     expect(broker.isAutoApproved('mcp__demo__read')).toBe(false)
   })
 
+  it('run_command 永远不能进入永久放行', () => {
+    settings.set('tools.autoApprove', ['run_command'])
+    const broker = new ApprovalBroker()
+    expect(broker.isAutoApproved('run_command')).toBe(false)
+
+    broker.grantAutoApprove('run_command')
+    expect(settings.get('tools.autoApprove')).toEqual(['run_command'])
+    expect(broker.isAutoApproved('run_command')).toBe(false)
+  })
+
   it('会话停止时拒绝该会话的全部挂起审批', async () => {
     const broker = new ApprovalBroker()
     const first = requestTool(broker, 'run-1', 'tool-1', 'conv-1')

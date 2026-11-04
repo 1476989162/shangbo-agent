@@ -151,7 +151,7 @@ describe('工作区自治与自动放行', () => {
     expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
   })
 
-  it('递归删除工作区外绝对路径必须确认，完全信任也不放行', () => {
+  it('递归删除工作区外/上级路径必须人工确认或直接拒绝，完全信任也不放行', () => {
     const dir = workspace()
     for (const command of [
       'rm -rf C:\\Users',
@@ -162,9 +162,44 @@ describe('工作区自治与自动放行', () => {
         workingDirectory: dir,
         autonomy: 'trusted'
       })
-      expect(verdict.tier, command).toBe('hard')
+      // C:\Users 是工作区的上级目录时会被判 blocked；其余工作区外路径判 hard。
+      expect(['blocked', 'hard'], command).toContain(verdict.tier)
       expect(isAutoAllowed(verdict, 'trusted'), command).toBe(false)
     }
+  })
+
+  const itWin = process.platform === 'win32' ? it : it.skip
+
+  itWin('cmd 的 ; 不是分隔符：事故命令直接 blocked', () => {
+    const dir = workspace()
+    const command = `rmdir /s /q ${dir}\\deploy\\__pycache__ 2>&1; git -C ${dir} diff --stat`
+    const verdict = classifyToolCall('run_command', { command }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('blocked')
+    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+  })
+
+  it('删除工作区根目录 blocked，完全信任也不放行', () => {
+    const dir = workspace()
+    const verdict = classifyToolCall('run_command', { command: `rmdir /s /q ${dir}` }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('blocked')
+    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+  })
+
+  it('不在白名单的命令即使完全信任也不自动放行', () => {
+    const dir = workspace()
+    const verdict = classifyToolCall('run_command', { command: 'ssh example.com' }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('soft')
+    expect(verdict.autoApprovable).toBe(false)
+    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
   })
 
   it('触碰私有数据直接 blocked', () => {

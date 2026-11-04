@@ -17,6 +17,7 @@ describe('approvalPresentation', () => {
     expect(shouldAutoApproveApproval({ severity: 'normal' }, false)).toBe(false)
     expect(shouldAutoApproveApproval({ severity: 'normal' }, true)).toBe(true)
     expect(shouldAutoApproveApproval({ severity: 'critical' }, true)).toBe(false)
+    expect(shouldAutoApproveApproval({ severity: 'normal', autoApprovable: false }, true)).toBe(false)
     expect(shouldAutoApproveApproval({}, true)).toBe(true)
   })
 

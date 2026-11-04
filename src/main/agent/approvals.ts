@@ -8,6 +8,9 @@ import type { ApprovalDecision, AgentEvent } from '../../shared/types'
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
 export const AUTO_APPROVE_KEY = 'tools.autoApprove'
 
+/** run_command 等价于「永久放行任意 shell 命令」，永远不能进入 always-allow 列表。 */
+const NEVER_AUTO_APPROVE = new Set(['run_command'])
+
 export type ApprovalEmitter = (event: AgentEvent) => void
 
 interface PendingApproval {
@@ -178,10 +181,12 @@ export class ApprovalBroker {
   }
 
   isAutoApproved(toolName: string): boolean {
+    if (NEVER_AUTO_APPROVE.has(toolName)) return false
     return getSetting<string[]>(AUTO_APPROVE_KEY, []).includes(toolName)
   }
 
   grantAutoApprove(toolName: string): void {
+    if (NEVER_AUTO_APPROVE.has(toolName)) return
     const current = getSetting<string[]>(AUTO_APPROVE_KEY, [])
     if (current.includes(toolName)) return
     setSetting(AUTO_APPROVE_KEY, [...current, toolName])

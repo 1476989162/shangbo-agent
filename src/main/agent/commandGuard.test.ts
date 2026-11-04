@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  analyzeCmdCommand,
+  classifyDestructiveCommand,
   commandStaysInsideWorkspace,
   isPathAutoApprovable,
   isPathInside,
@@ -139,9 +141,10 @@ describe('commandStaysInsideWorkspace 绕过写法', () => {
 })
 
 describe('splitCommand 与 isPathInside', () => {
-  it('按 && || ; | 拆分复合命令', () => {
+  it('按 cmd 的 && || | & 拆分；; 不是分隔符', () => {
     expect(splitCommand('npm test && git status')).toEqual(['npm test', 'git status'])
-    expect(splitCommand('a || b ; c | d')).toEqual(['a', 'b', 'c', 'd'])
+    expect(splitCommand('a || b ; c | d')).toEqual(['a', 'b ; c', 'd'])
+    expect(splitCommand('a; b')).toEqual(['a; b'])
     expect(splitCommand('   ')).toEqual([])
   })
 
@@ -151,6 +154,43 @@ describe('splitCommand 与 isPathInside', () => {
     expect(isPathInside(WS, 'G:\\repo\\..\\other')).toBe(false)
     expect(isPathInside(WS, 'G:\\repo2\\a.ts')).toBe(false)
     expect(isPathInside(WS, 'C:\\Windows\\x')).toBe(false)
+  })
+})
+
+describe('cmd 删除目标分析', () => {
+  it('事故命令：; 不是分隔符，rmdir 会拿到多个目标', () => {
+    const command = 'rmdir /s /q C:\\router\\deploy\\__pycache__ 2>&1; git -C C:\\router diff --stat'
+    const analysis = analyzeCmdCommand(command)
+    expect(analysis.posixSemicolon).toBe(true)
+    expect(analysis.destructive).toBe(true)
+    expect(analysis.recursive).toBe(true)
+    expect(analysis.targets).toContain('C:\\router')
+    expect(analysis.segments).toHaveLength(1)
+  })
+
+  it('引号内的 ; 不误报', () => {
+    expect(analyzeCmdCommand('echo "a;b"').posixSemicolon).toBe(false)
+  })
+
+  it('工作区根/上级/根通配 blocked，子目录清理放行', () => {
+    const ws = 'C:\\repo'
+    for (const command of [
+      `rmdir /s /q ${ws}`,
+      `rd /s /q ${ws}\\..`,
+      `del /s /q ${ws}\\*`,
+      'rm -rf C:\\'
+    ]) {
+      const verdict = classifyDestructiveCommand(command, ws)
+      expect(verdict?.tier, command).toBe('blocked')
+    }
+    expect(classifyDestructiveCommand('rd /s /q build', ws)).toBeNull()
+    expect(classifyDestructiveCommand('del /q *.tmp', ws)).toBeNull()
+  })
+
+  it('递归删除多个目标必须人工确认', () => {
+    const ws = 'C:\\repo'
+    const verdict = classifyDestructiveCommand(`rmdir /s /q ${ws}\\a ${ws}\\b`, ws)
+    expect(verdict?.tier).toBe('hard')
   })
 })
 

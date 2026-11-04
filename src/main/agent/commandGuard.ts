@@ -10,7 +10,8 @@ import { isAbsolute, relative, resolve } from 'node:path'
  *
  * 三条规则：
  *  1. 白名单优先：只有已知的构建/查看类命令才可能自动放行；
- *  2. 复合命令逐段检查：`&&`、`||`、`;`、`|` 拆开后每一段都要过；
+ *  2. 复合命令按 cmd.exe 语义逐段检查：`&&`、`||`、`|`、`&` 拆开；
+ *     `;` 不是分隔符，出现即判语法错误；
  *  3. 黑名单兜底：根路径、编码执行、下载执行、符号链接等直接判否。
  */
 
@@ -119,14 +120,317 @@ export function commandStaysInsideWorkspace(command: string, workspace: string):
 }
 
 /**
- * 按复合/管道符号拆命令。引号内的分隔符也会被拆开：
- * 这只会让更多命令落回审批，不会放宽边界。
+ * 按 cmd.exe 的语义拆分复合命令。
+ *
+ * 关键点：cmd 的分隔符是 `&&`、`||`、`|`、`&`，**不是 `;`**。
+ * 旧实现按 POSIX 的 `;` 拆分，护栏会把 `rmdir ... ; git ...` 看成两条命令，
+ * 而 cmd 会把 `git`、`-C`、路径全部当成 rmdir 的参数——检查的对象和执行的
+ * 对象不是同一条命令，这是 2026-11-04 F:\router 被误删的根因之一。
+ *
+ * 引号内的分隔符不拆；`^` 转义的下一个字符按字面处理。
  */
 export function splitCommand(command: string): string[] {
-  return command
-    .split(/\s*(?:&&|\|\||;|\|)\s*/)
-    .map((part) => part.trim())
-    .filter(Boolean)
+  return scanCmd(command).segments
+}
+
+interface CmdScanResult {
+  segments: string[]
+  /** 引号外出现 `;`：cmd 不支持，通常意味着模型误用了 PowerShell/POSIX 语法。 */
+  posixSemicolon: boolean
+}
+
+function scanCmd(command: string): CmdScanResult {
+  const segments: string[] = []
+  let current = ''
+  let inQuote = false
+  let posixSemicolon = false
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (ch === '^' && !inQuote) {
+      if (i + 1 < command.length) current += command[++i]
+      continue
+    }
+    if (ch === '"') {
+      inQuote = !inQuote
+      current += ch
+      continue
+    }
+    if (!inQuote) {
+      // 行尾的 `;` 是 SQL 语句终止符，不按 shell 分隔符处理；
+      // 只有后面还有内容（`; git ...`）才判成 cmd 语法错误。
+      if (ch === ';' && command.slice(i + 1).trim()) posixSemicolon = true
+      // `2>&1`、`>&2` 里的 & 是重定向，不是命令分隔符
+      if (ch === '&' && command[i - 1] !== '>') {
+        segments.push(current)
+        current = ''
+        if (command[i + 1] === '&') i++
+        continue
+      }
+      if (ch === '|') {
+        segments.push(current)
+        current = ''
+        if (command[i + 1] === '|') i++
+        continue
+      }
+    }
+    current += ch
+  }
+  segments.push(current)
+  return {
+    segments: segments.map((part) => part.trim()).filter(Boolean),
+    posixSemicolon
+  }
+}
+
+/** 删除类动词。move/rename 会单独走 .git / 数据库硬红线，这里只处理删除。 */
+const DELETE_VERBS = new Set([
+  'rmdir',
+  'rd',
+  'del',
+  'erase',
+  'rm',
+  'remove-item',
+  'ri',
+  'unlink',
+  'shred'
+])
+
+export interface CmdAnalysis {
+  posixSemicolon: boolean
+  destructive: boolean
+  targets: string[]
+  recursive: boolean
+  segments: string[]
+}
+
+interface DestructiveTargets {
+  verb: string
+  targets: string[]
+  recursive: boolean
+}
+
+function normalizeVerb(token: string): string {
+  return token.replace(/^.*[\\/]/, '').replace(/\.(exe|cmd|bat)$/i, '').toLowerCase()
+}
+
+/** 去掉重定向（`2>&1`、`>nul`、`>> file`），避免把输出文件当成删除目标。 */
+function stripRedirections(segment: string): string {
+  let out = ''
+  let inQuote = false
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    if (ch === '"') {
+      inQuote = !inQuote
+      out += ch
+      continue
+    }
+    if (!inQuote && (ch === '>' || ch === '<')) {
+      let j = i + 1
+      if (segment[j] === '>') j++
+      if (segment[j] === '&') {
+        j++
+        if (/\d/.test(segment[j] ?? '')) j++
+      } else {
+        while (j < segment.length && /\s/.test(segment[j])) j++
+        if (segment[j] === '"') {
+          j++
+          while (j < segment.length && segment[j] !== '"') j++
+          if (segment[j] === '"') j++
+        } else {
+          while (j < segment.length && !/[\s&|]/.test(segment[j])) j++
+        }
+      }
+      i = j - 1
+      // 去掉紧挨着重定向符的文件描述符数字（2>&1 的 2）
+      if (/(^|\s)\d$/.test(out)) out = out.slice(0, -1)
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+/** 按 cmd 规则分词：双引号保留空格，^ 转义，单引号不是引号。 */
+function tokenizeCmd(segment: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let inQuote = false
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    if (ch === '^' && !inQuote) {
+      if (i + 1 < segment.length) current += segment[++i]
+      continue
+    }
+    if (ch === '"') {
+      inQuote = !inQuote
+      continue
+    }
+    if (!inQuote && /\s/.test(ch)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      continue
+    }
+    current += ch
+  }
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function findDestructiveTargets(segment: string): DestructiveTargets | null {
+  const tokens = tokenizeCmd(stripRedirections(segment))
+  if (tokens.length === 0) return null
+  const verb = normalizeVerb(tokens[0])
+  if (!DELETE_VERBS.has(verb)) return null
+
+  const rest = tokens.slice(1)
+  const isCmdVerb = verb === 'rmdir' || verb === 'rd' || verb === 'del' || verb === 'erase'
+  const recursive = isCmdVerb
+    ? rest.some((token) => /^\/s$/i.test(token))
+    : verb === 'rm'
+      ? rest.some((token) => /^-[a-z]*r[a-z]*$/i.test(token))
+      : verb === 'remove-item' || verb === 'ri'
+        ? rest.some((token) => /^-recurse$/i.test(token))
+        : false
+  const targets = rest.filter((token) => {
+    if (isCmdVerb) return !token.startsWith('/')
+    if (verb === 'rm' || verb === 'remove-item' || verb === 'ri') return !token.startsWith('-')
+    return true
+  })
+  return { verb, targets, recursive }
+}
+
+/** 提取命令里的删除动词、全部目标与递归标记，供 safety / 工具层共用。 */
+export function analyzeCmdCommand(command: string): CmdAnalysis {
+  const { segments, posixSemicolon } = scanCmd(command)
+  const found = segments
+    .map(findDestructiveTargets)
+    .filter((item): item is DestructiveTargets => item !== null)
+  return {
+    posixSemicolon,
+    destructive: found.length > 0,
+    targets: found.flatMap((item) => item.targets),
+    recursive: found.some((item) => item.recursive),
+    segments
+  }
+}
+
+export type DestructiveCategory = 'disk' | 'system' | 'workspace'
+
+export interface DestructiveVerdict {
+  tier: 'blocked' | 'hard'
+  category: DestructiveCategory
+  reason: string
+}
+
+/** 删除目标本身就是根目录/盘符根/当前目录/裸通配。 */
+const ROOT_TARGET = /^(?:[a-z]:[\\/]\*?|\\|\/|\/\*|\.|\.\.|\*|~\/?\*?)$/i
+
+/** candidate 是否是 root 的上级目录（或等于 root）。 */
+function isAncestorOrSelf(root: string, candidate: string): boolean {
+  try {
+    const rel = relative(resolve(candidate), resolve(root))
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 判断删除命令是否触碰工作区根/上级目录/多个目标。
+ *
+ * 这是对“cmd 语义”的兜底：即使模型把 `;` 写进了 cmd，或者一条命令里
+ * 塞了多个删除目标，也不会被当成普通的子目录清理放过去。
+ */
+export function classifyDestructiveCommand(
+  command: string,
+  workspace?: string | null
+): DestructiveVerdict | null {
+  const analysis = analyzeCmdCommand(command)
+
+  // cmd 不支持 `;`。这不是“风险审批”，而是确定性语法错误：
+  // 继续执行只会让 rmdir 把后面的路径当参数，直接拒绝并要求改写。
+  if (process.platform === 'win32' && analysis.posixSemicolon) {
+    return {
+      tier: 'blocked',
+      category: 'system',
+      reason: '【Freebuff 安全护栏】当前 shell 是 cmd.exe，不支持 `;`。请用 `&&` 连接多条命令，或分两次调用。'
+    }
+  }
+
+  if (!analysis.destructive) return null
+  const ws = workspace ? resolve(workspace) : null
+
+  for (const raw of analysis.targets) {
+    const target = raw.trim()
+    if (!target) continue
+    if (ROOT_TARGET.test(target)) {
+      return {
+        tier: 'blocked',
+        category: 'disk',
+        reason: '【Freebuff 安全护栏】检测到删除根目录、盘符根、当前目录或裸通配符：这是永久禁止的红线。'
+      }
+    }
+    if (!ws) continue
+
+    const resolved = isAbsolute(target) ? resolve(target) : resolve(ws, target)
+    if (resolved === ws) {
+      return {
+        tier: 'blocked',
+        category: 'workspace',
+        reason: '【Freebuff 安全护栏】检测到删除工作区根目录：这会清空整个项目，永久禁止。'
+      }
+    }
+    if (isAncestorOrSelf(ws, resolved)) {
+      return {
+        tier: 'blocked',
+        category: 'workspace',
+        reason: '【Freebuff 安全护栏】检测到删除工作区的上级目录：这会连带删除整个工作区，永久禁止。'
+      }
+    }
+    const wildcardBase = target.replace(/[\\/]\*.*$/, '')
+    if (wildcardBase !== target && isAbsolute(wildcardBase) && resolve(wildcardBase) === ws) {
+      return {
+        tier: 'blocked',
+        category: 'workspace',
+        reason: '【Freebuff 安全护栏】检测到通配删除工作区根目录下的全部内容，永久禁止。'
+      }
+    }
+  }
+
+  if (analysis.recursive && analysis.targets.length > 1) {
+    return {
+      tier: 'hard',
+      category: 'system',
+      reason: '【Freebuff 安全护栏】递归删除命令包含多个目标，必须人工确认。'
+    }
+  }
+
+  if (ws) {
+    for (const raw of analysis.targets) {
+      const target = raw.trim()
+      if (!target) continue
+      const resolved = isAbsolute(target) ? resolve(target) : resolve(ws, target)
+      if (!isPathInside(ws, resolved)) {
+        return {
+          tier: 'hard',
+          category: 'system',
+          reason: '【Freebuff 安全护栏】递归删除工作区外的路径，必须人工确认。'
+        }
+      }
+      if (existsSync(ws) && !isPathInsideResolved(ws, resolved)) {
+        return {
+          tier: 'hard',
+          category: 'system',
+          reason: '【Freebuff 安全护栏】递归删除工作区外的路径（解析链接后），必须人工确认。'
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 function segmentStaysInside(segment: string, workspace: string): boolean {

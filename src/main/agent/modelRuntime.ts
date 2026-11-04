@@ -21,6 +21,8 @@ export const DEFAULT_SYSTEM_PROMPT = `你是「尚搏 Agent」，运行在李工
 
 【安全红线】格式化磁盘/分区/擦盘永久禁止；删除 .git 仓库、删库/清表、无 WHERE 的 DELETE、删除数据库文件、强制推送/硬重置，一律停下来等人工确认，不得用任何方式绕过。只改当前工作区，不读取密钥库与会话数据库。
 
+【命令环境】Windows 下 run_command 使用 cmd.exe：多条命令用 && 连接，不要用 ;；删除类命令只写一个目标。
+
 【交付】涉及改动时最终给出：做了什么、怎么验证的、假设与剩余风险、回滚方式。`
 
 export function describeError(error: unknown): string {

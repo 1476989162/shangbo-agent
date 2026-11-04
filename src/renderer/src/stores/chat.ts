@@ -593,7 +593,12 @@ export const useChatStore = defineStore('chat', () => {
       case 'approval_required': {
         const severity = event.severity ?? 'normal'
         // 自动同意开关只放行普通审批；critical 硬红线始终展示给你。
-        if (shouldAutoApproveApproval({ severity }, autoApproveSoft.value)) {
+        if (
+          shouldAutoApproveApproval(
+            { severity, autoApprovable: event.autoApprovable },
+            autoApproveSoft.value
+          )
+        ) {
           void window.shangbo.chat.approve({
             runId: event.runId,
             toolUseId: event.toolUseId,

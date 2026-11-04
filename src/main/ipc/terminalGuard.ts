@@ -25,7 +25,7 @@ export function checkTerminalCommand(command: string, cwd?: string): TerminalGua
       reason: '禁止访问应用私有数据：该命令触碰存放密钥与数据库的位置。'
     }
   }
-  const audit = auditCommandSecurity(command)
+  const audit = auditCommandSecurity(command, cwd)
   if (audit.isDangerous && audit.severity === 'CRITICAL') {
     return {
       blocked: true,

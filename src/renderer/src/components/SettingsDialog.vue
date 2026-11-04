@@ -407,7 +407,10 @@ const autoApprove = ref<string[]>([])
 
 async function load(): Promise<void> {
   const settings = await window.shangbo.settings.getAll()
-  autoApprove.value = (settings['tools.autoApprove'] as string[]) ?? []
+  // run_command 等价于永久放行任意 shell 命令，不允许出现在 always-allow 列表里
+  autoApprove.value = ((settings['tools.autoApprove'] as string[]) ?? []).filter(
+    (name) => name !== 'run_command'
+  )
   customInstructions.value = (settings['agent.instructions'] as string) ?? ''
   userRole.value = (settings['agent.workRole'] as string) ?? 'software'
   chatFont.value = (settings['agent.chatFont'] as string) ?? 'default'

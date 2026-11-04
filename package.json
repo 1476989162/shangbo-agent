@@ -1,6 +1,7 @@
 {
   "name": "shangbo-agent",
-  "version": "0.9.1",  "private": true,
+  "version": "0.9.2",
+  "private": true,
   "description": "尚搏 Agent —— 个人 Agent 桌面应用",
   "main": "./out/main/index.js",
   "author": "",
