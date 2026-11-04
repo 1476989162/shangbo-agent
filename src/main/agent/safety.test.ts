@@ -191,6 +191,23 @@ describe('工作区自治与自动放行', () => {
     expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
   })
 
+  itWin('嵌套解释器删除工作区根目录 blocked', () => {
+    const dir = workspace()
+    const forward = dir.replace(/\\/g, '/')
+    for (const command of [
+      `powershell -Command "Remove-Item -Recurse -Force ${dir}"`,
+      `cmd /c rmdir /s /q ${dir}`,
+      `node -e "require('fs').rmSync('${forward}',{recursive:true})"`
+    ]) {
+      const verdict = classifyToolCall('run_command', { command }, {
+        workingDirectory: dir,
+        autonomy: 'trusted'
+      })
+      expect(verdict.tier, command).toBe('blocked')
+      expect(isAutoAllowed(verdict, 'trusted'), command).toBe(false)
+    }
+  })
+
   it('不在白名单的命令即使完全信任也不自动放行', () => {
     const dir = workspace()
     const verdict = classifyToolCall('run_command', { command: 'ssh example.com' }, {

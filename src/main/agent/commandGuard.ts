@@ -201,6 +201,8 @@ export interface CmdAnalysis {
   destructive: boolean
   targets: string[]
   recursive: boolean
+  /** 编码/脚本/内联代码无法静态审计：至少要求人工确认。 */
+  unanalyzable: boolean
   segments: string[]
 }
 
@@ -211,7 +213,11 @@ interface DestructiveTargets {
 }
 
 function normalizeVerb(token: string): string {
-  return token.replace(/^.*[\\/]/, '').replace(/\.(exe|cmd|bat)$/i, '').toLowerCase()
+  return token
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/^.*[\\/]/, '')
+    .replace(/\.(exe|cmd|bat)$/i, '')
+    .toLowerCase()
 }
 
 /** 去掉重定向（`2>&1`、`>nul`、`>> file`），避免把输出文件当成删除目标。 */
@@ -294,25 +300,203 @@ function findDestructiveTargets(segment: string): DestructiveTargets | null {
       : verb === 'remove-item' || verb === 'ri'
         ? rest.some((token) => /^-recurse$/i.test(token))
         : false
-  const targets = rest.filter((token) => {
-    if (isCmdVerb) return !token.startsWith('/')
-    if (verb === 'rm' || verb === 'remove-item' || verb === 'ri') return !token.startsWith('-')
-    return true
-  })
+  const targets = rest
+    .filter((token) => {
+      if (isCmdVerb) return !token.startsWith('/')
+      if (verb === 'rm' || verb === 'remove-item' || verb === 'ri') return !token.startsWith('-')
+      return true
+    })
+    .map((token) => token.replace(/^['"]+|['"]+$/g, ''))
   return { verb, targets, recursive }
 }
 
+interface CommandFacts {
+  targets: string[]
+  recursive: boolean
+  destructive: boolean
+  unanalyzable: boolean
+}
+
+const MAX_NESTED_DEPTH = 4
+const INTERPRETER_VERBS = new Set([
+  'powershell',
+  'pwsh',
+  'cmd',
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'node',
+  'python',
+  'python3'
+])
+
+function emptyFacts(): CommandFacts {
+  return { targets: [], recursive: false, destructive: false, unanalyzable: false }
+}
+
+function flagIndex(tokens: string[], flags: string[]): number {
+  const lowered = flags.map((flag) => flag.toLowerCase())
+  return tokens.findIndex((token) => lowered.includes(token.toLowerCase()))
+}
+
+function splitPayload(payload: string, separators: RegExp): string[] {
+  return payload
+    .split(separators)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+function analyzePayloadParts(parts: string[], depth: number): CommandFacts {
+  const facts = emptyFacts()
+  for (const part of parts) {
+    const analysis = analyzeCmdCommand(part, depth + 1)
+    facts.targets.push(...analysis.targets)
+    facts.recursive ||= analysis.recursive
+    facts.destructive ||= analysis.destructive
+    facts.unanalyzable ||= analysis.unanalyzable
+  }
+  return facts
+}
+
+/** 从 node/python 内联代码里提取路径字面量（只认绝对路径/相对路径形态）。 */
+function extractPathLiterals(text: string): string[] {
+  const found = new Set<string>()
+  const quoted = /(['"])((?:[a-z]:[\\/]|\/|\.\.?[\\/])[^'"]*)\1/gi
+  for (const match of text.matchAll(quoted)) {
+    if (match[2]) found.add(match[2])
+  }
+  const raw = /[a-z]:[\\/][^\s'",)]+/gi
+  for (const match of text.matchAll(raw)) {
+    found.add(match[0])
+  }
+  return [...found]
+}
+
+function analyzeInlineCode(
+  payload: string,
+  originalSegment: string,
+  apiPattern: RegExp
+): CommandFacts {
+  const facts = emptyFacts()
+  if (!apiPattern.test(payload)) return facts
+
+  const paths = extractPathLiterals(originalSegment)
+  if (paths.length === 0) {
+    // 有破坏性 API 但路径是计算出来的：无法静态判断，至少要求人工确认。
+    facts.unanalyzable = true
+    return facts
+  }
+  facts.targets.push(...paths)
+  facts.recursive =
+    /(?:rmSync|rmdirSync|rmtree|rmdir)/i.test(payload) ||
+    /recursive\s*:\s*true/i.test(payload)
+  facts.destructive = true
+  return facts
+}
+
+function findNestedDestructiveTargets(segment: string, depth: number): CommandFacts {
+  const tokens = tokenizeCmd(stripRedirections(segment))
+  if (tokens.length === 0) return emptyFacts()
+  const verb = normalizeVerb(tokens[0])
+  if (!INTERPRETER_VERBS.has(verb)) return emptyFacts()
+  if (depth >= MAX_NESTED_DEPTH) {
+    return { ...emptyFacts(), unanalyzable: true }
+  }
+
+  if (verb === 'powershell' || verb === 'pwsh') {
+    if (flagIndex(tokens, ['-encodedcommand', '-enc']) >= 0) {
+      return { ...emptyFacts(), unanalyzable: true }
+    }
+    if (flagIndex(tokens, ['-file']) >= 0) {
+      return { ...emptyFacts(), unanalyzable: true }
+    }
+    const cmdFlag = flagIndex(tokens, ['-command', '-c'])
+    if (cmdFlag < 0) return { ...emptyFacts(), unanalyzable: true }
+    const payload = tokens.slice(cmdFlag + 1).join(' ')
+    if (!payload) return emptyFacts()
+    return analyzePayloadParts(splitPayload(payload, /[;|]/), depth)
+  }
+
+  if (verb === 'cmd') {
+    const cmdFlag = flagIndex(tokens, ['/c', '/k'])
+    if (cmdFlag < 0) return emptyFacts()
+    const payload = tokens.slice(cmdFlag + 1).join(' ')
+    if (!payload) return emptyFacts()
+    return analyzePayloadParts([payload], depth)
+  }
+
+  if (verb === 'bash' || verb === 'sh' || verb === 'zsh' || verb === 'dash') {
+    const cmdFlag = flagIndex(tokens, ['-c'])
+    if (cmdFlag < 0) return emptyFacts()
+    const payload = tokens.slice(cmdFlag + 1).join(' ')
+    if (!payload) return emptyFacts()
+    return analyzePayloadParts(splitPayload(payload, /[;|]|&&|\|\|/), depth)
+  }
+
+  if (verb === 'node') {
+    const evalFlag = flagIndex(tokens, ['-e', '--eval', '-p', '--print'])
+    if (evalFlag < 0) return emptyFacts()
+    const payload = tokens.slice(evalFlag + 1).join(' ')
+    if (!payload) return emptyFacts()
+    return analyzeInlineCode(
+      payload,
+      segment,
+      /(?:rmSync|rmdirSync|unlinkSync|fs\.rm\b|fs\.rmdir\b|fs\.unlink\b)/i
+    )
+  }
+
+  if (verb === 'python' || verb === 'python3') {
+    const cmdFlag = flagIndex(tokens, ['-c'])
+    if (cmdFlag < 0) return emptyFacts()
+    const payload = tokens.slice(cmdFlag + 1).join(' ')
+    if (!payload) return emptyFacts()
+    return analyzeInlineCode(
+      payload,
+      segment,
+      /(?:shutil\.rmtree|os\.remove|os\.unlink|os\.rmdir|pathlib[^\n]*unlink)/i
+    )
+  }
+
+  return emptyFacts()
+}
+
 /** 提取命令里的删除动词、全部目标与递归标记，供 safety / 工具层共用。 */
-export function analyzeCmdCommand(command: string): CmdAnalysis {
+export function analyzeCmdCommand(command: string, depth = 0): CmdAnalysis {
   const { segments, posixSemicolon } = scanCmd(command)
   const found = segments
     .map(findDestructiveTargets)
     .filter((item): item is DestructiveTargets => item !== null)
-  return {
-    posixSemicolon,
-    destructive: found.length > 0,
+  const facts: CommandFacts = {
     targets: found.flatMap((item) => item.targets),
     recursive: found.some((item) => item.recursive),
+    destructive: found.length > 0,
+    unanalyzable: false
+  }
+
+  if (depth < MAX_NESTED_DEPTH) {
+    for (const segment of segments) {
+      const nested = findNestedDestructiveTargets(segment, depth)
+      facts.targets.push(...nested.targets)
+      facts.recursive ||= nested.recursive
+      facts.destructive ||= nested.destructive
+      facts.unanalyzable ||= nested.unanalyzable
+    }
+  } else {
+    for (const segment of segments) {
+      const tokens = tokenizeCmd(stripRedirections(segment))
+      if (tokens.length > 0 && INTERPRETER_VERBS.has(normalizeVerb(tokens[0]))) {
+        facts.unanalyzable = true
+      }
+    }
+  }
+
+  return {
+    posixSemicolon,
+    destructive: facts.destructive || facts.unanalyzable,
+    targets: facts.targets,
+    recursive: facts.recursive,
+    unanalyzable: facts.unanalyzable,
     segments
   }
 }
@@ -357,6 +541,14 @@ export function classifyDestructiveCommand(
       tier: 'blocked',
       category: 'system',
       reason: '【Freebuff 安全护栏】当前 shell 是 cmd.exe，不支持 `;`。请用 `&&` 连接多条命令，或分两次调用。'
+    }
+  }
+
+  if (analysis.unanalyzable) {
+    return {
+      tier: 'hard',
+      category: 'system',
+      reason: '【Freebuff 安全护栏】检测到无法静态审计的解释器命令（编码/脚本/内联代码），必须人工确认。'
     }
   }
 

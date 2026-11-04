@@ -119,6 +119,15 @@ describe('Freebuff 安全护栏审计 (auditCommandSecurity)', () => {
     expect(res.severity).toBe('CRITICAL')
   })
 
+  itWin('嵌套 powershell 删除工作区根目录判 CRITICAL', () => {
+    const res = auditCommandSecurity(
+      'powershell -Command "Remove-Item -Recurse -Force C:\\router"',
+      'C:\\router'
+    )
+    expect(res.isDangerous).toBe(true)
+    expect(res.severity).toBe('CRITICAL')
+  })
+
   itWin('run_command 在 cmd 下拒绝 ; 分隔符', async () => {
     const tool = toolRegistry.get('run_command')!
     const ctx = {

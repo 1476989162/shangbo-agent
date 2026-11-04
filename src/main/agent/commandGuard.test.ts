@@ -192,6 +192,41 @@ describe('cmd 删除目标分析', () => {
     const verdict = classifyDestructiveCommand(`rmdir /s /q ${ws}\\a ${ws}\\b`, ws)
     expect(verdict?.tier).toBe('hard')
   })
+
+  it('嵌套解释器：powershell/cmd 的删除目标也被识别', () => {
+    const ws = 'C:\\repo'
+    for (const command of [
+      'powershell -Command "Remove-Item -Recurse -Force C:\\repo"',
+      'pwsh -Command "Remove-Item -Recurse -Force C:\\repo"',
+      'cmd /c rmdir /s /q C:\\repo',
+      'cmd /c "rmdir /s /q C:\\repo"'
+    ]) {
+      const verdict = classifyDestructiveCommand(command, ws)
+      expect(verdict?.tier, command).toBe('blocked')
+    }
+  })
+
+  it('嵌套解释器：node -e / python -c 的删除目标也被识别', () => {
+    const ws = 'C:\\repo'
+    for (const command of [
+      `node -e "require('fs').rmSync('C:/repo',{recursive:true})"`,
+      `python -c "import shutil; shutil.rmtree('C:/repo')"`
+    ]) {
+      const verdict = classifyDestructiveCommand(command, ws)
+      expect(verdict?.tier, command).toBe('blocked')
+    }
+  })
+
+  it('编码/脚本型解释器命令无法静态审计，至少 hard', () => {
+    const ws = 'C:\\repo'
+    for (const command of [
+      'powershell -EncodedCommand SQBFAFgA',
+      'powershell -File C:\\repo\\build.ps1'
+    ]) {
+      const verdict = classifyDestructiveCommand(command, ws)
+      expect(verdict?.tier, command).toBe('hard')
+    }
+  })
 })
 
 describe('touchesPrivateData', () => {
