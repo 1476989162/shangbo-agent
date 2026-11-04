@@ -318,35 +318,47 @@ export function updateMessage(
     providerId: string | null
     usageMode: UsageMode | null
   }>
-): void {
-  const current = getMessage(id)
-  if (!current) return
-  getDb()
+): number {
+  // 热路径单条 UPDATE：不再先 getMessage 再 UPDATE（两次 IO + 两次 JSON.parse）。
+  // 未传的字段用 COALESCE 保持原值，语义与旧版一致。
+  // 返回 affected 行数：0 表示 id 不存在（旧版同样静默，但这里打 warn 方便定位游离写）。
+  const blocksJson = patch.blocks !== undefined ? JSON.stringify(patch.blocks) : null
+  const usageJson =
+    patch.usage === undefined ? null : patch.usage ? JSON.stringify(patch.usage) : null
+  // usage 三态：undefined=保持，null=清空，对象=覆盖。SQL 无法区分 undefined/null，
+  // 用传参标志位表达。
+  const usageMode: UsageMode | null | undefined = patch.usageMode
+  const result = getDb()
     .prepare(
       `UPDATE messages
-       SET blocks = @blocks, status = @status, error = @error,
-           usage = @usage, model = @model, provider_id = @providerId,
-           usage_mode = @usageMode, updated_at = @updatedAt
+       SET blocks = COALESCE(@blocks, blocks),
+           status = COALESCE(@status, status),
+           error = CASE WHEN @hasError = 1 THEN @error ELSE error END,
+           usage = CASE WHEN @hasUsage = 1 THEN @usage ELSE usage END,
+           model = COALESCE(@model, model),
+           provider_id = COALESCE(@providerId, provider_id),
+           usage_mode = CASE WHEN @hasUsageMode = 1 THEN @usageMode ELSE usage_mode END,
+           updated_at = @updatedAt
        WHERE id = @id`
     )
     .run({
       id,
-      blocks: JSON.stringify(patch.blocks ?? current.blocks),
-      status: patch.status ?? current.status,
-      error: patch.error === undefined ? current.error : patch.error,
-      usage:
-        patch.usage === undefined
-          ? current.usage
-            ? JSON.stringify(current.usage)
-            : null
-          : patch.usage
-            ? JSON.stringify(patch.usage)
-            : null,
-      model: patch.model ?? current.model,
-      providerId: patch.providerId ?? current.providerId,
-      usageMode: patch.usageMode === undefined ? current.usageMode ?? null : patch.usageMode,
+      blocks: blocksJson,
+      status: patch.status ?? null,
+      hasError: patch.error === undefined ? 0 : 1,
+      error: patch.error ?? null,
+      hasUsage: patch.usage === undefined ? 0 : 1,
+      usage: usageJson,
+      model: patch.model ?? null,
+      providerId: patch.providerId ?? null,
+      hasUsageMode: usageMode === undefined ? 0 : 1,
+      usageMode: usageMode ?? null,
       updatedAt: Date.now()
     })
+  if (result.changes === 0) {
+    log.warn(`[db] updateMessage 未命中任何行（游离写）：${id}`)
+  }
+  return Number(result.changes ?? 0)
 }
 
 /**
@@ -419,8 +431,31 @@ export function settleOrphanStreamingMessages(): void {
 /**
  * 用递归 CTE 只查某条链上的消息 id，再按 id 精查整行。
  * 长会话不再 SELECT * 全表 + 全量 JSON.parse，读放大从 O(全会话) 降到 O(链路深度)。
+ * 单条 CTE 替代逐跳主键查询：200 深链从 200 次 round-trip 降到 2 次。
  */
 function collectPathIds(startId: string): string[] {
+  try {
+    const rows = getDb()
+      .prepare(
+        `WITH RECURSIVE chain(id, parent_id) AS (
+           SELECT id, parent_id FROM messages WHERE id = ?
+           UNION ALL
+           SELECT m.id, m.parent_id FROM messages m JOIN chain c ON m.id = c.parent_id
+         ) SELECT id FROM chain`
+      )
+      .all(startId) as { id: string }[]
+    // CTE 返回 叶子→根 顺序；去重防环
+    const seen = new Set<string>()
+    const ids: string[] = []
+    for (const r of rows) {
+      if (!r?.id || seen.has(r.id)) break
+      seen.add(r.id)
+      ids.push(r.id)
+    }
+    if (ids.length > 0) return ids
+  } catch {
+    // 旧 SQLite 不支持 CTE 时回退逐跳
+  }
   const ids: string[] = []
   let cursor: string | null = startId
   const seen = new Set<string>()

@@ -48,7 +48,11 @@ const READ_ONLY_TOOLS = new Set([
   'search_files',
   'glob_files',
   'todo_write',
-  'computer_screenshot'
+  'computer_screenshot',
+  // 无障碍树快照与列表：只读观察，不产生任何输入事件
+  'desktop_snapshot',
+  'desktop_list_apps',
+  'desktop_list_windows'
 ])
 
 /** 删除类动词：rm / rmdir / rd / del / erase / Remove-Item / unlink / shred。 */
@@ -296,7 +300,7 @@ export function classifyToolCall(
   if (toolName.startsWith('mcp__') || /^(?:qoder|codex|claude)_ask$/.test(toolName)) {
     return soft('external', '将调用外部进程或服务，能力由其自身决定，需要你确认。', false)
   }
-  if (toolName.startsWith('computer_')) {
+  if (toolName.startsWith('computer_') || toolName.startsWith('desktop_')) {
     return soft('external', '将直接操控本机鼠标键盘，需要你确认。', false)
   }
 

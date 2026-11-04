@@ -21,10 +21,12 @@ import type {
 import { textOf, type LLMMessage } from '../providers/types'
 import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { buildTaskContract, classifyIntent, matchTaskPlaybook } from './intent'
+import { buildRequirementBrief } from './requirement'
 import { lessonForTask, listLessons, markLessonsUsed, upsertLesson } from '../autonomous/store'
 import { resolveAgentMode } from './wishMode'
 import { buildWorkModeDirective } from './workMode'
 import type { AgentMode, UsageMode } from '../../shared/types'
+import { isDesktopTool } from '../../shared/types'
 import type { ToolOutcome } from './toolOutcome'
 import {
   appendBlock,
@@ -39,6 +41,38 @@ import {
 } from './modelRuntime'
 
 export type LoopEmitter = (event: AgentEvent) => void
+
+/** MCP 远端工具清单缓存：同工作区+读写档 30s 内复用，避免每轮重算。 */
+let mcpSchemasCache: {
+  key: string
+  at: number
+  schemas: import('../providers/types').ToolSchema[]
+} = { key: '', at: 0, schemas: [] }
+
+/** 设置/开关变更后立即失效，下轮重算（否则要等 30s TTL）。 */
+export function invalidateMcpSchemasCache(): void {
+  mcpSchemasCache = { key: '', at: 0, schemas: [] }
+}
+
+/** 推理模型白名单：默认覆盖 R1/reasoning/think/o1/muse-spark；漏模型走设置 providers.reasoningPatterns 加正则。 */
+export function isReasoningModelForTimeout(model: string): boolean {
+  const m = (model || '').toLowerCase()
+  if (/r1|reasoning|deepseek-reasoner|think|o1|muse.*spark|r1-/i.test(m)) return true
+  // 扩展：qwen/qwq/glm 等思考模型 + 用户自定义
+  if (/qwq|qwen.*think|thinking|deepthink|r1-distill|sky.*think|glm.*think/i.test(m)) return true
+  try {
+    const extra = getSetting<string[]>('providers.reasoningPatterns', [])
+    if (Array.isArray(extra)) {
+      for (const pat of extra) {
+        if (typeof pat !== 'string' || !pat.trim()) continue
+        try {
+          if (new RegExp(pat, 'i').test(m)) return true
+        } catch {}
+      }
+    }
+  } catch {}
+  return false
+}
 
 export interface AgentLoopHooks {
   git(args: string[], cwd: string): Promise<string | null>
@@ -66,8 +100,7 @@ export interface AgentLoopHooks {
   ): Usage | null
 }
 
-async function findWishVerifyCommand(workingDir: string | null, triggerText: string): Promise<string | null> {
-  const configured = getSetting<string>('agent.wish.verifyCommand', '').trim()
+async function findWishVerifyCommand(workingDir: string | null, triggerText: string): Promise<string | null> {  const configured = getSetting<string>('agent.wish.verifyCommand', '').trim()
   if (configured) return configured
   const match = triggerText.match(/(npm run [a-z0-9_-]+|npm test|cargo test|pytest|go test[^\n\r]*|make test)/i)
   if (match) return match[1]
@@ -370,6 +403,12 @@ export async function runAgentLoop(
       ? buildTaskContract(triggerText, agentMode, { workingDirectory: conversation.workingDir })
       : ''
     if (contract) system += `\n\n${contract}`
+    // 需求预整理：本地规则先把一句话压成目标/约束/验收/不做/缺口默认，
+    // 再发给大模型，避免模型自己猜。寒暄/极短问答内部直接返回空。
+    const brief = substantive
+      ? buildRequirementBrief(triggerText, agentMode, { workingDirectory: conversation.workingDir })
+      : ''
+    if (brief) system += `\n\n${brief}`
     const taskPlaybook = substantive ? matchTaskPlaybook(triggerText, agentMode) : ''
     if (taskPlaybook) system += taskPlaybook
 
@@ -392,10 +431,13 @@ export async function runAgentLoop(
 
     // 外部技能包（Foxtable 这类 SKILL.md 目录）：只注入路由器索引，
     // 子技能全文由模型按需调 list_skills / read_skill 拉取，避免上下文爆炸。
+    // 进程级缓存 60s：命中直接用内存，不扫盘（首字延迟主因之一）。
     try {
-      const { scanAllSkillPacks, buildSkillRouterPrompt } = await import('../skills/loader')
-      const packs = await scanAllSkillPacks()
-      const routerPrompt = buildSkillRouterPrompt(packs)
+      const { getCachedSkillRouterPrompt, scanAllSkillPacks, buildSkillRouterPrompt } =
+        await import('../skills/loader')
+      const cachedRouter = getCachedSkillRouterPrompt()
+      const routerPrompt =
+        cachedRouter ?? buildSkillRouterPrompt(await scanAllSkillPacks())
       if (routerPrompt) {
         system += `\n\n【外部技能路由（按需加载）】\n${routerPrompt}\n用法：先看路由器命中哪个技能，再调 read_skill(skillId) 读全文；深度细节按 SKILL.md 里的 references 索引用 read_skill(skillId, doc) 再读。`
       }
@@ -442,6 +484,11 @@ export async function runAgentLoop(
         : getSetting<number>('agent.maxSteps', 50)
     const effectiveMaxSteps = typeof maxStepsCfg === 'number' && maxStepsCfg > 0 ? Math.floor(maxStepsCfg) : 50
     let stepCount = 0
+    // 轮内历史缓存：getPathTo 每步查 DB 是 N+1 主因。首步查一次，
+    // 后续步直接在内存里追加本轮 tool_use/result，不再重复回 DB。
+    let cachedPersisted: Message[] | null = null
+    // 许愿长轮收紧轮内保留（3 组），普通轮 6 组：省预算且少估算
+    const keepRecentToolResults = agentMode === 'wish' ? 3 : 6
     // 本轮已执行的工具序列，只用于打转检测，不回传模型。
     const toolHistory: ToolRecord[] = []
     const noteToolBatch = (
@@ -456,14 +503,35 @@ export async function runAgentLoop(
     // 本轮发给模型的工具清单：本地读/写 + spawn + 已启用 MCP 服务的远端工具。
     // MCP 进程首次拉起可能慢（npx 拉包），之后常驻复用；单个服务起不来只跳过不炸轮。
     // Computer Use 工具只在设置开启时挂载（截图免审，其余键鼠操作逐次审批）。
+    // MCP schemas 30s 缓存：同会话连续多步不再每次重算 JSON。
     const computerOn = getSetting<boolean>('agent.computerUse', true)
+    const mcpCacheKey = `${conversation.workingDir ?? ''}::${readOnly ? 'ro' : 'rw'}`
+    const nowMs = Date.now()
+    let mcpSchemas: import('../providers/types').ToolSchema[] = []
+    if (
+      mcpSchemasCache.key === mcpCacheKey &&
+      nowMs - mcpSchemasCache.at < 30_000
+    ) {
+      mcpSchemas = mcpSchemasCache.schemas
+    } else {
+      try {
+        mcpSchemas = await mcpManager.toolSchemas(conversation.workingDir ?? undefined)
+      } catch {
+        mcpSchemas = []
+      }
+      mcpSchemasCache = { key: mcpCacheKey, at: nowMs, schemas: mcpSchemas }
+    }
     const offeredSchemas = [
-      ...toolRegistry.schemas({ readOnly }).filter((t) => computerOn || !t.name.startsWith('computer_')),
+      ...toolRegistry.schemas({ readOnly }).filter((t) => computerOn || !isDesktopTool(t.name)),
       SPAWN_SUBAGENT_SCHEMA,
-      ...(await mcpManager.toolSchemas(conversation.workingDir ?? undefined))
+      ...mcpSchemas
     ]
     if (computerOn && !readOnly) {
-      system += '\n\n【桌面操作】需要操作本机桌面应用时：先 computer_screenshot 看屏，按截图像素坐标 computer_click，必要时 computer_type / computer_press_key / computer_scroll。每次键鼠操作都要用户确认。'
+      system +=
+        '\n\n【桌面操作】两套通道并存，优先用无障碍树：' +
+        '① 先用 desktop_list_apps 查进程名，desktop_snapshot 取元素的稳定 ref，再用 desktop_click_ref 按 ref 操作（不抢焦点、不受窗口位置与缩放影响，失败会明确报 STALE_REF 可安全重试）；' +
+        '② 需要看颜色/布局/图表/自绘界面，或无障碍树读不到（自绘 UI、Canvas）时，用 computer_screenshot 看屏 + computer_click 按截图像素坐标点击，必要时 computer_type / computer_press_key / computer_scroll。' +
+        'ref 与快照绑定，界面变化后必须重新 desktop_snapshot 再操作。每次键鼠操作都要用户确认。'
     }
     // 进度通知：子任务起止落到父消息文本里，当下即可见。
     const onNotify = (text: string): void => {
@@ -508,7 +576,8 @@ export async function runAgentLoop(
         }
         stepCount++
 
-        const persisted = repo.getPathTo(userMessage.id)
+        if (!cachedPersisted) cachedPersisted = repo.getPathTo(userMessage.id)
+        const persisted = cachedPersisted
         // 工具 schema 常年 8000-15000 tokens，不计入预算等于预算虚高：这里复用 try 外一次估值
           // 轮间摘要（可选）：被裁掉的历史先换成语义摘要，避免模型直接“失忆”。
           // 摘要由当前模型异步生成，并缓存在 conversations.summary_json。
@@ -520,7 +589,8 @@ export async function runAgentLoop(
               system,
               budgetTokens: budget,
               extraTokens: toolSchemaTokens,
-              toolResultMaxChars: effectiveToolResultMaxChars
+              toolResultMaxChars: effectiveToolResultMaxChars,
+              keepRecentToolResults
             })
             if (probe.omittedMessages?.length && probe.omittedMessages.length > 0) {
               const lastOmitted = probe.omittedMessages[probe.omittedMessages.length - 1]
@@ -549,6 +619,7 @@ export async function runAgentLoop(
           budgetTokens: budget,
           extraTokens: toolSchemaTokens,
             toolResultMaxChars: effectiveToolResultMaxChars,
+            keepRecentToolResults,
             summary: cachedSummary?.text
         })
         // 裁剪完成后才读图片：被裁掉的历史轮次里的图永远不进内存
@@ -576,8 +647,16 @@ export async function runAgentLoop(
         const toolUses: { id: string; name: string; input: unknown }[] = []
 
         let stopReason = 'stop'
-        const firstByteTimeoutRaw = getSetting<number>('providers.firstByteTimeoutMs', 180_000)
-        const firstByteTimeoutMs = resolveFirstByteTimeoutMs(firstByteTimeoutRaw)
+        const firstByteTimeoutRaw = getSetting<number | undefined>('providers.firstByteTimeoutMs', undefined)
+        // 按模型分档：显式配置优先；未配置时推理模型 180s、普通 60s。
+        // 放本地而非网关导出，避免旧单测 mock 缺新导出直接炸轮。
+        // 白名单见 isReasoningModelForTimeout，漏模型加设置 providers.reasoningPatterns（正则数组）。
+        const firstByteTimeoutMs =
+          typeof firstByteTimeoutRaw === 'number' && Number.isFinite(firstByteTimeoutRaw)
+            ? resolveFirstByteTimeoutMs(firstByteTimeoutRaw)
+            : isReasoningModelForTimeout(resolved.model)
+              ? 180_000
+              : 60_000
         // Anthropic 提示词缓存默认开启；兼容网关不支持时可在设置里关掉
         const promptCache = getSetting<boolean>('provider.anthropic.promptCache', true)
         const streamProcessor = createStreamChunkProcessor(
@@ -749,7 +828,7 @@ export async function runAgentLoop(
           break
         }
 
-        const configuredConcurrency = getSetting<number>('agent.toolConcurrency', 4)
+        const configuredConcurrency = getSetting<number>('agent.toolConcurrency', 8)
         const invokeOne = (call: { id: string; name: string; input: unknown }): Promise<{
           call: { id: string; name: string; input: unknown }
           result: ToolOutcome
@@ -843,12 +922,13 @@ export async function runAgentLoop(
         hasReasoning
       if (truncatedByThinking && !controller.signal.aborted) {
         for (let attempt = 0; attempt < 2 && truncatedByThinking; attempt++) {
-          const persistedNow = repo.getPathTo(userMessage.id)
+          const persistedNow = cachedPersisted ?? repo.getPathTo(userMessage.id)
           const contextNow = buildContext(persistedNow, {
             system,
             budgetTokens: budget,
             extraTokens: toolSchemaTokens,
-            toolResultMaxChars: effectiveToolResultMaxChars
+            toolResultMaxChars: effectiveToolResultMaxChars,
+            keepRecentToolResults
           })
           await hydrateContextImages(contextNow)
           const inMemoryNow: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]

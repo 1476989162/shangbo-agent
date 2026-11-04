@@ -15,3 +15,9 @@ python/.venv/
 .workbuddy-ai/
 outputs/
 .vitest/
+# 构建产物与本地杂散（tsc 增量信息、意外 0 字节文件）
+*.tsbuildinfo
+\{const
+# 本地记忆网关插件与锻炼脚本（个人环境，不随版本发布）
+magpie-plugins/
+scripts/memagent-exercise.mjs

@@ -40,7 +40,10 @@ export const SPAWN_SUBAGENT_SCHEMA: ToolSchema = {
   }
 }
 
-const MAX_RESULT_CHARS = 6_000
+const MAX_RESULT_CHARS = 4_000
+
+/** 子循环硬上限：防止无步数上限把父轮预算吃光。默认 20 步。 */
+export const SUBAGENT_MAX_STEPS = 20
 
 const SUBAGENT_SYSTEM = `你是子智能体：只完成派给你的单个任务，然后给出简短结论。
 硬规则：
@@ -116,7 +119,7 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
   const messages: LLMMessage[] = [
     { role: 'user', blocks: [{ type: 'text', text: parsed.data.task } as ContentBlock] }
   ]
-  let finalText = ''
+  const textParts: string[] = []
   let lastStop = 'stop'
   let stuckNote = ''
   const history: ToolRecord[] = []
@@ -125,10 +128,17 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
   let subPromptTokens = 0
   let subCompletionTokens = 0
   let subRequests = 0
+  let steps = 0
 
-  // 无步数上限：跑到模型不再调工具为止；只在打转（连续失败/重复调用）时停。
+  // 有步数上限：跑到模型不再调工具为止；打转或超步数即停，避免吃光父轮预算。
   for (;;) {
     if (ctx.signal.aborted) return { content: '子任务被用户停止。', isError: true }
+    if (steps >= SUBAGENT_MAX_STEPS) {
+      stuckNote = `\n\n（子任务已达步数上限 ${SUBAGENT_MAX_STEPS}，提前收尾。）`
+      lastStop = 'max_steps'
+      break
+    }
+    steps++
 
     const toolUses: { id: string; name: string; input: unknown }[] = []
     let stopReason = 'stop'
@@ -137,7 +147,7 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
       ctx.signal,
       ctx.providerId
     )) {
-      if (chunk.type === 'text') finalText += chunk.text
+      if (chunk.type === 'text') textParts.push(chunk.text)
       else if (chunk.type === 'tool_use') toolUses.push({ id: chunk.id, name: chunk.name, input: chunk.input })
       else if (chunk.type === 'stop') stopReason = chunk.reason
       else if (chunk.type === 'usage') {
@@ -145,8 +155,7 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
         subCompletionTokens += chunk.usage.completionTokens
         subRequests++
       }
-    }
-    lastStop = stopReason
+    }    lastStop = stopReason
     if (toolUses.length === 0) break
 
     const results: { content: string; isError: boolean }[] = []
@@ -174,8 +183,9 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
     }
   }
 
-  const exhausted = lastStop === 'length' || lastStop === 'max_tokens'
+  const exhausted = lastStop === 'length' || lastStop === 'max_tokens' || lastStop === 'max_steps'
   const tail = `${exhausted ? '\n\n（子循环预算用尽，结论可能不完整。）' : ''}${stuckNote}`
+  const finalText = textParts.join('')
   const body = finalText.trim() ? truncate(finalText.trim()) : '（子任务没有留下文字结论，请看工具执行情况或换个问法重派。）'
   const isolationReport = isolation ? `\n\n${await isolation.finalize()}` : ''
   ctx.notify?.(`✅ 子任务完成：${parsed.data.task}`)

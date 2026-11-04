@@ -32,6 +32,8 @@ import type {
   MessageStatus,
   Usage
 } from '../../shared/types'
+// 值导入（非 type）：桌面类工具判定要受 computerUse 总开关约束
+import { isDesktopTool } from '../../shared/types'
 import {
   commandStaysInsideWorkspace
 } from './commandGuard'
@@ -70,6 +72,55 @@ interface ActiveRun {
  * 取 90s 覆盖"正常收尾"的全部路径；真 hang（如子进程无视 signal）才触发强制收尾。
  */
 export const ABORT_WATCHDOG_MS = 90_000
+
+/** 桌面通知能力探测缓存：避免每轮 finishRun 都 import('electron')。 */
+const notifyCapabilityCache: { checked: boolean; supported: boolean; maybeBackground: boolean } = {
+  checked: false,
+  supported: false,
+  maybeBackground: false
+}
+
+async function notifyCompletion(conversationId: string, durationSec: number): Promise<void> {
+  try {
+    const mod = await import('electron')
+    const NotificationClass = (mod as unknown as { Notification?: new (o: unknown) => { show(): void; } & { isSupported?: unknown } })?.Notification as unknown as {
+      new (opts: { title: string; body: string }): { show(): void }
+      isSupported?: () => boolean
+    } | undefined
+    const BrowserWindowClass = (mod as unknown as { BrowserWindow?: { getAllWindows?: () => { isFocused?: () => boolean }[] } })?.BrowserWindow
+    const supported =
+      !!NotificationClass &&
+      (typeof NotificationClass.isSupported !== 'function' || NotificationClass.isSupported())
+    notifyCapabilityCache.checked = true
+    notifyCapabilityCache.supported = supported
+    if (!supported) return
+    const allWindows =
+      BrowserWindowClass && typeof BrowserWindowClass.getAllWindows === 'function'
+        ? BrowserWindowClass.getAllWindows()
+        : []
+    const isUnfocused =
+      allWindows.length > 0 && allWindows.every((w) => typeof w.isFocused === 'function' && !w.isFocused())
+    notifyCapabilityCache.maybeBackground = isUnfocused
+    if (durationSec > 15 || isUnfocused) {
+      const convo = repo.getConversation(conversationId)
+      new NotificationClass({
+        title: '尚搏 Agent 任务已完成',
+        body: `会话「${convo?.title ?? '新对话'}」回复已生成完毕${durationSec > 1 ? `（耗时 ${durationSec.toFixed(0)} 秒）` : ''}。`
+      }).show()
+    }
+  } catch {
+    // 忽略通知异常，不影响主流程
+  }
+}
+
+/** contextStatics 30s 缓存：渲染层浮层高频调用，避免每次重算 schema JSON。 */
+let contextStaticsCache: { at: number; key: string; value: ContextStatics } | null = null
+const CONTEXT_STATICS_TTL_MS = 30_000
+
+/** 设置变更后立即失效（否则要等 30s TTL）。 */
+export function invalidateContextStaticsCache(): void {
+  contextStaticsCache = null
+}
 
 /** 队列里待跑的一轮。emit 必须与当初提交时的那份一致，才能把事件广播到正确窗口。 */
 interface QueuedRun {
@@ -241,28 +292,16 @@ export class AgentRuntime {
     emit({ type: 'run_end', runId, conversationId, queued })
 
     // 桌面通知：耗时 > 15s 或窗口处于非聚焦后台时触发系统通知
+    // 优化：短任务直接跳过 electron 动态 import，只有长任务才加载。
     try {
+      const durationSec = (durationMs ?? 0) / 1000
       if (getSetting<boolean>('agent.notifyCompletion', true)) {
-        import('electron')
-          .then((electron) => {
-            const NotificationClass = electron?.Notification
-            const BrowserWindowClass = electron?.BrowserWindow
-            if (NotificationClass && typeof NotificationClass.isSupported === 'function' && NotificationClass.isSupported()) {
-              const durationSec = (durationMs ?? 0) / 1000
-              const allWindows = BrowserWindowClass && typeof BrowserWindowClass.getAllWindows === 'function'
-                ? BrowserWindowClass.getAllWindows()
-                : []
-              const isUnfocused = allWindows.length > 0 && allWindows.every((w) => typeof w.isFocused === 'function' && !w.isFocused())
-              if (durationSec > 15 || isUnfocused) {
-                const convo = repo.getConversation(conversationId)
-                new NotificationClass({
-                  title: '尚搏 Agent 任务已完成',
-                  body: `会话「${convo?.title ?? '新对话'}」回复已生成完毕${durationSec > 1 ? `（耗时 ${durationSec.toFixed(0)} 秒）` : ''}。`
-                }).show()
-              }
-            }
-          })
-          .catch(() => {})
+        if (durationSec > 15) {
+          void notifyCompletion(conversationId, durationSec)
+        } else if (notifyCapabilityCache.maybeBackground) {
+          // 曾经观测到后台态，短任务也补一次探测（低频）
+          void notifyCompletion(conversationId, durationSec)
+        }
       }
     } catch {
       // 忽略通知异常，不影响主流程
@@ -343,10 +382,14 @@ export class AgentRuntime {
    * 这种分项加起来超过 100% 的自相矛盾显示。
    */
   async contextStatics(): Promise<ContextStatics> {
+    const cacheKey = `${getSetting<boolean>('agent.computerUse', true)}::${getSetting<string>('agent.instructions', '').length}::${getSetting<string[]>('agent.plugins', []).join(',')}`
+    if (contextStaticsCache && Date.now() - contextStaticsCache.at < CONTEXT_STATICS_TTL_MS && contextStaticsCache.key === cacheKey) {
+      return contextStaticsCache.value
+    }
     const computerOn = getSetting<boolean>('agent.computerUse', true)
     const systemTools = toolRegistry
       .schemas({ readOnly: false })
-      .filter((t) => computerOn || !t.name.startsWith('computer_'))
+      .filter((t) => computerOn || !isDesktopTool(t.name))
     const mcpTools = await mcpManager.toolSchemas()
 
     const baseSystem = DEFAULT_SYSTEM_PROMPT
@@ -384,9 +427,10 @@ export class AgentRuntime {
     let skillsTokens = 0
     let skillsText = ''
     try {
-      const { scanAllSkillPacks, buildSkillRouterPrompt } = await import('../skills/loader')
-      const packs = await scanAllSkillPacks()
-      const routerPrompt = buildSkillRouterPrompt(packs)
+      const { getCachedSkillRouterPrompt, scanAllSkillPacks, buildSkillRouterPrompt } =
+        await import('../skills/loader')
+      const routerPrompt =
+        getCachedSkillRouterPrompt() ?? buildSkillRouterPrompt(await scanAllSkillPacks())
       if (routerPrompt) skillsText += routerPrompt
     } catch {}
 
@@ -410,7 +454,7 @@ export class AgentRuntime {
     }
     if (skillsText) skillsTokens = estimateTokens(skillsText)
 
-    return {
+    const result: ContextStatics = {
       // 工具 schema 以 JSON 形式进请求体，按字符估算（CJK 约 1 token/字）
       systemTools: estimateTokens(JSON.stringify([...systemTools, SPAWN_SUBAGENT_SCHEMA])),
       mcp: estimateTokens(JSON.stringify(mcpTools)),
@@ -418,8 +462,12 @@ export class AgentRuntime {
       skills: skillsTokens,
       memory: memoryTokens
     }
+    return this.storeContextStaticsCache(cacheKey, result)
   }
-
+  private storeContextStaticsCache(key: string, value: ContextStatics): ContextStatics {
+    contextStaticsCache = { at: Date.now(), key, value }
+    return value
+  }
   /** 该会话是否还有排队中的轮次（含正在跑的）。渲染层据此显示「排队中 N」。 */
   queueLength(conversationId: string): number {
     return this.queues.get(conversationId)?.length ?? 0
@@ -1074,7 +1122,7 @@ export class AgentRuntime {
 
     // Computer Use 总闸：设置里关了就当不存在（清单过滤 + 这里兜底）。
     // 检查放审批之前：关掉后不再弹确认框，直接告知未启用
-    if (call.name.startsWith('computer_') && !getSetting<boolean>('agent.computerUse', true)) {
+    if (isDesktopTool(call.name) && !getSetting<boolean>('agent.computerUse', true)) {
       // 工具没有执行，必须报错，否则模型会以为操作成功而继续往下走
       return { content: '电脑控制未启用，请到设置里打开后再试。', isError: true }
     }

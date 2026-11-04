@@ -2,6 +2,29 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.1] - 2026-11-04
+
+会话性能优化版本：首字延迟与长会话卡顿修复，59 个测试文件、415 个用例全部通过。
+
+### 优化
+
+- **首字延迟**：技能路由 60s 缓存、经验库 5 分钟缓存、MCP schemas 30s 缓存、`contextStatics` 30s 缓存；`setSetting` 写时联动失效，不等 TTL。
+- **长会话**：`getPathTo` 改单条递归 CTE（200 深链 200 次→2 次）；`estimateTokens` 指纹缓存；主循环历史首步缓存复用，不再每步重查 DB。
+- **工具调度**：`get_current_time` 移出并发槽；单条免建池；并发默认 4→8，写操作仍串行。
+- **网关超时**：普通模型 60s、推理模型 180s 分档；白名单新增 qwq/qwen-think/thinking/deepthink/r1-distill 等，漏模型走设置 `providers.reasoningPatterns` 加正则；显式配置仍最高优。
+- **子任务**：`SUBAGENT_MAX_STEPS=20` 硬帽、`MAX_RESULT` 6000→4000、`finalText` 改 push+join。
+- **落库**：`updateMessage` 改单条 `UPDATE+COALESCE`，返回 affected 行数，0 行打 warn 定位游离写。
+- **前端**：`messageById` 索引替代线性 find；`refreshConversations` 2s 节流。
+
+### 修复
+
+- **旧单测 mock 缺新导出炸轮**：超时分档放主循环本地，避免网关新导出导致 mock 缺失。
+- **无障碍桌面通道**：`desktop_snapshot/list_apps/list_windows/click_ref` 只读免审、操作逐次确认，受电脑控制总开关约束（随工作区未提交改动一并发布）。
+
+### 测试
+
+- 59 个测试文件、415 个用例全部通过；`typecheck`（node + web）通过。
+
 ## [0.9.0] - 2026-11-01
 
 工作台与外部技能版本：右侧文件区升级为可看、可改、可跑的编辑工作台，Agent 可以加载外部 Markdown 技能包，界面支持多语言切换。

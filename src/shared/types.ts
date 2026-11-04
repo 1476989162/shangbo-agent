@@ -28,6 +28,18 @@ export type AutonomyLevel = 'strict' | 'balanced' | 'trusted'
 /** 侧边栏的协同 / 代码视图模式；用于统计时区分用户实际选择的工作方式。 */
 export type UsageMode = 'cowork' | 'code'
 
+/**
+ * 桌面操控类工具名（受「设置 → 电脑控制」总开关约束）。
+ *
+ * 两套通道并存：
+ * - computer_*：截图 + 像素坐标，负责「看外观」；
+ * - desktop_*：无障碍树 + 稳定 ref，负责「稳准地操作控件」。
+ * 统一判定，避免新增工具时漏掉总开关（漏掉就等于绕过用户设置）。
+ */
+export function isDesktopTool(name: string): boolean {
+  return name.startsWith('computer_') || name.startsWith('desktop_')
+}
+
 /** 助手的回复不是纯字符串，而是有序内容块序列（文本 / 思考 / 工具调用 / 工具结果 / 图片）。 */
 export type ContentBlock =
   | { type: 'text'; text: string }

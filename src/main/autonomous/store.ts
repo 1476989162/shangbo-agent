@@ -456,12 +456,11 @@ export function listLessons(options?: {
   all?: boolean
 }): Lesson[] {
   const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 100)))
-  const projectPath = options?.projectPath?.trim()
-  if (options?.all) {
-    const rows = getDb()
-      .prepare('SELECT * FROM lessons ORDER BY confidence DESC, updated_at DESC LIMIT ?')
-      .all(limit) as LessonRow[]
-    return rows.map(toLesson)
+  const projectPath = options?.projectPath?.trim() ?? ''
+  // 高频路径（runAgentLoop 每轮）走 5 分钟进程缓存：经验库写少读多
+  if (!options?.all && limit <= 12) {
+    const cached = getCachedLessons(projectPath, limit)
+    if (cached) return cached
   }
   const rows = projectPath
     ? (getDb()
@@ -477,8 +476,44 @@ export function listLessons(options?: {
            WHERE scope = 'global'
            ORDER BY confidence DESC, updated_at DESC LIMIT ?`
         )
-        .all(limit) as LessonRow[])
-  return rows.map(toLesson)
+        .all(limit) as LessonRow[]);
+  if (options?.all) {
+    const rowsAll = getDb()
+      .prepare('SELECT * FROM lessons ORDER BY confidence DESC, updated_at DESC LIMIT ?')
+      .all(limit) as LessonRow[]
+    return rowsAll.map(toLesson)
+  }
+  const out = rows.map(toLesson)
+  if (limit <= 12) setCachedLessons(projectPath, limit, out)
+  return out
+}
+
+/* 经验库进程缓存：key=projectPath+limit，TTL 5 分钟，写时失效 */
+const lessonsCache = new Map<string, { at: number; data: Lesson[] }>()
+const LESSONS_CACHE_TTL_MS = 5 * 60_000
+function lessonsCacheKey(projectPath: string, limit: number): string {
+  return `${projectPath}::${limit}`
+}
+function getCachedLessons(projectPath: string, limit: number): Lesson[] | null {
+  const e = lessonsCache.get(lessonsCacheKey(projectPath, limit))
+  if (!e) return null
+  if (Date.now() - e.at > LESSONS_CACHE_TTL_MS) {
+    lessonsCache.delete(lessonsCacheKey(projectPath, limit))
+    return null
+  }
+  return e.data
+}
+function setCachedLessons(projectPath: string, limit: number, data: Lesson[]): void {
+  // 存浅拷贝，防止调用方改数组污染缓存
+  lessonsCache.set(lessonsCacheKey(projectPath, limit), { at: Date.now(), data: [...data] })
+  // 防无界增长
+  if (lessonsCache.size > 50) {
+    const first = lessonsCache.keys().next().value
+    if (first) lessonsCache.delete(first)
+  }
+}
+export function invalidateLessonsCache(): void {
+  lessonsCache.clear()
 }
 
 export function upsertLesson(input: {
@@ -543,6 +578,7 @@ export function upsertLesson(input: {
       createdAt: row.created_at,
       updatedAt: row.updated_at
     })
+  invalidateLessonsCache()
   return toLesson(
     getDb().prepare('SELECT * FROM lessons WHERE id = ?').get(id) as LessonRow
   )
@@ -550,10 +586,12 @@ export function upsertLesson(input: {
 
 export function deleteLesson(id: string): void {
   getDb().prepare('DELETE FROM lessons WHERE id = ?').run(id)
+  invalidateLessonsCache()
 }
 
 export function markLessonsUsed(ids: string[]): void {
   if (ids.length === 0) return
+  invalidateLessonsCache()
   const now = Date.now()
   const stmt = getDb().prepare(
     'UPDATE lessons SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?'

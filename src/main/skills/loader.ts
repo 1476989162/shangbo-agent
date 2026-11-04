@@ -92,6 +92,8 @@ export function skillDirs(): string[] {
 
 /** 扫描全部技能包：失败的包跳过，不炸轮。 */
 export async function scanAllSkillPacks(): Promise<SkillPack[]> {
+  const cached = getCachedSkillPacksSync()
+  if (cached) return cached
   const out: SkillPack[] = []
   for (const dir of skillDirs()) {
     try {
@@ -101,19 +103,79 @@ export async function scanAllSkillPacks(): Promise<SkillPack[]> {
       log.warn(`[skills] 扫描技能包失败：${dir}：${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  setCachedSkillPacks(out)
   return out
+}
+
+/* ------------------------------------------------------------------ */
+/* 进程级缓存：技能包目录扫描是纯磁盘 IO，每轮 runAgentLoop 都扫一次   */
+/* 是首字延迟的主因之一。按 skillDirs 指纹缓存 60s，新增技能最多延迟   */
+/* 60s 生效，后台可调 read_skill 直读不受影响。                        */
+/* ------------------------------------------------------------------ */
+
+let skillPacksCache: { key: string; at: number; packs: SkillPack[]; router: string } | null = null
+const SKILL_PACKS_CACHE_TTL_MS = 60_000
+
+function skillDirsKey(): string {
+  try {
+    return JSON.stringify(skillDirs())
+  } catch {
+    return ''
+  }
+}
+
+function getCachedSkillPacksSync(): SkillPack[] | null {
+  if (!skillPacksCache) return null
+  if (Date.now() - skillPacksCache.at > SKILL_PACKS_CACHE_TTL_MS) {
+    skillPacksCache = null
+    return null
+  }
+  if (skillPacksCache.key !== skillDirsKey()) {
+    skillPacksCache = null
+    return null
+  }
+  return skillPacksCache.packs
+}
+
+function setCachedSkillPacks(packs: SkillPack[]): void {
+  try {
+    skillPacksCache = {
+      key: skillDirsKey(),
+      at: Date.now(),
+      packs,
+      router: buildSkillRouterPromptUncached(packs)
+    }
+  } catch {
+    skillPacksCache = null
+  }
+}
+
+/** 带缓存的路由提示词：热路径直接命中内存，不扫盘。 */
+export function getCachedSkillRouterPrompt(): string | null {
+  const packs = getCachedSkillPacksSync()
+  if (!packs || !skillPacksCache) return null
+  return skillPacksCache.router || null
+}
+
+/** 写技能/改 skillDirs 后调用，立即失效，下轮重扫。 */
+export function invalidateSkillPacksCache(): void {
+  skillPacksCache = null
 }
 
 /**
  * 拼进系统提示的技能路由：只放包名+路由器全文（路由器本身就是索引），
  * 不放 48 个子技能全文，避免上下文爆炸。模型按需调 read_skill 读子技能。
  */
-export function buildSkillRouterPrompt(packs: SkillPack[]): string {
+function buildSkillRouterPromptUncached(packs: SkillPack[]): string {
   if (packs.length === 0) return ''
   return packs
     .map((pack) => `【外部技能包：${pack.name}】\n目录：${pack.root}\n${pack.router}`)
     .join('\n\n')
     .slice(0, 30_000)
+}
+
+export function buildSkillRouterPrompt(packs: SkillPack[]): string {
+  return buildSkillRouterPromptUncached(packs)
 }
 
 /** 读单个技能全文（含 references 索引，不含 references 正文，按需再读）。 */

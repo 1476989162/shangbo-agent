@@ -43,6 +43,53 @@ export function resolveFirstByteTimeoutMs(configured?: unknown): number {
   if (!Number.isFinite(n)) return 180_000
   return Math.min(600_000, Math.max(15_000, n))
 }
+
+/**
+ * 按模型分档的首字节超时：深度思考模型（R1 / 推理档）保持 180s，
+ * 普通模型收紧到 60s，避免卡住时用户等 3 分钟才熔断。
+ * 用户显式配置优先（仍钳位 15s–600s）。
+ * 漏模型两种加白：① 设置 providers.reasoningPatterns 加正则；② 调 resolve 时传 extraPatterns。
+ */
+const REASONING_MODEL_PATTERNS = [
+  /^r1\b/i,
+  /reasoning/i,
+  /deepseek-reasoner/i,
+  /think/i,
+  /o1/i,
+  /muse.*spark/i,
+  /r1-/i,
+  /qwq/i,
+  /qwen.*think/i,
+  /thinking/i,
+  /deepthink/i,
+  /r1-distill/i,
+  /sky.*think/i,
+  /glm.*think/i
+]
+const DEFAULT_MODEL_TIMEOUT_MS = 60_000
+const REASONING_MODEL_TIMEOUT_MS = 180_000
+export function isReasoningModel(model: string, extraPatterns?: string[]): boolean {
+  const m = (model || '').toLowerCase()
+  if (!m) return false
+  if (REASONING_MODEL_PATTERNS.some((re) => re.test(m))) return true
+  if (Array.isArray(extraPatterns)) {
+    for (const pat of extraPatterns) {
+      if (typeof pat !== 'string' || !pat.trim()) continue
+      try {
+        if (new RegExp(pat, 'i').test(m)) return true
+      } catch {
+        // 非法正则忽略，不炸轮
+      }
+    }
+  }
+  return false
+}
+export function resolveFirstByteTimeoutForModel(model: string, configured?: unknown, extraPatterns?: string[]): number {
+  if (typeof configured === 'number' && Number.isFinite(configured)) {
+    return resolveFirstByteTimeoutMs(configured)
+  }
+  return isReasoningModel(model, extraPatterns) ? REASONING_MODEL_TIMEOUT_MS : DEFAULT_MODEL_TIMEOUT_MS
+}
 /** 普通可重试错误（5xx/超时/网络）的尝试次数。 */
 const MAX_ATTEMPTS_TRANSIENT = 3
 /** 429 限流的尝试次数：配合 10 秒间隔覆盖一个完整的每分钟限流窗口。 */

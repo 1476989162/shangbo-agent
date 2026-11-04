@@ -21,15 +21,41 @@ export function isCjk(codePoint: number): boolean {
 }
 
 export function estimateTokens(text: string): number {
+  const cached = getEstimateCache(text)
+  if (cached !== null) return cached
   let cjk = 0
   let other = 0
   for (const ch of text) {
     if (isCjk(ch.codePointAt(0) ?? 0)) cjk++
     else other++
   }
-  return Math.ceil(cjk + other / 4)
+  const out = Math.ceil(cjk + other / 4)
+  setEstimateCache(text, out)
+  return out
 }
 
+/* estimateTokens 高频重复调用（同一 tool_result 在 estimateTurn/probe/正式各算一次）。
+   按文本指纹缓存，命中即 O(1)。key 用长度+首尾采样避免大文本做完整 hash。 */
+const estimateCache = new Map<string, number>()
+const ESTIMATE_CACHE_MAX = 2000
+function estimateCacheKey(text: string): string {
+  if (text.length <= 128) return `s:${text}`
+  return `l:${text.length}:${text.slice(0, 64)}|${text.slice(-32)}`
+}
+function getEstimateCache(text: string): number | null {
+  const v = estimateCache.get(estimateCacheKey(text))
+  return v === undefined ? null : v
+}
+function setEstimateCache(text: string, v: number): void {
+  if (estimateCache.size >= ESTIMATE_CACHE_MAX) {
+    const first = estimateCache.keys().next().value
+    if (first !== undefined) estimateCache.delete(first)
+  }
+  estimateCache.set(estimateCacheKey(text), v)
+}
+export function clearEstimateCache(): void {
+  estimateCache.clear()
+}
 /** 单张图片的本地估算 token 数：截图实际开销常在 765-1500，按 1200 估并留余量。 */
 export const IMAGE_TOKEN_ESTIMATE = 1200
 
@@ -152,11 +178,13 @@ export function buildContext(
     toolResultMaxChars?: number
     /** 轮间摘要：放在历史最前面的一条 user 消息，不计入原始轮次。 */
     summary?: string
+    /** 轮内保留最近 N 组完整工具输出，许愿长轮可传 3-4 收紧预算。 */
+    keepRecentToolResults?: number
   }
 ): BuiltContext {
   const turns = groupIntoTurns(path)
   const maxChars = options.toolResultMaxChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
-  // 工具 schema 等"历史之外但必发"的开销也要占预算，否则名义 32000 实际早超
+  const keepRecent = options.keepRecentToolResults ?? KEEP_RECENT_TOOL_RESULTS  // 工具 schema 等"历史之外但必发"的开销也要占预算，否则名义 32000 实际早超
   const summaryTokens = options.summary ? estimateTokens(options.summary) + 8 : 0
   const systemTokens =
     estimateTokens(options.system) + (options.extraTokens ?? 0) + summaryTokens
@@ -184,7 +212,7 @@ export function buildContext(
   const latestTurnTokens =
     latestTurnIndex >= 0 ? estimateTurn(kept[latestTurnIndex], maxChars) : 0
   if (latestTurnIndex >= 0 && latestTurnTokens > options.budgetTokens * 0.6) {
-    const compressed = compressTurnToolResults(kept[latestTurnIndex], maxChars)
+    const compressed = compressTurnToolResults(kept[latestTurnIndex], maxChars, keepRecent)
     if (compressed.changed) {
       kept[latestTurnIndex] = compressed.turn
       used = systemTokens + kept.reduce((sum, turn) => sum + estimateTurn(turn, maxChars), 0)

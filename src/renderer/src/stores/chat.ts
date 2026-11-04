@@ -307,10 +307,12 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 当前激活分支：从 activeLeafId 沿 parentId 回溯。
    * 消息全量都在 messages 里，切换分支只是改 activeLeafId，不重写任何数据。
+   * 优化：用 messageById 索引 O(1) 回溯，避免每次 computed 都 new Map + 线性 find。
    */
+  const messageById = computed(() => new Map(messages.value.map((m) => [m.id, m])))
   const activePath = computed<Message[]>(() => {
     if (!activeLeafId.value) return []
-    const byId = new Map(messages.value.map((message) => [message.id, message]))
+    const byId = messageById.value
     const path: Message[] = []
     let cursor: string | null = activeLeafId.value
 
@@ -447,7 +449,7 @@ export const useChatStore = defineStore('chat', () => {
   /* ---------------------------------------------------------------- */
 
   function findMessage(id: string): Message | undefined {
-    return messages.value.find((message) => message.id === id)
+    return messageById.value.get(id)
   }
 
   /** 写入/更新某会话的运行态。 */
@@ -697,7 +699,26 @@ export const useChatStore = defineStore('chat', () => {
   /* 动作                                                              */
   /* ---------------------------------------------------------------- */
 
+  let lastRefreshAt = 0
+  let refreshPending = false
   async function refreshConversations(): Promise<void> {
+    // 节流：后台事件（run_end/message_done）高频触发时最多 2s 刷一次，
+    // 避免切会话/长轮时全量 list() 打爆 IPC。
+    const now = Date.now()
+    if (now - lastRefreshAt < 2000) {
+      if (!refreshPending) {
+        refreshPending = true
+        setTimeout(() => {
+          refreshPending = false
+          lastRefreshAt = Date.now()
+          void window.shangbo.conversation.list().then((list) => {
+            conversations.value = list
+          })
+        }, 2000 - (now - lastRefreshAt))
+      }
+      return
+    }
+    lastRefreshAt = now
     conversations.value = await window.shangbo.conversation.list()
   }
 
