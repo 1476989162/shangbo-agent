@@ -6,6 +6,7 @@ import type {
   AutonomousRun,
   AutonomousTask,
   AutonomousTaskInput,
+  CCoreEngineStatus,
   ContextStatics,
   Conversation,
   Lesson,
@@ -194,5 +195,10 @@ export interface ShangboApi {
       confidence?: number
     }): Promise<Lesson>
     remove(id: string): Promise<boolean>
+  }
+
+  cCore: {
+    status(): Promise<CCoreEngineStatus>
+    audit(command: string): Promise<unknown>
   }
 }

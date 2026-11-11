@@ -559,6 +559,22 @@ export interface AppInfo {
   logPath?: string
   /** 更新通道：github=走Releases，generic=被SHANGBO_UPDATE_FEED_URL覆盖，none=开发态。 */
   updateChannel?: 'github' | 'generic' | 'none'
+  /** C 语言原生内核引擎状态与架构 */
+  cCoreEngine?: CCoreEngineStatus
+}
+
+export interface CCoreEngineStatus {
+  available: boolean
+  daemonRunning: boolean
+  executablePath: string | null
+  version: string
+  engine: string
+  metrics?: {
+    totalCalls: number
+    successCalls: number
+    failedCalls: number
+    averageLatencyMs: number
+  }
 }
 
 /* ------------------------------------------------------------------ */

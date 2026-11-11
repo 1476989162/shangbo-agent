@@ -21,3 +21,8 @@ outputs/
 # 本地记忆网关插件与锻炼脚本（个人环境，不随版本发布）
 magpie-plugins/
 scripts/memagent-exercise.mjs
+# C 语言构建产物
+c-core/bin/
+c-core/obj/
+*.obj
+

@@ -6,6 +6,7 @@ import {
   isPathInsideResolved,
   touchesPrivateData
 } from './commandGuard'
+import { cCoreBridge } from './cCoreBridge'
 
 /**
  * 工具调用的安全分级。
@@ -156,6 +157,12 @@ export function auditHardLines(command: string): SafetyVerdict | null {
   const cmd = command.trim()
   if (!cmd) return null
 
+  // 优先委托 C 语言原生内核审查
+  if (cCoreBridge.isAvailable()) {
+    const cVerdict = cCoreBridge.auditHardLinesSync(cmd)
+    if (cVerdict) return cVerdict
+  }
+
   const firstWord = cmd.split(/\s+/)[0] ?? ''
   const inspected = QUOTED_CODE_HOSTS.test(firstWord) ? cmd : stripQuotedText(cmd)
 
@@ -299,6 +306,17 @@ export function classifyToolCall(
   ctx: SafetyContext
 ): SafetyVerdict {
   if (READ_ONLY_TOOLS.has(toolName)) return auto('read', '只读操作。')
+
+  // 若 C-Core 桥接可用，优先交由 C-Core 底层做安全红线快速审查
+  if (
+    cCoreBridge.isAvailable() &&
+    ['read_file', 'write_file', 'patch_file', 'list_directory', 'run_command'].includes(toolName)
+  ) {
+    const cVerdict = cCoreBridge.classifyToolCallSync(toolName, input, ctx)
+    if (cVerdict && (cVerdict.tier === 'blocked' || cVerdict.tier === 'hard')) {
+      return cVerdict
+    }
+  }
 
   const record = (input ?? {}) as Record<string, unknown>
 

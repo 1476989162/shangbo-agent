@@ -43,6 +43,7 @@ import { classifyIntent } from './intent'
 import { classifyToolCall, isAutoAllowed } from './safety'
 import { fastClassifyAction, runActionClassifierLlm } from './actionClassifier'
 import { scanInjection, scanInjectionRules } from './injectionDetector'
+import { cCoreBridge } from './cCoreBridge'
 import { runAgentLoop } from './agentLoop'
 import type { ToolOutcome } from './toolOutcome'
 import {
@@ -1251,12 +1252,36 @@ export class AgentRuntime {
     }
 
     try {
-      const raw = await tool.execute(call.input, {
-        conversationId,
-        runId,
-        workingDirectory,
-        signal: controller.signal
-      })
+      // 优先委托 C 语言原生内核执行受支持的工具（读写、补丁、列目录）
+      let raw: string | ToolOutcome | null = null
+      const delegateToCCore =
+        cCoreBridge.isAvailable() &&
+        (process.env.CCORE_TOOL_DELEGATION === 'true' ||
+          (!process.env.VITEST && getSetting<boolean>('agent.cCoreToolExecution', true))) &&
+        ['read_file', 'write_file', 'patch_file', 'list_directory'].includes(call.name)
+
+      if (delegateToCCore) {
+        try {
+          const cResult = await cCoreBridge.executeTool(call.name, call.input, {
+            workingDirectory: workingDirectory ?? undefined,
+            signal: controller.signal
+          })
+          if (cResult !== null) {
+            raw = cResult
+          }
+        } catch (cErr) {
+          log.warn(`[runtime] C-Core tool execution fallback on ${call.name}:`, cErr)
+        }
+      }
+
+      if (raw === null) {
+        raw = await tool.execute(call.input, {
+          conversationId,
+          runId,
+          workingDirectory,
+          signal: controller.signal
+        })
+      }
       if (call.name === 'todo_write') {
         emit({
           type: 'todo_update',

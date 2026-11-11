@@ -1,5 +1,6 @@
 import { streamWithFallback } from '../providers/gateway'
 import { resolveTarget } from './modelRuntime'
+import { cCoreBridge } from './cCoreBridge'
 
 /**
  * 注入内容分类器（对标 Claude Desktop 的外部内容扫描）。
@@ -47,6 +48,13 @@ const MAX_SCAN_CHARS = 4000
 
 export function scanInjectionRules(text: string): InjectionFinding {
   if (!text || !text.trim()) return { level: 'none', reason: '空内容。', via: 'rule' }
+
+  // 优先委托 C 语言原生内核进行注入扫描
+  if (cCoreBridge.isAvailable()) {
+    const cFinding = cCoreBridge.scanInjectionRulesSync(text)
+    if (cFinding) return cFinding
+  }
+
   const sample = text.slice(0, MAX_SCAN_CHARS)
   for (const pattern of HIGH_PATTERNS) {
     if (pattern.test(sample)) {

@@ -2371,6 +2371,9 @@ async function toggleAutoScreenshot(): Promise<void> {
               <div class="info-item"><span class="info-k">Electron 版本:</span> <span class="info-v mono">{{ appInfo.electron }}</span></div>
               <div class="info-item"><span class="info-k">Node 运行时:</span> <span class="info-v mono">{{ appInfo.node }}</span></div>
               <div class="info-item"><span class="info-k">本地数据库:</span> <span class="info-v mono text-truncate" :title="appInfo.dbPath">{{ appInfo.dbPath }}</span></div>
+              <div class="info-item"><span class="info-k">C 内核引擎:</span> <span class="info-v mono" :class="appInfo.cCoreEngine?.available ? 'text-success' : 'text-subtle'">{{ appInfo.cCoreEngine?.available ? (appInfo.cCoreEngine?.daemonRunning ? '原生运行中 (RPC 守护进程)' : '就绪 (CLI 双通道模式)') : '平滑降级 (纯 TypeScript 兜底)' }}</span></div>
+              <div v-if="appInfo.cCoreEngine?.available" class="info-item"><span class="info-k">C 内核版本:</span> <span class="info-v mono">{{ appInfo.cCoreEngine.version }} ({{ appInfo.cCoreEngine.engine }})</span></div>
+              <div v-if="appInfo.cCoreEngine?.executablePath" class="info-item"><span class="info-k">内核路径:</span> <span class="info-v mono text-truncate" :title="appInfo.cCoreEngine.executablePath">{{ appInfo.cCoreEngine.executablePath }}</span></div>
             </div>
           </div>
 

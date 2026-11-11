@@ -13,6 +13,7 @@ import { parseSettingValue } from '../settingsSchema'
 import { toolRegistry } from '../tools'
 import { checkTerminalCommand } from './terminalGuard'
 import { agentRuntime } from '../agent/runtime'
+import { cCoreBridge } from '../agent/cCoreBridge'
 import {
   adapterForKind,
   deleteProvider,
@@ -371,8 +372,18 @@ export function registerIpcHandlers(): void {
       userDataPath: app.getPath('userData'),
       dbPath: getDbPath(),
       username: process.env.USERNAME || process.env.USER || 'Administrator',
+      cCoreEngine: cCoreBridge.getStatus(),
       ...getInstallInfo()
     }
+  })
+
+  ipcMain.handle(IPC.cCoreStatus, () => {
+    return cCoreBridge.getStatus()
+  })
+
+  ipcMain.handle(IPC.cCoreAudit, async (_event, command: unknown) => {
+    const cmd = typeof command === 'string' ? command : ''
+    return cCoreBridge.auditHardLines(cmd)
   })
 
   ipcMain.handle(IPC.appWindowTheme, (_event, theme: unknown) => {

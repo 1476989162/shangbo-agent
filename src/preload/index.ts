@@ -157,6 +157,11 @@ const api: ShangboApi = {
     list: (projectPath) => ipcRenderer.invoke(IPC.lessonsList, projectPath),
     save: (input) => ipcRenderer.invoke(IPC.lessonsSave, input),
     remove: (id) => ipcRenderer.invoke(IPC.lessonsDelete, id)
+  },
+
+  cCore: {
+    status: () => ipcRenderer.invoke(IPC.cCoreStatus),
+    audit: (command: string) => ipcRenderer.invoke(IPC.cCoreAudit, command)
   }
 }
 

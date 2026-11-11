@@ -86,7 +86,11 @@ export const IPC = {
   autonomousStatus: 'autonomous:status',
   lessonsList: 'lessons:list',
   lessonsSave: 'lessons:save',
-  lessonsDelete: 'lessons:delete'
+  lessonsDelete: 'lessons:delete',
+
+  /** C 语言原生核心引擎 (C-Core) 状态与审计 */
+  cCoreStatus: 'cCore:status',
+  cCoreAudit: 'cCore:audit'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

@@ -1,3 +1,5 @@
+import { cCoreBridge } from './cCoreBridge'
+
 /**
  * 防死循环保险丝（学 Cursor 的连续犯错上限 + Hermes 按模型连贯性设帽）。
  *
@@ -30,6 +32,13 @@ export function callSignature(name: string, input: unknown): string {
  */
 export function detectStuck(history: ToolRecord[], limit = 3): string | null {
   if (limit <= 0 || history.length < limit) return null
+
+  // 优先委托 C 语言原生内核进行死循环检测
+  if (cCoreBridge.isAvailable()) {
+    const cReason = cCoreBridge.detectStuckSync(history, limit)
+    if (cReason) return cReason
+  }
+
   const recent = history.slice(-limit)
 
   if (recent.every((r) => r.isError)) {
