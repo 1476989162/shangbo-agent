@@ -2,6 +2,33 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.5] - 2026-11-16
+
+C 核心接管版本：安全分级与工具执行下沉到常驻 C 内核，工作台终端补齐同款护栏，修复子代理隔离区被误判私有数据的红线误报。
+
+### 新增
+
+- **C 核心工具执行接管**：`read_file/write_file/patch_file/list_directory/search_files/run_command` 委托常驻 C 内核执行（`agent.cCoreToolExecution`，默认开），原生命令执行支持超时与取消（`native_process`）。
+- **安全分级主通道切换**：工具审批分级以 C RPC 为准，TS 规则仅做故障兜底与硬红线复核，只收紧不放宽。
+- **工作台终端护栏**：`app:execCommand` 渲染直调通道补齐与工具层一致的密钥库/会话库拒绝与删除审批（`terminalGuard`），堵住「密钥读进界面再随对话外发」的绕过路径。
+- **浏览器探测**：固定本机 CDP 端点探测，不接受渲染层传入 URL，避免探测变通用代理（`browserProbe`）。
+
+### 修复
+
+- **子代理隔离区红线误报**：`%TEMP%\shangbo-subagent` worktree 路径命中「AppData + shangbo」过宽兜底，导致隔离子代理内所有只读工具弹人工确认、命令被永久拒绝。兜底组合规则收窄为仅 env 变量/通配符场景，字面路径仍由精确 userData 规则覆盖；真 userData 与 `%APPDATA%\shangbo*\secr*` 绕过防护不变。
+
+### 安全
+
+- **删除护栏重构**：单段直接删除动词识别替代递归删除正则，嵌套解释器与复合命令仍走原审批链；cmd 分号语义兜底仅限制整目录、上级目录与系统目录。
+
+### 界面
+
+- 审批面板、会话视图、设置页与侧栏样式更新。
+
+### 测试
+
+- C 套件新增 `test_subagent_worktree_not_private_data` 回归（worktree 只读不升级、真 userData 仍 hard、通配符绕过仍拦），50 用例连跑三轮全过；TS 侧 safety/bridge/subagent 53 用例通过。
+
 ## [0.9.4] - 2026-11-04
 
 安全对齐与后台复核版本：SSH 直连免审批、Claude Desktop 删除防护对齐、双 LLM 分类器（默认关闭）。

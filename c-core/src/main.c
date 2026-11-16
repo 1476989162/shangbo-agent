@@ -305,13 +305,7 @@ int main(int argc, char **argv) {
         agent_session_init(&sess, "cli_session", ".", AUTONOMY_BALANCED, 10);
 
         ToolResult res;
-        bool ok = false;
-        if (strcmp(tool, "patch_file") == 0 && argc >= 6) {
-            res = tool_patch_file(arg1, arg2, arg3, sess.workspace);
-            ok = res.success;
-        } else {
-            ok = agent_session_execute_tool(&sess, tool, arg1, arg2, &res);
-        }
+        bool ok = agent_session_execute_tool_ex(&sess, tool, arg1, arg2, (argc >= 6) ? arg3 : NULL, &res);
         if (ok) {
             printf("Tool [%s] SUCCEEDED:\n%s\n", tool, res.output ? res.output : "(no output)");
         } else {

@@ -176,7 +176,7 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
     for (let i = 0; i < toolUses.length; i++) {
       history.push({ sig: callSignature(toolUses[i].name, toolUses[i].input), isError: results[i].isError })
     }
-    const stuck = detectStuck(history, limit)
+    const stuck = await detectStuck(history, limit)
     if (stuck) {
       stuckNote = `\n\n（${stuck}）`
       break

@@ -305,20 +305,20 @@ function shortReason(reason: string): string {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #3b82f6;
+  background: var(--accent);
   border: 2px solid var(--bg-elevated, #ffffff);
   animation: pulseDot 1.4s infinite;
 }
 
 @keyframes pulseDot {
   0% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
   }
   70% {
-    box-shadow: 0 0 0 6px rgba(59, 130, 246, 0);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
   }
 }
 

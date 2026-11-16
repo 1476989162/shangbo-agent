@@ -12,14 +12,10 @@ describe('fastClassifyAction 规则通道', () => {
     expect(fastClassifyAction(verdict('hard'))?.decision).toBe('ask')
   })
 
-  it('删除动词永不自动，即使 verdict 是 auto', () => {
-    const auto = verdict('auto')
-    expect(fastClassifyAction(auto, 'rmdir /s /q build')?.decision).toBe('ask')
-    expect(fastClassifyAction(auto, 'npm test')?.decision).toBe('allow')
-  })
-
-  it('soft 不可自动时返回 null，让调用方决定是否调 LLM', () => {
-    expect(fastClassifyAction(verdict('soft'))).toBeNull()
+  it('普通命令与子目录删除不因 soft 或删除动词再弹审批', () => {
+    expect(fastClassifyAction(verdict('auto'), 'rmdir /s /q build')?.decision).toBe('allow')
+    expect(fastClassifyAction(verdict('soft'), 'rmdir /s /q ../outside')?.decision).toBe('allow')
+    expect(fastClassifyAction(verdict('soft'), 'python -X utf8 tools\\\\probe8se.py')?.decision).toBe('allow')
   })
 })
 
@@ -28,8 +24,8 @@ describe('parseActionLlmOutput 只认 JSON', () => {
     expect(parseActionLlmOutput('{"decision":"block","reason":"外发密钥"}').decision).toBe('block')
   })
 
-  it('非法输出一律按 ask 处理', () => {
-    expect(parseActionLlmOutput('你好').decision).toBe('ask')
-    expect(parseActionLlmOutput('{"decision":"allow-all"}').decision).toBe('ask')
+  it('非法输出不再把普通操作升级为人工确认', () => {
+    expect(parseActionLlmOutput('你好').decision).toBe('allow')
+    expect(parseActionLlmOutput('{"decision":"allow-all"}').decision).toBe('allow')
   })
 })

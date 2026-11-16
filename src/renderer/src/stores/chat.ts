@@ -343,18 +343,31 @@ export const useChatStore = defineStore('chat', () => {
     // 因此 activeLeafId 仍指向上一个助手消息，回溯时看不到它们。
     // 这里把「挂在路径末端、且尚无任何子回复」的用户消息补进来，
     // 否则用户提交后界面毫无反应，会以为消息没发出去。
-    const replied = new Set(
-      path.map((m) => m.id).filter((id) => byId.get(id)?.role === 'user')
+    // 循环找链+兄弟全收：链式(B->C)逐轮下钻，兄弟(B,C同父)一次全收，
+    // 避免连发多条时第2条排队隐身(后端照跑、前端看不到)。
+    const inPath = new Set(path.map((m) => m.id))
+    const hasReply = new Set(
+      messages.value.filter((m) => m.role === 'assistant' && m.parentId).map((m) => m.parentId as string)
     )
-    for (const message of messages.value) {
-      if (message.conversationId !== activeConversationId.value) continue
-      if (message.role !== 'user') continue
-      if (replied.has(message.id)) continue
-      // 崩溃残留的排队消息已由主进程标记为 aborted（已取消），不再补进视图
-      if (message.status === 'aborted') continue
-      // 仅当它是当前路径末端的子节点时才补进来，避免把别的分支混进来
-      if (message.parentId !== path[path.length - 1]?.id) continue
-      path.push(message)
+    const queued = messages.value
+      .filter(
+        (m) =>
+          m.conversationId === activeConversationId.value &&
+          m.role === 'user' &&
+          m.status !== 'aborted' &&
+          !inPath.has(m.id) &&
+          !hasReply.has(m.id)
+      )
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+    let tail: string | null | undefined = path[path.length - 1]?.id
+    for (let guard = 0; guard < queued.length; guard++) {
+      const children = queued.filter((m) => m.parentId === tail && !inPath.has(m.id))
+      if (children.length === 0) break
+      for (const child of children) {
+        path.push(child)
+        inPath.add(child.id)
+      }
+      tail = children[children.length - 1].id
     }
 
     return path
@@ -956,7 +969,10 @@ export const useChatStore = defineStore('chat', () => {
 
     lastError.value = null
     // 编辑重发时以被编辑消息的父节点为锚点，生成兄弟分支；正常发送以当前叶子为锚点
-    const anchor = parentMessageId !== undefined ? parentMessageId : activeLeafId.value
+    // 忙时正常发送传null：让主进程走getLatestMessageId()链式挂载(B->C)，
+    // 否则连发多条会拿到同一个activeLeaf快照变成兄弟节点，activePath只补出第一条。
+    const isBusy = activeConversationId.value ? !!runsByConversation.value[activeConversationId.value] : false
+    const anchor = parentMessageId !== undefined ? parentMessageId : isBusy ? null : activeLeafId.value
     switchNotice.value = null
     retryInfo.value = null
 

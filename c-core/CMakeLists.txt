@@ -21,6 +21,7 @@ set(CORE_SOURCES
     src/tools.c
     src/agent_runtime.c
     src/json_rpc.c
+    src/native_process.c
 )
 
 add_library(shangbo_core STATIC ${CORE_SOURCES})

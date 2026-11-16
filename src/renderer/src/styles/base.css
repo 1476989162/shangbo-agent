@@ -1,53 +1,55 @@
 /* ------------------------------------------------------------------
-   设计令牌 · 金石墨韵
-   取自「数智太极 · 东方天圆」：宣纸白、曜石黑、古铜金。
-   金色只用于强调与焦点，大面积仍是低饱和的纸/墨层次，
-   避免把专业工具做成节庆皮肤。
+   设计令牌 · 曜黑工程舱
+   冷灰中性色 + 电青单强调色：深色像控制台，浅色像工程图纸。
+   强调色只用于焦点、主按钮与运行状态；大面积是低饱和冷灰层次，
+   等宽字体承担微标签，1px crisp 边框分隔结构。
    ------------------------------------------------------------------ */
 
 :root {
-  --bg: #fbfaf6;
+  --bg: #f5f7fa;
   --bg-elevated: #ffffff;
-  --surface: #f3f0e9;
-  --surface-hover: #eae5db;
-  --sidebar-bg: #f7f4ed;
+  --surface: #edf0f5;
+  --surface-hover: #e3e8f0;
+  --sidebar-bg: #eceff4;
 
-  --text: #1d1b18;
-  --text-muted: #6a655c;
-  --text-subtle: #969083;
+  --text: #171b23;
+  --text-muted: #5c6675;
+  --text-subtle: #8b94a3;
 
-  --border: #e5dfd3;
-  --border-strong: #d2c9b8;
+  --border: #dde2ea;
+  --border-strong: #c6cdd9;
 
-  /* accent 是“可读的金”：小字号文本/链接用它；填充用 gold-* */
-  --accent: #8a6520;
-  --accent-hover: #6f5119;
-  --accent-soft: #f5eedc;
-  --accent-strong: #6f5119;
+  /* accent 是“可读的青”：小字号文本/链接用它；填充用 accent-* */
+  --accent: #0891b2;
+  --accent-hover: #0e7490;
+  --accent-soft: #dff3f8;
+  --accent-strong: #0e7490;
   --accent-contrast: #ffffff;
   --primary: var(--accent);
 
-  --gold-1: #f3e3b8;
-  --gold-2: #c9a227;
-  --gold-3: #8a6520;
-  --gold-gradient: linear-gradient(135deg, var(--gold-1), var(--gold-2) 48%, var(--gold-3));
-  --gold-line: color-mix(in srgb, var(--gold-2) 55%, transparent);
-  --gold-glow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 16%, transparent);
+  --accent-1: #cffafe;
+  --accent-2: #0891b2;
+  --accent-3: #0e7490;
+  --accent-gradient: linear-gradient(135deg, #0ea5c4, #0891b2 55%, #0e7490);
+  --accent-line: color-mix(in srgb, var(--accent-2) 50%, transparent);
+  --accent-glow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 20%, transparent);
 
-  --ink-soft: #2a2620;
-  --danger: #b23a2e;
-  --danger-soft: #fbedeb;
-  --success: #2e7a5c;
-  --success-soft: #eaf3ee;
+  --ink-soft: #2a2f3a;
+  --danger: #dc2626;
+  --danger-soft: #fbe4e4;
+  --success: #0d9463;
+  --success-soft: #ddf2e9;
+  --warning: #b45309;
+  --warning-soft: #fbeed3;
 
-  --radius-sm: 7px;
-  --radius: 11px;
-  --radius-lg: 16px;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 10px;
   --radius-full: 999px;
 
-  --shadow-sm: 0 1px 2px rgba(45, 36, 22, 0.06);
-  --shadow-md: 0 10px 28px rgba(45, 36, 22, 0.1);
-  --shadow-lg: 0 24px 56px rgba(45, 36, 22, 0.16);
+  --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.06);
+  --shadow-md: 0 8px 24px rgba(20, 30, 50, 0.1);
+  --shadow-lg: 0 24px 56px rgba(20, 30, 50, 0.16);
 
   --font-sans: 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', Roboto,
     'Helvetica Neue', sans-serif;
@@ -64,44 +66,51 @@
   --titlebar-height: 40px;
   --sidebar-width: 272px;
   --content-max: 780px;
+
+  /* P2 动效统一：全站只用这两档 + 弹簧曲线 */
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 0.12s;
+  --dur-med: 0.2s;
 }
 
 :root[data-theme='dark'] {
-  --bg: #131110;
-  --bg-elevated: #1b1815;
-  --surface: #241f19;
-  --surface-hover: #2e2820;
-  --sidebar-bg: #100e0c;
+  --bg: #0c0e12;
+  --bg-elevated: #14171e;
+  --surface: #181c25;
+  --surface-hover: #202634;
+  --sidebar-bg: #0f1218;
 
-  --text: #f1ebdf;
-  --text-muted: #aba294;
-  --text-subtle: #7e7568;
+  --text: #e8ebf1;
+  --text-muted: #8a93a5;
+  --text-subtle: #5f6879;
 
-  --border: #332c23;
-  --border-strong: #4a4032;
+  --border: #222836;
+  --border-strong: #323a4d;
 
-  --accent: #d8b36a;
-  --accent-hover: #e7c987;
-  --accent-soft: #2c2417;
-  --accent-strong: #e7c987;
-  --accent-contrast: #1a1408;
+  --accent: #22d3ee;
+  --accent-hover: #67e8f9;
+  --accent-soft: #0e2a33;
+  --accent-strong: #67e8f9;
+  --accent-contrast: #052029;
   --primary: var(--accent);
 
-  --gold-1: #f7e6bb;
-  --gold-2: #d8b36a;
-  --gold-3: #9a7530;
-  --gold-gradient: linear-gradient(135deg, var(--gold-1), var(--gold-2) 48%, var(--gold-3));
-  --gold-line: color-mix(in srgb, var(--gold-2) 45%, transparent);
-  --gold-glow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 18%, transparent);
+  --accent-1: #164e63;
+  --accent-2: #22d3ee;
+  --accent-3: #67e8f9;
+  --accent-gradient: linear-gradient(135deg, #67e8f9, #22d3ee 55%, #06b6d4);
+  --accent-line: color-mix(in srgb, var(--accent-2) 45%, transparent);
+  --accent-glow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 22%, transparent);
 
-  --ink-soft: #f1ebdf;
-  --danger: #e07a6a;
-  --danger-soft: #35211d;
-  --success: #5aab86;
-  --success-soft: #23302a;
+  --ink-soft: #e8ebf1;
+  --danger: #f87171;
+  --danger-soft: #3a1d1d;
+  --success: #34d399;
+  --success-soft: #0d2b22;
+  --warning: #fbbf24;
+  --warning-soft: #33270e;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.34);
-  --shadow-md: 0 10px 30px rgba(0, 0, 0, 0.44);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 10px 30px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.6);
 }
 
@@ -130,14 +139,6 @@ body {
   overflow: hidden;
 }
 
-/* 宣纸的极轻纹理：只在浅色主题出现，深色保持纯曜石 */
-:root[data-theme='light'] body {
-  background-image:
-    radial-gradient(1200px 600px at 12% -10%, rgba(201, 162, 39, 0.055), transparent 60%),
-    radial-gradient(900px 500px at 100% 0%, rgba(138, 101, 32, 0.035), transparent 55%);
-  background-attachment: fixed;
-}
-
 button {
   font-family: inherit;
   font-size: inherit;
@@ -156,12 +157,12 @@ select {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--gold-2) 26%, transparent);
+  background: color-mix(in srgb, var(--accent-2) 28%, transparent);
   color: var(--text);
 }
 
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--gold-2) 72%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--accent-2) 72%, transparent);
   outline-offset: 2px;
 }
 
@@ -172,7 +173,7 @@ select {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--border-strong) 72%, var(--gold-2));
+  background: var(--border-strong);
   border: 3px solid transparent;
   background-clip: content-box;
   border-radius: var(--radius-full);
@@ -219,18 +220,19 @@ select {
 }
 
 .btn-primary {
-  background: var(--gold-gradient);
-  border-color: color-mix(in srgb, var(--gold-3) 70%, transparent);
+  background: var(--accent-gradient);
+  border-color: color-mix(in srgb, var(--accent-3) 70%, transparent);
   color: var(--accent-contrast);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--gold-gradient);
-  border-color: var(--gold-3);
-  filter: brightness(1.04);
-  box-shadow: 0 4px 14px rgba(138, 101, 32, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  background: var(--accent-gradient);
+  border-color: var(--accent-3);
+  filter: brightness(1.05);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent-2) 30%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .btn-ghost {
@@ -259,8 +261,8 @@ select {
 
 .input:focus,
 .textarea:focus {
-  border-color: color-mix(in srgb, var(--gold-2) 72%, var(--border));
-  box-shadow: var(--gold-glow);
+  border-color: color-mix(in srgb, var(--accent-2) 72%, var(--border));
+  box-shadow: var(--accent-glow);
 }
 
 .field {
@@ -434,55 +436,88 @@ select {
   pointer-events: none;
 }
 /* ------------------------------------------------------------------
-   品牌基础件：东方天圆的圆环、金线、衬线标题
+   品牌基础件：工程舱的方形徽标与等宽微标签
    ------------------------------------------------------------------ */
 
-.brand-serif {
-  font-family: var(--font-serif);
-  letter-spacing: 0.02em;
+/* 方形徽标：圆角矩形 + 单色 Logo，深色提亮、浅色压暗，随主题变色 */
+.brand-mark {
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 
-.gold-text {
-  background: var(--gold-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+.brand-mark img {
+  filter: grayscale(1) brightness(0.55);
 }
 
-.gold-hairline {
-  height: 1px;
-  border: none;
-  background: linear-gradient(90deg, transparent, var(--gold-line), transparent);
+:root[data-theme='dark'] .brand-mark img {
+  filter: grayscale(1) brightness(1.7);
 }
 
-/* 太极圆环：用两段锥形渐变模拟双鱼，不依赖图片，随主题变色 */
-.taiji-ring {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-full);
-  background:
-    conic-gradient(
-      from 210deg,
-      color-mix(in srgb, var(--gold-2) 78%, transparent) 0deg 168deg,
-      transparent 168deg 180deg,
-      color-mix(in srgb, var(--gold-2) 26%, transparent) 180deg 348deg,
-      transparent 348deg 360deg
-    );
-  padding: 1px;
+/* 等宽微标签：eyebrow / 分区标题 / 状态 chip 用 */
+.micro-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
 }
 
-.taiji-ring::before {
-  content: '';
-  position: absolute;
-  inset: -7px;
-  border-radius: inherit;
-  border: 1px solid color-mix(in srgb, var(--gold-2) 22%, transparent);
-  pointer-events: none;
+/* ------------------------------------------------------------------
+   质感/无障碍：深色侧栏透气 + 动效统一 + 窄屏坍缩 + 减弱动效
+   ------------------------------------------------------------------ */
+
+/* 深色侧栏：冷底 + 右侧 1px 边框 + 顶部极轻青罩，避免死黑 */
+:root[data-theme='dark'] .sidebar {
+  border-right: 1px solid var(--border);
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent-2) 5%, transparent),
+    transparent 28%
+  );
 }
 
-.taiji-ring > * {
-  border-radius: inherit;
-  background: var(--bg-elevated);
+/* 动效统一：按钮/输入统一走弹簧曲线 */
+.btn,
+.input,
+.textarea {
+  transition-timing-function: var(--ease-spring);
+}
+
+/* 手动折叠时展开按钮由 Vue 状态控制；默认仅在图标栏布局下出现。 */
+.expand-sidebar-btn { display: none !important; -webkit-app-region: no-drag; }
+.app.sidebar-collapsed .expand-sidebar-btn { display: inline-flex !important; }
+
+/* 窄屏 <1280px：侧栏收成图标栏，文案隐藏但保留可点击 */
+@media (max-width: 1279px) {
+  :root {
+    --sidebar-width: 72px;
+  }
+  .sidebar .brand-copy,
+  .sidebar .mode-pill,
+  .sidebar .action-link,
+  .sidebar .search-box,
+  .sidebar .project-name,
+  .sidebar .tree-title,
+  .sidebar .user-name,
+  .sidebar .gateway-tag,
+  .sidebar .divider,
+  .sidebar .new-btn span,
+  .sidebar .btn-add-project span {
+    display: none !important;
+  }
+  .sidebar .new-btn,
+  .sidebar .btn-add-project {
+    justify-content: center;
+  }
+  .app:not(.sidebar-collapsed) .expand-sidebar-btn { display: inline-flex !important; }
+}
+
+/* 无障碍：减弱动效用户直接静止 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

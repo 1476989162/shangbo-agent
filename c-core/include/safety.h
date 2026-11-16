@@ -35,19 +35,22 @@ typedef enum {
 typedef struct {
     SafetyTier tier;
     SafetyCategory category;
-    char reason[256];
+    char reason[512];
     bool auto_approvable;
 } SafetyVerdict;
 
 typedef struct {
-    char working_directory[512];
+    char working_directory[1024];
+    char user_data_dir[1024];
     AutonomyLevel autonomy;
+    bool approved;
 } SafetyContext;
 
 /* Core Safety Inspection APIs */
 SafetyVerdict audit_hard_lines(const char *command);
 bool is_path_inside_workspace(const char *target_path, const char *workspace);
 bool touches_private_data(const char *path_or_command);
+void safety_set_user_data_dir(const char *dir);
 SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const char *command_arg, const SafetyContext *ctx);
 
 const char *safety_tier_to_string(SafetyTier tier);

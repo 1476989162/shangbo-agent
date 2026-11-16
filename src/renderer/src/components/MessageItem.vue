@@ -725,8 +725,8 @@ async function copy(): Promise<void> {
 
 .message-user .bubble {
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--gold-2) 30%, var(--border));
-  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.05);
+  border-color: color-mix(in srgb, var(--accent-2) 30%, var(--border));
+  box-shadow: var(--shadow-sm);
 }
 
 .user-text {
@@ -1020,9 +1020,9 @@ async function copy(): Promise<void> {
 }
 
 .tool-activity.command .activity-glyph {
-  color: #047857;
-  border-color: rgba(16, 185, 129, 0.25);
-  background: rgba(16, 185, 129, 0.07);
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
 }
 
 .tool-activity.agent .activity-glyph,
@@ -1403,8 +1403,8 @@ async function copy(): Promise<void> {
   margin: 10px 0;
   padding: 12px 14px;
   background: var(--surface);
-  border: 1px solid #f59e0b;
-  border-left: 4px solid #f59e0b;
+  border: 1px solid var(--warning);
+  border-left: 4px solid var(--warning);
   border-radius: var(--radius-sm, 6px);
   color: var(--text);
   font-size: 12.5px;
@@ -1416,7 +1416,7 @@ async function copy(): Promise<void> {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  color: var(--accent-strong);
+  color: var(--warning);
   margin-bottom: 6px;
 }
 
@@ -1437,7 +1437,7 @@ async function copy(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: rgba(245, 158, 11, 0.08);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
   padding: 8px 10px;
   border-radius: 4px;
   font-size: 12px;
@@ -1456,21 +1456,21 @@ async function copy(): Promise<void> {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  background: #f59e0b;
-  color: #ffffff;
+  background: var(--accent-gradient);
+  color: var(--accent-contrast);
   border: none;
   border-radius: var(--radius-sm, 6px);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
-  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent-2) 28%, transparent);
 }
 
 .btn-auto-continue:hover {
-  background: #d97706;
+  filter: brightness(1.06);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.35);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent-2) 36%, transparent);
 }
 
 .lightning-icon {
@@ -1499,7 +1499,7 @@ async function copy(): Promise<void> {
   font-weight: 500;
 }
 .artifact-view-btn:hover {
-  background: rgba(59, 130, 246, 0.1);
-  color: var(--primary-hover, #60a5fa);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent-hover);
 }
 </style>

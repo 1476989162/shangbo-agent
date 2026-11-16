@@ -78,11 +78,11 @@ function openTab(tab: string): void {
           title="发现新版本，点击去更新"
           @click="openTab('general')"
         />
-        <span class="taiji-ring brand-mark">
+        <span class="brand-mark">
           <img :src="logoImg" alt="尚搏" />
         </span>
         <div class="brand-copy">
-          <div class="brand-title brand-serif">尚搏 Agent</div>
+          <div class="brand-title">尚搏 Agent</div>
           <div class="brand-sub">数智太极 · 东方天圆</div>
         </div>
       </div>
@@ -472,7 +472,7 @@ function openTab(tab: string): void {
   width: 34px;
   height: 34px;
   flex: none;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold-2) 34%, transparent);
+  box-shadow: 0 0 0 1px var(--border-strong);
 }
 
 .brand-mark img {
@@ -576,7 +576,7 @@ function openTab(tab: string): void {
 .mode-btn.active {
   background: var(--bg-elevated);
   color: var(--accent-strong);
-  box-shadow: 0 1px 3px rgba(45, 36, 22, 0.1), inset 0 0 0 1px color-mix(in srgb, var(--gold-2) 22%, transparent);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 28%, transparent);
 }
 
 /* 快捷操作项 */
@@ -594,19 +594,24 @@ function openTab(tab: string): void {
   gap: 6px;
   width: 100%;
   padding: 7px 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  background: var(--accent-gradient);
+  border: 1px solid color-mix(in srgb, var(--accent-3) 70%, transparent);
   border-radius: var(--radius);
   font-size: var(--text-sm);
-  font-weight: 500;
-  color: var(--text);
+  font-weight: 600;
+  color: var(--accent-contrast);
   cursor: pointer;
+  box-shadow: var(--shadow-sm);
   transition: all 0.15s ease;
 }
 
 .new-btn:hover {
-  background: var(--surface-hover);
-  border-color: var(--border-strong);
+  filter: brightness(1.06);
+  border-color: var(--accent-3);
+}
+
+:root[data-theme='dark'] .new-btn {
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent-2) 25%, transparent);
 }
 
 .action-row {
@@ -820,7 +825,7 @@ function openTab(tab: string): void {
   bottom: 6px;
   width: 2px;
   border-radius: var(--radius-full);
-  background: var(--gold-gradient);
+  background: var(--accent);
 }
 
 .bullet {
@@ -1018,6 +1023,11 @@ function openTab(tab: string): void {
   object-fit: contain;
   border-radius: 4px;
   flex: none;
+  filter: grayscale(1) brightness(0.55);
+}
+
+:root[data-theme='dark'] .shangbo-brand-logo {
+  filter: grayscale(1) brightness(1.7);
 }
 
 .user-name {
@@ -1073,4 +1083,8 @@ function openTab(tab: string): void {
 .settings-chevron svg.rotated {
   transform: rotate(180deg);
 }
+
+
+/* P2 动效统一：侧栏交互全走弹簧曲线 */
+.nav-btn,.mode-btn,.new-btn,.action-link,.tree-item,.group-add-btn,.delete-btn,.btn-add-project,.sidebar-footer,.popup-item{transition-timing-function:var(--ease-spring,cubic-bezier(0.16,1,0.3,1)) !important;}
 </style>

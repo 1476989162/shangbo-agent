@@ -105,26 +105,26 @@ function prettyJson(value: unknown): string {
 }
 
 .critical-security-card {
-  border-color: #ef4444 !important;
-  background: rgba(239, 68, 68, 0.08) !important;
-  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.15) !important;
+  border-color: var(--danger) !important;
+  background: color-mix(in srgb, var(--danger) 8%, transparent) !important;
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--danger) 15%, transparent) !important;
 }
 
 .critical-badge {
-  background: #ef4444 !important;
-  color: #ffffff !important;
+  background: var(--danger) !important;
+  color: var(--bg) !important;
   padding: 2px 8px;
   border-radius: 4px;
 }
 
 .critical-text {
-  color: #b91c1c !important;
+  color: var(--danger) !important;
   font-weight: 600;
 }
 
 .btn-critical {
-  background: #ef4444 !important;
-  border-color: #ef4444 !important;
-  color: #ffffff !important;
+  background: var(--danger) !important;
+  border-color: var(--danger) !important;
+  color: var(--bg) !important;
 }
 </style>

@@ -4,9 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <wctype.h>
 
 #ifdef _WIN32
 #include <windows.h>
+#define strncasecmp _strnicmp
 #endif
 
 /* Case-insensitive string search helper */
@@ -69,8 +71,95 @@ const char *safety_category_to_string(SafetyCategory category) {
     }
 }
 
+static char g_user_data_dir[1024] = {0};
+
+void safety_set_user_data_dir(const char *dir) {
+    if (!dir) return;
+    strncpy(g_user_data_dir, dir, sizeof(g_user_data_dir) - 1);
+    g_user_data_dir[sizeof(g_user_data_dir) - 1] = '\0';
+}
+
+/* Helper to normalize path slashes to '/' and lowercase */
+static void normalize_slashes_lower(const char *in, char *out, size_t out_size) {
+    if (!in || out_size == 0) return;
+    size_t i = 0;
+    for (; in[i] && i + 1 < out_size; ++i) {
+        out[i] = (in[i] == '\\') ? '/' : (char)tolower((unsigned char)in[i]);
+    }
+    out[i] = '\0';
+    while (i > 1 && out[i - 1] == '/') {
+        out[--i] = '\0';
+    }
+}
+
+static bool is_env_filename_boundary_left(const char *str, const char *pos) {
+    if (pos == str) return true;
+    unsigned char prev = (unsigned char)*(pos - 1);
+    return isspace(prev) || prev == '/' || prev == '\\' || prev == '"' ||
+           prev == '\'' || prev == '=' || prev == ';' || prev == '&' ||
+           prev == '|' || prev == '(';
+}
+
+static bool is_env_filename_boundary_right(char c) {
+    return c == '\0' || isspace((unsigned char)c) || c == '"' || c == '\'' ||
+           c == ';' || c == '&' || c == '|' || c == ')';
+}
+
+static bool matches_sensitive_dotenv(const char *str) {
+    const char *pos = strcasestr_custom(str, ".env");
+    while (pos) {
+        if (is_env_filename_boundary_left(str, pos)) {
+            const char *after = pos + 4;
+            if (is_env_filename_boundary_right(*after)) {
+                return true;
+            }
+            if (*after == '.') {
+                const char *ext = after + 1;
+                size_t len = 0;
+                while (ext[len] && !is_env_filename_boundary_right(ext[len]) &&
+                       ext[len] != '/' && ext[len] != '\\') {
+                    len++;
+                }
+                if (len > 0 && is_env_filename_boundary_right(ext[len])) {
+                    /* Safe template suffixes such as .env.example, .env.sample, .env.template */
+                    bool is_safe_template =
+                        (len == 7 && strncasecmp(ext, "example", 7) == 0) ||
+                        (len == 6 && strncasecmp(ext, "sample", 6) == 0) ||
+                        (len == 8 && strncasecmp(ext, "template", 8) == 0) ||
+                        (len == 4 && strncasecmp(ext, "dist", 4) == 0) ||
+                        (len == 8 && strncasecmp(ext, "defaults", 8) == 0) ||
+                        (len == 6 && strncasecmp(ext, "schema", 6) == 0);
+                    if (!is_safe_template) {
+                        return true;
+                    }
+                }
+            }
+        }
+        pos = strcasestr_custom(pos + 1, ".env");
+    }
+    return false;
+}
+
+static bool contains_normalized_subpath(const char *norm_haystack, const char *raw_dir) {
+    if (!raw_dir || !*raw_dir) return false;
+    char norm_dir[1024];
+    normalize_slashes_lower(raw_dir, norm_dir, sizeof(norm_dir));
+    size_t dlen = strlen(norm_dir);
+    if (dlen == 0) return false;
+    const char *hit = strstr(norm_haystack, norm_dir);
+    while (hit) {
+        char after = hit[dlen];
+        if (after == '\0' || after == '/' || isspace((unsigned char)after) ||
+            after == '"' || after == '\'' || after == ';' || after == '&' || after == '|') {
+            return true;
+        }
+        hit = strstr(hit + 1, norm_dir);
+    }
+    return false;
+}
+
 bool touches_private_data(const char *path_or_command) {
-    if (!path_or_command) return false;
+    if (!path_or_command || !*path_or_command) return false;
     if (strcasestr_custom(path_or_command, "secrets.json")) return true;
     if (strcasestr_custom(path_or_command, "shangbo-agent.db")) return true;
     if (strcasestr_custom(path_or_command, ".db-wal") || strcasestr_custom(path_or_command, ".db-shm") ||
@@ -80,7 +169,54 @@ bool touches_private_data(const char *path_or_command) {
     if (strcasestr_custom(path_or_command, ".aws\\") || strcasestr_custom(path_or_command, ".aws/")) return true;
     if (match_word_token(path_or_command, ".aws")) return true;
     if (strcasestr_custom(path_or_command, "id_rsa") || strcasestr_custom(path_or_command, "id_ed25519")) return true;
-    if (strcasestr_custom(path_or_command, ".env")) return true;
+    if (matches_sensitive_dotenv(path_or_command)) return true;
+
+    char norm[4096];
+    normalize_slashes_lower(path_or_command, norm, sizeof(norm));
+
+    /* Check explicit or environment-provided Electron userData directory */
+    if (g_user_data_dir[0] && contains_normalized_subpath(norm, g_user_data_dir)) return true;
+    const char *env_ud = getenv("SHANGBO_USER_DATA");
+    if (env_ud && *env_ud && contains_normalized_subpath(norm, env_ud)) return true;
+
+    const char *appdata = getenv("APPDATA");
+    if (appdata && *appdata) {
+        char ud_cand[1024];
+        snprintf(ud_cand, sizeof(ud_cand), "%s/shangbo-agent", appdata);
+        if (contains_normalized_subpath(norm, ud_cand)) return true;
+    }
+    const char *localappdata = getenv("LOCALAPPDATA");
+    if (localappdata && *localappdata) {
+        char ud_cand[1024];
+        snprintf(ud_cand, sizeof(ud_cand), "%s/shangbo-agent", localappdata);
+        if (contains_normalized_subpath(norm, ud_cand)) return true;
+    }
+
+    /* Check well-known Electron userData path patterns and env-var expansions */
+    if (strstr(norm, "appdata/roaming/shangbo-agent") ||
+        strstr(norm, "appdata/local/shangbo-agent") ||
+        strstr(norm, "%appdata%/shangbo-agent") ||
+        strstr(norm, "%localappdata%/shangbo-agent") ||
+        strstr(norm, "$env:appdata/shangbo-agent") ||
+        strstr(norm, "$env:localappdata/shangbo-agent") ||
+        strstr(norm, ".config/shangbo-agent") ||
+        strstr(norm, "application support/shangbo-agent")) {
+        return true;
+    }
+
+    /* Wildcard + env-var bypasses like `type %APPDATA%\shangbo*\secr*`.
+       Literal AppData paths are already covered by the exact userData rules above;
+       the loose substring combo only applies to env-var expansions or wildcards,
+       otherwise unrelated dirs (e.g. %TEMP%\shangbo-subagent worktrees) false-positive. */
+    bool has_appdata_env = strstr(norm, "%appdata%") || strstr(norm, "%localappdata%") ||
+                           strstr(norm, "$env:appdata") || strstr(norm, "$env:localappdata");
+    bool has_appdata_wildcard = (strstr(norm, "appdata/roaming") || strstr(norm, "appdata/local")) &&
+                                strchr(norm, '*') != NULL;
+    if ((has_appdata_env || has_appdata_wildcard) &&
+        (strstr(norm, "secr") || strstr(norm, "shangbo") || strstr(norm, ".db"))) {
+        return true;
+    }
+
     return false;
 }
 
@@ -89,7 +225,7 @@ static bool is_quoted_code_host(const char *command) {
     if (!command) return false;
     while (*command && isspace((unsigned char)*command)) command++;
     static const char *hosts[] = {
-        "powershell", "pwsh", "cmd", "bash", "sh", "zsh", "perl", "ruby", "php",
+        "powershell", "pwsh", "cmd", "bash", "sh", "zsh", "ssh", "perl", "ruby", "php",
         "python", "python3", "node", "mysql", "mariadb", "psql", "sqlite", "sqlite3",
         "sqlcmd", "osql", "mongo", "mongosh", "redis-cli", NULL
     };
@@ -195,7 +331,21 @@ SafetyVerdict audit_hard_lines(const char *command) {
     }
 
     /* 1. DISK BLOCKERS (Permanent Block) */
-    if (strcasestr_custom(cleaned, "format ") || strcasestr_custom(cleaned, "diskpart") ||
+    bool direct_format = false;
+    const char *format_pos = cleaned;
+    while (*format_pos && isspace((unsigned char)*format_pos)) format_pos++;
+    bool quoted_code = is_quoted_code_host(command);
+    while (*format_pos && (isspace((unsigned char)*format_pos) || *format_pos == '"' || *format_pos == '\'')) format_pos++;
+    if (strncasecmp(format_pos, "format ", 7) == 0 || quoted_code) {
+        const char *drive = quoted_code ? strcasestr_custom(cleaned, "format ") : format_pos;
+        if (drive) {
+            drive += 7;
+            while (*drive && isspace((unsigned char)*drive)) drive++;
+            direct_format = isalpha((unsigned char)drive[0]) && drive[1] == ':' &&
+                            (drive[2] == '\0' || isspace((unsigned char)drive[2]) || drive[2] == '/' || drive[2] == '"');
+        }
+    }
+    if (direct_format || strcasestr_custom(cleaned, "diskpart") ||
         strcasestr_custom(cleaned, "mkfs") || strcasestr_custom(cleaned, "fdisk") ||
         strcasestr_custom(cleaned, "parted") || strcasestr_custom(cleaned, "wipefs") ||
         strcasestr_custom(cleaned, "bcdedit /delete") || strcasestr_custom(cleaned, "vssadmin delete") ||
@@ -274,6 +424,13 @@ SafetyVerdict audit_hard_lines(const char *command) {
         snprintf(v.reason, sizeof(v.reason), "检测到 git branch -D 强删分支：必须人工确认。");
         return v;
     }
+    if (strcasestr_custom(cleaned, "git filter-branch") || strcasestr_custom(cleaned, "git reflog expire")) {
+        v.tier = SAFETY_TIER_HARD;
+        v.category = CAT_GIT;
+        v.auto_approvable = false;
+        snprintf(v.reason, sizeof(v.reason), "检测到重写 Git 历史或清除恢复点：必须人工确认。");
+        return v;
+    }
 
     /* 3. DATABASE HARD REDLINES */
     if (strcasestr_custom(cleaned, "drop database") || strcasestr_custom(cleaned, "drop table") ||
@@ -310,11 +467,12 @@ SafetyVerdict audit_hard_lines(const char *command) {
 
     /* 4. SYSTEM BLOCKERS */
     if (strcasestr_custom(cleaned, "reg delete hk") || strcasestr_custom(cleaned, "shutdown") ||
-        strcasestr_custom(cleaned, "reboot")) {
-        v.tier = SAFETY_TIER_BLOCKED;
+        strcasestr_custom(cleaned, "reboot") || strcasestr_custom(cleaned, "taskkill") ||
+        strcasestr_custom(cleaned, "net user")) {
+        v.tier = SAFETY_TIER_HARD;
         v.category = CAT_SYSTEM;
         v.auto_approvable = false;
-        snprintf(v.reason, sizeof(v.reason), "检测到系统关机/重启/删除注册表等高危系统操作：禁止自动执行。");
+        snprintf(v.reason, sizeof(v.reason), "检测到系统关机/重启/删除注册表/强制结束进程等高危系统操作：必须人工确认。");
         return v;
     }
 
@@ -363,6 +521,156 @@ bool is_path_inside_workspace(const char *target_path, const char *workspace) {
     return false;
 }
 
+static bool is_path_inside_real_workspace(const char *target_path, const char *workspace) {
+    if (!target_path || !workspace || !*target_path || !*workspace) return false;
+#ifdef _WIN32
+    int target_wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target_path, -1, NULL, 0);
+    int workspace_wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, workspace, -1, NULL, 0);
+    if (target_wlen <= 0 || workspace_wlen <= 0) return false;
+    wchar_t *target_w = (wchar_t *)malloc((size_t)target_wlen * sizeof(wchar_t));
+    wchar_t *workspace_w = (wchar_t *)malloc((size_t)workspace_wlen * sizeof(wchar_t));
+    const size_t kPathCap = 32768;
+    wchar_t *buf_block = (wchar_t *)calloc(5 * kPathCap, sizeof(wchar_t));
+    bool inside = false;
+    if (target_w && workspace_w && buf_block) {
+        wchar_t *target_real = buf_block;
+        wchar_t *workspace_real = buf_block + kPathCap;
+        wchar_t *probe = buf_block + 2 * kPathCap;
+        wchar_t *ancestor_real = buf_block + 3 * kPathCap;
+        wchar_t *suffix = buf_block + 4 * kPathCap;
+
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target_path, -1, target_w, target_wlen);
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, workspace, -1, workspace_w, workspace_wlen);
+
+        DWORD wlen = GetFullPathNameW(workspace_w, (DWORD)kPathCap, workspace_real, NULL);
+        if (wlen > 0 && wlen < kPathCap) {
+            HANDLE hw = CreateFileW(workspace_real, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            if (hw != INVALID_HANDLE_VALUE) {
+                DWORD actual = GetFinalPathNameByHandleW(hw, workspace_real, (DWORD)kPathCap, FILE_NAME_NORMALIZED);
+                CloseHandle(hw);
+                if (actual == 0 || actual >= kPathCap) { free(buf_block); free(target_w); free(workspace_w); return false; }
+            }
+            if (wcsncmp(workspace_real, L"\\\\?\\", 4) == 0) {
+                memmove(workspace_real, workspace_real + 4, (wcslen(workspace_real + 4) + 1) * sizeof(wchar_t));
+            }
+        }
+
+        /* Resolve relative target_path against workspace_real, not process GetCurrentDirectoryW() */
+        bool is_rel_target = (target_w[0] != L'/' && target_w[0] != L'\\' &&
+                              !(iswalpha(target_w[0]) && target_w[1] == L':'));
+        const wchar_t *target_input = target_w;
+        if (is_rel_target && wlen > 0 && wlen < kPathCap) {
+            int combined = _snwprintf(probe, kPathCap, L"%s\\%s", workspace_real, target_w);
+            if (combined > 0 && (size_t)combined < kPathCap) {
+                target_input = probe;
+            }
+        }
+        DWORD tlen = GetFullPathNameW(target_input, (DWORD)kPathCap, target_real, NULL);
+
+        /* Resolve the nearest existing ancestor for a not-yet-created file. */
+        if (tlen > 0 && tlen < kPathCap) {
+            wcscpy(probe, target_real);
+            while (GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES) {
+                wchar_t *slash = wcsrchr(probe, L'\\');
+                if (!slash) slash = wcsrchr(probe, L'/');
+                if (!slash) break;
+                if (slash == probe + 2 && probe[1] == L':') {
+                    slash[1] = L'\0';
+                    break;
+                }
+                *slash = L'\0';
+            }
+            if (GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES) {
+                HANDLE ancestor = CreateFileW(probe, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                if (ancestor != INVALID_HANDLE_VALUE) {
+                    DWORD actual = GetFinalPathNameByHandleW(ancestor, ancestor_real, (DWORD)kPathCap, FILE_NAME_NORMALIZED);
+                    CloseHandle(ancestor);
+                    if (actual > 0 && actual < kPathCap) {
+                        size_t probe_len = wcslen(probe);
+                        if (probe_len == 3 && probe[1] == L':' && (probe[2] == L'\\' || probe[2] == L'/')) {
+                            probe_len = 2; /* keep leading slash in suffix when ancestor is drive root C:\ */
+                        }
+                        wcscpy(suffix, target_real + probe_len);
+                        if (wcslen(ancestor_real) + wcslen(suffix) < kPathCap) {
+                            wcscpy(target_real, ancestor_real);
+                            wcscat(target_real, suffix);
+                        }
+                    }
+                }
+            }
+        }
+        if (tlen > 0 && tlen < kPathCap && wlen > 0 && wlen < kPathCap) {
+            HANDLE h = CreateFileW(target_real, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD actual = GetFinalPathNameByHandleW(h, target_real, (DWORD)kPathCap, FILE_NAME_NORMALIZED);
+                CloseHandle(h);
+                if (actual == 0 || actual >= kPathCap) { free(buf_block); free(target_w); free(workspace_w); return false; }
+            }
+            if (wcsncmp(target_real, L"\\\\?\\", 4) == 0) memmove(target_real, target_real + 4, (wcslen(target_real + 4) + 1) * sizeof(wchar_t));
+            if (wcsncmp(workspace_real, L"\\\\?\\", 4) == 0) memmove(workspace_real, workspace_real + 4, (wcslen(workspace_real + 4) + 1) * sizeof(wchar_t));
+            for (wchar_t *p = target_real; *p; ++p) { if (*p == L'\\') *p = L'/'; *p = (wchar_t)towlower(*p); }
+            for (wchar_t *p = workspace_real; *p; ++p) { if (*p == L'\\') *p = L'/'; *p = (wchar_t)towlower(*p); }
+            size_t tbase = wcslen(target_real);
+            while (tbase > 1 && !(tbase == 3 && target_real[1] == L':') && target_real[tbase - 1] == L'/') {
+                target_real[--tbase] = L'\0';
+            }
+            size_t base = wcslen(workspace_real);
+            while (base > 1 && !(base == 3 && workspace_real[1] == L':') && workspace_real[base - 1] == L'/') {
+                workspace_real[--base] = L'\0';
+            }
+            if (base == 3 && workspace_real[1] == L':' && workspace_real[2] == L'/') {
+                inside = wcsncmp(target_real, workspace_real, 2) == 0 &&
+                         (target_real[2] == L'\0' || target_real[2] == L'/');
+            } else {
+                inside = wcsncmp(target_real, workspace_real, base) == 0 &&
+                         (target_real[base] == L'\0' || target_real[base] == L'/');
+            }
+        }
+    }
+    free(buf_block); free(target_w); free(workspace_w);
+    return inside;
+#else
+    char target_real[4096], workspace_real[4096], candidate[4096];
+    if (!realpath(workspace, workspace_real)) {
+        return is_path_inside_workspace(target_path, workspace);
+    }
+    if (target_path[0] == '/') {
+        if (snprintf(candidate, sizeof(candidate), "%s", target_path) >= (int)sizeof(candidate)) return false;
+    } else {
+        if (snprintf(candidate, sizeof(candidate), "%s/%s", workspace_real, target_path) >= (int)sizeof(candidate)) return false;
+    }
+    if (!realpath(candidate, target_real)) {
+        if (strstr(candidate, "/../") != NULL || strcmp(candidate, "..") == 0 ||
+            strncmp(candidate, "../", 3) == 0 ||
+            (strlen(candidate) >= 3 && strcmp(candidate + strlen(candidate) - 3, "/..") == 0)) {
+            return false;
+        }
+        char probe[4096], ancestor_real[4096];
+        strcpy(probe, candidate);
+        while (!realpath(probe, ancestor_real)) {
+            char *slash = strrchr(probe, '/');
+            if (!slash) return false;
+            if (slash == probe) {
+                probe[1] = '\0';
+                if (!realpath(probe, ancestor_real)) return false;
+                break;
+            }
+            *slash = '\0';
+        }
+        size_t probe_len = strlen(probe);
+        if (probe_len == 1 && probe[0] == '/') probe_len = 0;
+        const char *suffix = candidate + probe_len;
+        if (snprintf(target_real, sizeof(target_real), "%s%s", ancestor_real, suffix) >= (int)sizeof(target_real)) return false;
+    }
+    size_t n = strlen(workspace_real);
+    while (n > 1 && workspace_real[n - 1] == '/') workspace_real[--n] = '\0';
+    return strncmp(target_real, workspace_real, n) == 0 && (target_real[n] == '\0' || target_real[n] == '/');
+#endif
+}
+
 SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const char *command_arg, const SafetyContext *ctx) {
     SafetyVerdict v;
     memset(&v, 0, sizeof(v));
@@ -371,6 +679,9 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
     v.auto_approvable = true;
 
     if (!tool_name) return v;
+    if (ctx && ctx->user_data_dir[0]) {
+        safety_set_user_data_dir(ctx->user_data_dir);
+    }
 
     /* Read-only tools */
     if (strcmp(tool_name, "read_file") == 0 || strcmp(tool_name, "list_directory") == 0 ||
@@ -380,7 +691,9 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
         v.category = CAT_READ;
         v.auto_approvable = true;
         /* But check private data */
-        if ((path_arg && touches_private_data(path_arg)) || (command_arg && touches_private_data(command_arg))) {
+        if ((path_arg && touches_private_data(path_arg)) ||
+            (command_arg && touches_private_data(command_arg)) ||
+            (ctx && ctx->working_directory[0] && touches_private_data(ctx->working_directory))) {
             v.tier = SAFETY_TIER_HARD;
             v.category = CAT_PRIVATE_DATA;
             v.auto_approvable = false;
@@ -392,7 +705,9 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
     /* Command execution tool */
     if (strcmp(tool_name, "run_command") == 0) {
         const char *cmd = (command_arg && *command_arg) ? command_arg : path_arg;
-        if (cmd && touches_private_data(cmd)) {
+        if ((cmd && touches_private_data(cmd)) ||
+            (path_arg && touches_private_data(path_arg)) ||
+            (ctx && ctx->working_directory[0] && touches_private_data(ctx->working_directory))) {
             v.tier = SAFETY_TIER_BLOCKED;
             v.category = CAT_PRIVATE_DATA;
             v.auto_approvable = false;
@@ -415,7 +730,7 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
         }
 
         /* Commands only auto-approve if strictly within whitelist & workspace */
-        bool safe = cmd ? is_command_safe_for_auto_approval(cmd, ctx ? ctx->working_directory : ".") : false;
+        bool safe = cmd ? is_command_safe_for_auto_approval(cmd, ctx && ctx->working_directory[0] ? ctx->working_directory : ".") : false;
         v.tier = safe ? SAFETY_TIER_AUTO : SAFETY_TIER_SOFT;
         v.category = CAT_SYSTEM;
         v.auto_approvable = safe;
@@ -427,7 +742,8 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
 
     /* File write / patch tools */
     if (strcmp(tool_name, "write_file") == 0 || strcmp(tool_name, "patch_file") == 0) {
-        if (path_arg && touches_private_data(path_arg)) {
+        if ((path_arg && touches_private_data(path_arg)) ||
+            (ctx && ctx->working_directory[0] && touches_private_data(ctx->working_directory))) {
             v.tier = SAFETY_TIER_HARD;
             v.category = CAT_PRIVATE_DATA;
             v.auto_approvable = false;
@@ -435,7 +751,7 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
             return v;
         }
         if (ctx && ctx->working_directory[0]) {
-            if (path_arg && !is_path_inside_workspace(path_arg, ctx->working_directory)) {
+            if (path_arg && *path_arg && !is_path_inside_real_workspace(path_arg, ctx->working_directory)) {
                 v.tier = SAFETY_TIER_SOFT;
                 v.category = CAT_WORKSPACE;
                 v.auto_approvable = (ctx->autonomy == AUTONOMY_TRUSTED);

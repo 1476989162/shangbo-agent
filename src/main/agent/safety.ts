@@ -1,12 +1,12 @@
 import { isAbsolute, resolve } from 'node:path'
 import type { AutonomyLevel } from '../../shared/types'
 import {
+  analyzeCmdCommand,
   classifyDestructiveCommand,
   commandStaysInsideWorkspace,
   isPathInsideResolved,
   touchesPrivateData
 } from './commandGuard'
-import { cCoreBridge } from './cCoreBridge'
 
 /**
  * 工具调用的安全分级。
@@ -157,12 +157,6 @@ export function auditHardLines(command: string): SafetyVerdict | null {
   const cmd = command.trim()
   if (!cmd) return null
 
-  // 优先委托 C 语言原生内核审查
-  if (cCoreBridge.isAvailable()) {
-    const cVerdict = cCoreBridge.auditHardLinesSync(cmd)
-    if (cVerdict) return cVerdict
-  }
-
   const firstWord = cmd.split(/\s+/)[0] ?? ''
   const inspected = QUOTED_CODE_HOSTS.test(firstWord) ? cmd : stripQuotedText(cmd)
 
@@ -236,9 +230,9 @@ function workspaceWriteVerdict(rawPath: string, ctx: SafetyContext): SafetyVerdi
   return auto('workspace', '工作区内写入。')
 }
 
-/** 递归删除的写法：rm -rf、rd /s、Remove-Item -Recurse、del /s。 */
-const RECURSIVE_DELETE =
-  /(?:\brm\s+[^\n]*-(?:[a-z]*r[a-z]*)\b|\b(?:rd|rmdir)\s+\/s\b|\bremove-item\b[^\n]*-recurse\b|\bdel\b[^\n]*\/s\b)/i
+/** 单段直接删除动词：嵌套解释器与复合命令不在此列，仍走原审批链。 */
+const DIRECT_DELETE_VERB =
+  /^\s*(?:rm|rmdir|rd|del|erase|remove-item|ri|unlink|shred)(?:\.exe|\.cmd|\.bat)?(?:\s|$)/i
 
 function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext): SafetyVerdict {
   const cmd = command.trim()
@@ -253,8 +247,7 @@ function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext)
 
   const baseDir = cwd || ctx.workingDirectory
 
-  // cmd 语义兜底：`;` 不是分隔符；工作区根/上级目录/多个递归目标
-  // 即使「完全信任」也不能自动放行。
+  // cmd 语义兜底：`;` 不是分隔符；仅整目录、上级目录与系统目录受限。
   const roots = Array.from(
     new Set([ctx.workingDirectory, baseDir].filter((value): value is string => Boolean(value)))
   )
@@ -267,31 +260,37 @@ function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext)
     }
   }
 
-  // 递归删除工作区外的绝对路径：即使「完全信任」也必须确认。
-  // 根目录/整盘删除已在上面的硬红线里永久拒绝，这里兜住 C:\Users 这类系统目录。
-  if (RECURSIVE_DELETE.test(cmd)) {
-    const targets = cmd.match(/[a-z]:[\\/][^\s"';&|]*/gi) ?? []
-    const outside = targets.some(
-      (target) => !ctx.workingDirectory || !isPathInsideResolved(ctx.workingDirectory, target)
-    )
-    if (outside) {
-      return hard('system', '【Freebuff 安全护栏】检测到递归删除工作区外的绝对路径，可能破坏系统目录，必须人工确认。')
+  // 工作区根/上级/整盘/系统已在上面拦掉；删除文件与子目录由 Agent 自主决定。
+  // 到这里的单段直接删除（单文件/子目录）不再走白名单，按自治等级放行，由模型决定。
+  if (DIRECT_DELETE_VERB.test(cmd)) {
+    const deleteAnalysis = analyzeCmdCommand(cmd)
+    if (
+      deleteAnalysis.destructive &&
+      !deleteAnalysis.unanalyzable &&
+      deleteAnalysis.segments.length === 1 &&
+      deleteAnalysis.targets.length > 0 &&
+      ctx.workingDirectory &&
+      baseDir
+    ) {
+      const allInside = deleteAnalysis.targets.every((raw) => {
+        const target = raw.trim()
+        if (!target) return true
+        const resolved = isAbsolute(target) ? resolve(target) : resolve(baseDir, target)
+        return isPathInsideResolved(ctx.workingDirectory as string, resolved)
+      })
+      if (allInside) {
+        if (ctx.autonomy === 'strict') {
+          return soft('workspace', '当前为严格模式：删除操作也需要确认。')
+        }
+        return auto('workspace', '工作区内的删除操作，由模型按自治等级决定执行。')
+      }
     }
   }
 
-  const inside =
-    !!baseDir &&
-    commandStaysInsideWorkspace(cmd, baseDir) &&
-    (!ctx.workingDirectory || isPathInsideResolved(ctx.workingDirectory, baseDir))
-
-  if (!inside) {
-    // 任意 shell 命令都不自动放行：完全信任只对白名单里的构建/查看命令生效。
-    return soft('workspace', '命令不在安全白名单内，需要你确认。', false)
-  }
   if (ctx.autonomy === 'strict') {
-    return soft('workspace', '当前为严格模式：工作区内命令也需要确认。')
+    return soft('workspace', '当前为严格模式：常规命令需要确认。')
   }
-  return auto('workspace', '工作区内的安全命令。')
+  return auto('workspace', '常规命令由 Agent 自主决定；仅整目录、数据库及磁盘破坏操作受限。')
 }
 
 /**
@@ -307,16 +306,7 @@ export function classifyToolCall(
 ): SafetyVerdict {
   if (READ_ONLY_TOOLS.has(toolName)) return auto('read', '只读操作。')
 
-  // 若 C-Core 桥接可用，优先交由 C-Core 底层做安全红线快速审查
-  if (
-    cCoreBridge.isAvailable() &&
-    ['read_file', 'write_file', 'patch_file', 'list_directory', 'run_command'].includes(toolName)
-  ) {
-    const cVerdict = cCoreBridge.classifyToolCallSync(toolName, input, ctx)
-    if (cVerdict && (cVerdict.tier === 'blocked' || cVerdict.tier === 'hard')) {
-      return cVerdict
-    }
-  }
+  // 运行时先经 C RPC；这里保留 TS 兜底与硬红线复核，只收紧不放宽。
 
   const record = (input ?? {}) as Record<string, unknown>
 
@@ -335,25 +325,17 @@ export function classifyToolCall(
     return commandVerdict(command, cwd, ctx)
   }
 
-  // 外部 CLI / MCP / 键鼠控制：能力边界由外部进程决定，永不自动放行。
-  if (toolName.startsWith('mcp__') || /^(?:qoder|codex|claude)_ask$/.test(toolName)) {
-    return soft('external', '将调用外部进程或服务，能力由其自身决定，需要你确认。', false)
-  }
-  if (toolName.startsWith('computer_') || toolName.startsWith('desktop_')) {
-    return soft('external', '将直接操控本机鼠标键盘，需要你确认。', false)
-  }
-
-  return soft('system', '未知工具，按需要确认处理。')
+  // 外部 CLI / MCP / 键鼠控制按用户授权由 Agent 自主决定；严格模式仍需确认。
+  if (ctx.autonomy === 'strict') return soft('system', '当前为严格模式：此工具需要确认。')
+  return auto('system', '常规工具由 Agent 自主决定。')
 }
 
 /** 该判定是否允许在本轮直接执行，不再弹确认。 */
 export function isAutoAllowed(verdict: SafetyVerdict, autonomy: AutonomyLevel, command?: string): boolean {
+  void command
   if (verdict.tier === 'blocked' || verdict.tier === 'hard') return false
-  // 对标 Claude Desktop 删除永不免审批：即使判定是 auto，带删除动词一律落回确认，做纵深兜底。
-  if (command && /\b(?:rm|rmdir|rd|del|erase|remove-item|ri|unlink|shred)\b/i.test(command)) return false
+  // 非整目录删除不再一律拦截：工作区根/上级/整盘/系统等整目录写法已在上游判 blocked/hard，
+  // 到这里的 auto/soft 按自治等级放行，由模型决定。
   if (verdict.tier === 'auto') return true
-  if (!verdict.autoApprovable) return false
-  if (autonomy === 'trusted') return true
-  if (autonomy === 'balanced' && verdict.category === 'workspace') return true
-  return false
+  return autonomy !== 'strict'
 }

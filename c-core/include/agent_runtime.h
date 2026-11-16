@@ -36,7 +36,7 @@ typedef struct {
     int max_steps;
     int current_step;
     bool is_finished;
-    char finish_reason[128];
+    char finish_reason[512];
     
     LoopGuard loop_guard;
     StreamProcessor stream_processor;
@@ -56,6 +56,7 @@ bool agent_session_add_message(AgentSession *session, MessageRole role, const ch
 
 /* Execute one tool step with safety approval verification and loop checking */
 bool agent_session_execute_tool(AgentSession *session, const char *tool_name, const char *path_arg, const char *extra_arg, ToolResult *out_result);
+bool agent_session_execute_tool_ex(AgentSession *session, const char *tool_name, const char *path_arg, const char *extra_arg, const char *third_arg, ToolResult *out_result);
 
 #ifdef __cplusplus
 }

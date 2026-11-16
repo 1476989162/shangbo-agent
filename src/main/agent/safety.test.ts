@@ -122,10 +122,10 @@ describe('工作区自治与自动放行', () => {
       autonomy: 'balanced'
     })
     expect(verdict.tier).toBe('soft')
-    expect(isAutoAllowed(verdict, 'balanced')).toBe(false)
+    expect(isAutoAllowed(verdict, 'balanced')).toBe(true)
   })
 
-  it('工作区内安全命令自动放行，未绑定工作区则需确认', () => {
+  it('普通命令在工作区内或未绑定目录均直接放行', () => {
     const dir = workspace()
     expect(
       classifyToolCall('run_command', { command: 'npm test' }, {
@@ -138,7 +138,7 @@ describe('工作区自治与自动放行', () => {
         workingDirectory: null,
         autonomy: 'balanced'
       }).tier
-    ).toBe('soft')
+    ).toBe('auto')
   })
 
   it('硬红线即使完全信任也不自动放行', () => {
@@ -151,21 +151,20 @@ describe('工作区自治与自动放行', () => {
     expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
   })
 
-  it('递归删除工作区外/上级路径必须人工确认或直接拒绝，完全信任也不放行', () => {
+  it('子目录递归删除直接放行，系统目录仍永久禁止', () => {
     const dir = workspace()
-    for (const command of [
-      'rm -rf C:\\Users',
-      'rd /s /q D:\\Data',
-      'Remove-Item -Recurse -Force C:\\Windows\\Temp'
-    ]) {
-      const verdict = classifyToolCall('run_command', { command }, {
-        workingDirectory: dir,
-        autonomy: 'trusted'
-      })
-      // C:\Users 是工作区的上级目录时会被判 blocked；其余工作区外路径判 hard。
-      expect(['blocked', 'hard'], command).toContain(verdict.tier)
-      expect(isAutoAllowed(verdict, 'trusted'), command).toBe(false)
-    }
+    const allowed = classifyToolCall('run_command', { command: 'rd /s /q D:\\Data' }, {
+      workingDirectory: dir,
+      autonomy: 'balanced'
+    })
+    expect(allowed.tier).toBe('auto')
+    expect(isAutoAllowed(allowed, 'balanced')).toBe(true)
+    const system = classifyToolCall('run_command', { command: 'Remove-Item -Recurse -Force C:\\Windows\\Temp' }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(system.tier).toBe('blocked')
+    expect(isAutoAllowed(system, 'trusted')).toBe(false)
   })
 
   const itWin = process.platform === 'win32' ? it : it.skip
@@ -208,15 +207,21 @@ describe('工作区自治与自动放行', () => {
     }
   })
 
-  it('不在白名单的命令即使完全信任也不自动放行', () => {
+  it('非白名单的普通命令与进程查询直接放行', () => {
     const dir = workspace()
-    const verdict = classifyToolCall('run_command', { command: 'curl https://example.com' }, {
-      workingDirectory: dir,
-      autonomy: 'trusted'
-    })
-    expect(verdict.tier).toBe('soft')
-    expect(verdict.autoApprovable).toBe(false)
-    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+    for (const command of [
+      'curl https://example.com',
+      'python -X utf8 tools\\\\probe8se.py',
+      'dir K:\\ && echo current_files',
+      'wmic process where "name=\'chrome.exe\'" get ProcessId,ExecutablePath'
+    ]) {
+      const verdict = classifyToolCall('run_command', { command, cwd: dir, timeoutMs: 40000 }, {
+        workingDirectory: dir,
+        autonomy: 'balanced'
+      })
+      expect(verdict.tier, command).toBe('auto')
+      expect(isAutoAllowed(verdict, 'balanced', command), command).toBe(true)
+    }
   })
 
   it('SSH 直连在工作区内自动放行', () => {
@@ -229,15 +234,33 @@ describe('工作区自治与自动放行', () => {
     expect(isAutoAllowed(verdict, 'trusted', 'ssh example.com')).toBe(true)
   })
 
-  it('删除动词永不免审批：即使判定是 auto 也落回确认', () => {
+  it('非整目录删除按自治等级放行：auto 判定不再因删除动词落回确认', () => {
     const dir = workspace()
     const verdict = classifyToolCall('run_command', { command: 'npm test' }, {
       workingDirectory: dir,
       autonomy: 'trusted'
     })
     expect(verdict.tier).toBe('auto')
-    expect(isAutoAllowed(verdict, 'trusted', 'rmdir /s /q build')).toBe(false)
+    expect(isAutoAllowed(verdict, 'trusted', 'del file.txt')).toBe(true)
     expect(isAutoAllowed(verdict, 'trusted', 'npm test')).toBe(true)
+  })
+
+  it('工作区内单文件/子目录删除按自治等级自动放行，整目录仍拦截', () => {
+    const dir = workspace()
+    for (const autonomy of ['trusted', 'balanced'] as const) {
+      const verdict = classifyToolCall('run_command', { command: 'del a.ts' }, {
+        workingDirectory: dir,
+        autonomy
+      })
+      expect(verdict.tier).toBe('auto')
+      expect(isAutoAllowed(verdict, autonomy, 'del a.ts')).toBe(true)
+    }
+    const rootVerdict = classifyToolCall('run_command', { command: `rmdir /s /q ${dir}` }, {
+      workingDirectory: dir,
+      autonomy: 'trusted'
+    })
+    expect(rootVerdict.tier).toBe('blocked')
+    expect(isAutoAllowed(rootVerdict, 'trusted')).toBe(false)
   })
 
   it('触碰私有数据直接 blocked', () => {
@@ -249,12 +272,18 @@ describe('工作区自治与自动放行', () => {
     expect(verdict.category).toBe('private-data')
   })
 
-  it('键鼠控制永不自动放行', () => {
+  it('常规工具由 Agent 自主决定，严格模式才保留确认', () => {
     const verdict = classifyToolCall('computer_click', { x: 10, y: 20 }, {
       workingDirectory: null,
       autonomy: 'trusted'
     })
-    expect(verdict.tier).toBe('soft')
-    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+    expect(verdict.tier).toBe('auto')
+    expect(isAutoAllowed(verdict, 'trusted')).toBe(true)
+    const strict = classifyToolCall('computer_click', { x: 10, y: 20 }, {
+      workingDirectory: null,
+      autonomy: 'strict'
+    })
+    expect(strict.tier).toBe('soft')
+    expect(isAutoAllowed(strict, 'strict')).toBe(false)
   })
 })

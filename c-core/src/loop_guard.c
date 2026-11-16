@@ -3,10 +3,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void trim_incomplete_utf8_lg(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    if (len == 0) return;
+    size_t k = len;
+    while (k > 0 && len - k < 4 && ((unsigned char)s[k - 1] & 0xC0) == 0x80) {
+        k--;
+    }
+    if (k > 0 && ((unsigned char)s[k - 1] & 0x80) != 0) {
+        unsigned char lead = (unsigned char)s[k - 1];
+        size_t needed = 0;
+        if (lead >= 0xC2 && lead <= 0xDF) needed = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF) needed = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4) needed = 4;
+        if (needed == 0 || (len - (k - 1)) < needed) {
+            s[k - 1] = '\0';
+        }
+    }
+}
+
 void loop_guard_init(LoopGuard *lg, int limit) {
     if (!lg) return;
     memset(lg, 0, sizeof(LoopGuard));
-    lg->limit = (limit > 0) ? limit : 3;
+    lg->limit = (limit > 0) ? (limit <= LOOP_GUARD_HISTORY_CAPACITY ? limit : LOOP_GUARD_HISTORY_CAPACITY) : 3;
 }
 
 void loop_guard_record(LoopGuard *lg, const char *tool_name, const char *args_snippet, bool is_error) {
@@ -28,6 +48,7 @@ void loop_guard_record(LoopGuard *lg, const char *tool_name, const char *args_sn
     } else {
         snprintf(rec->signature, sizeof(rec->signature), "unknown");
     }
+    trim_incomplete_utf8_lg(rec->signature);
 }
 
 const char *loop_guard_check_stuck(const LoopGuard *lg) {
@@ -46,11 +67,12 @@ const char *loop_guard_check_stuck(const LoopGuard *lg) {
         }
     }
     if (all_errors) {
-        static char err_msg[256];
-        snprintf(err_msg, sizeof(err_msg),
+        LoopGuard *mut_lg = (LoopGuard *)lg;
+        snprintf(mut_lg->last_reason, sizeof(mut_lg->last_reason),
                  "工具已连续失败 %d 次（%s），先停下来请人看一眼，不要继续烧 Token。",
                  lg->limit, lg->history[lg->count - 1].signature);
-        return err_msg;
+        trim_incomplete_utf8_lg(mut_lg->last_reason);
+        return mut_lg->last_reason;
     }
 
     /* 2. Check if all recent calls have the same signature */
@@ -63,11 +85,12 @@ const char *loop_guard_check_stuck(const LoopGuard *lg) {
         }
     }
     if (all_identical) {
-        static char loop_msg[256];
-        snprintf(loop_msg, sizeof(loop_msg),
+        LoopGuard *mut_lg = (LoopGuard *)lg;
+        snprintf(mut_lg->last_reason, sizeof(mut_lg->last_reason),
                  "同一个工具调用已重复 %d 次（%s），疑似原地打转，先停下来。",
                  lg->limit, first_sig);
-        return loop_msg;
+        trim_incomplete_utf8_lg(mut_lg->last_reason);
+        return mut_lg->last_reason;
     }
 
     return NULL;

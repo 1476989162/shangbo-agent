@@ -224,20 +224,18 @@ const capabilities = [
   <main class="chat" :class="{ 'code-mode': store.viewMode === 'code' }">
     <!-- 顶部导航栏 -->
     <header class="chat-header">
+      <!-- 必须位于拖拽区之外：Windows 原生标题栏会吞掉拖拽父容器内的点击。 -->
+      <button
+        class="btn-icon expand-sidebar-btn"
+        title="折叠或展开侧边栏"
+        @click="store.sidebarCollapsed = !store.sidebarCollapsed"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.3" />
+          <line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      </button>
       <div class="header-left">
-        <!-- 侧边栏展开按钮（折叠时显示） -->
-        <button
-          v-if="store.sidebarCollapsed"
-          class="btn-icon"
-          title="展开侧边栏"
-          @click="store.sidebarCollapsed = false"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.3" />
-            <line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" stroke-width="1.3" />
-          </svg>
-        </button>
-
         <div class="breadcrumb">
           <span v-if="store.activeConversation?.workingDir" class="dir-badge">
             📁 {{ folderLabel }}
@@ -302,12 +300,12 @@ const capabilities = [
         <section v-if="path.length === 0" class="dashboard-welcome">
           <div class="welcome-hero">
             <div class="hero-halo" aria-hidden="true" />
-            <span class="taiji-ring hero-mark">
+            <span class="hero-mark brand-mark">
               <img :src="logoImg" class="welcome-brand-logo" alt="尚搏" />
             </span>
             <div class="hero-copy">
               <p class="hero-eyebrow">SHANGBO AGENT · 数智太极</p>
-              <h2 class="hero-title brand-serif">欢迎回来，{{ store.userName }}</h2>
+              <h2 class="hero-title">欢迎回来，{{ store.userName }}</h2>
               <p class="hero-sub">
                 说人话就行。我会自己判断该聊、该查还是该动手；不确定的地方按最合理的默认值继续，
                 最后把假设交代清楚。
@@ -574,7 +572,7 @@ const capabilities = [
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--gold-2) 7%, var(--bg-elevated)), var(--bg-elevated) 46%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-2) 6%, var(--bg-elevated)), var(--bg-elevated) 46%),
     var(--bg-elevated);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
@@ -587,15 +585,19 @@ const capabilities = [
   width: 320px;
   height: 320px;
   border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--gold-2) 16%, transparent), transparent 66%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent-2) 13%, transparent), transparent 66%);
   pointer-events: none;
 }
 
 .hero-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 58px;
   height: 58px;
   flex: none;
   margin-top: 2px;
+  box-shadow: 0 0 0 1px var(--border-strong);
 }
 
 .hero-copy {
@@ -605,6 +607,7 @@ const capabilities = [
 
 .hero-eyebrow {
   margin: 0 0 6px;
+  font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.22em;
   color: var(--accent-strong);
@@ -640,7 +643,7 @@ const capabilities = [
   border-radius: var(--radius-full);
   color: var(--accent-strong);
   background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--gold-2) 26%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 26%, transparent);
 }
 
 .capability-grid {
@@ -660,7 +663,7 @@ const capabilities = [
 }
 
 .capability-card:hover {
-  border-color: color-mix(in srgb, var(--gold-2) 38%, var(--border));
+  border-color: color-mix(in srgb, var(--accent-2) 38%, var(--border));
   transform: translateY(-1px);
 }
 
@@ -758,8 +761,8 @@ const capabilities = [
 }
 
 .session-status-badge.needs_input {
-  background: #fff4e5;
-  color: #c05621;
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .session-status-badge.in_progress {
@@ -838,7 +841,7 @@ const capabilities = [
 
 .suggestion-chip:hover {
   background: var(--surface-hover);
-  border-color: color-mix(in srgb, var(--gold-2) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--accent-2) 42%, var(--border));
 }
 
 .chip-spark {
@@ -878,8 +881,8 @@ const capabilities = [
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--gold-2);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold-2) 16%, transparent);
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 16%, transparent);
 }
 
 .header-mode-sep {

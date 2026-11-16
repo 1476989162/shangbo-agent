@@ -62,7 +62,7 @@ bool agent_session_add_message(AgentSession *session, MessageRole role, const ch
     return true;
 }
 
-bool agent_session_execute_tool(AgentSession *session, const char *tool_name, const char *path_arg, const char *extra_arg, ToolResult *out_result) {
+bool agent_session_execute_tool_ex(AgentSession *session, const char *tool_name, const char *path_arg, const char *extra_arg, const char *third_arg, ToolResult *out_result) {
     if (!session || !tool_name || !out_result) return false;
 
     memset(out_result, 0, sizeof(ToolResult));
@@ -106,13 +106,31 @@ bool agent_session_execute_tool(AgentSession *session, const char *tool_name, co
 
     /* 4. Dispatch tool */
     if (strcmp(tool_name, "read_file") == 0) {
-        int start = extra_arg ? atoi(extra_arg) : 0;
-        *out_result = tool_read_file(path_arg, start, 0, session->workspace);
+        int start = (extra_arg && *extra_arg) ? atoi(extra_arg) : 0;
+        int end = (third_arg && *third_arg) ? atoi(third_arg) : (start > 0 ? -1 : 0);
+        *out_result = tool_read_file(path_arg, start, end, session->workspace);
     } else if (strcmp(tool_name, "write_file") == 0) {
         *out_result = tool_write_file(path_arg, extra_arg, true, session->workspace);
     } else if (strcmp(tool_name, "patch_file") == 0) {
-        /* In patch_file, path_arg is path, extra_arg is target; replacement can follow or default */
-        *out_result = tool_patch_file(path_arg, extra_arg, "", session->workspace);
+        if (third_arg != NULL) {
+            *out_result = tool_patch_file(path_arg, extra_arg ? extra_arg : "", third_arg, session->workspace);
+        } else if (extra_arg && strstr(extra_arg, "=>") != NULL) {
+            const char *delim = strstr(extra_arg, "=>");
+            size_t tlen = (size_t)(delim - extra_arg);
+            char *target_buf = (char *)malloc(tlen + 1);
+            if (target_buf) {
+                memcpy(target_buf, extra_arg, tlen);
+                target_buf[tlen] = '\0';
+                *out_result = tool_patch_file(path_arg, target_buf, delim + 2, session->workspace);
+                free(target_buf);
+            } else {
+                snprintf(out_result->error_message, sizeof(out_result->error_message), "Out of memory.");
+                out_result->success = false;
+            }
+        } else {
+            snprintf(out_result->error_message, sizeof(out_result->error_message), "Replacement content is required for patch_file.");
+            out_result->success = false;
+        }
     } else if (strcmp(tool_name, "list_directory") == 0) {
         *out_result = tool_list_directory(path_arg, 2, session->workspace);
     } else if (strcmp(tool_name, "search_files") == 0) {
@@ -135,4 +153,8 @@ bool agent_session_execute_tool(AgentSession *session, const char *tool_name, co
                               tool_name, call_id, !out_result->success);
 
     return out_result->success;
+}
+
+bool agent_session_execute_tool(AgentSession *session, const char *tool_name, const char *path_arg, const char *extra_arg, ToolResult *out_result) {
+    return agent_session_execute_tool_ex(session, tool_name, path_arg, extra_arg, NULL, out_result);
 }

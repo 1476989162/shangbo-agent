@@ -13,7 +13,7 @@ if not exist bin mkdir bin
 if not exist obj mkdir obj
 
 set CFLAGS=/nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Iinclude /utf-8
-set SRCS=src\safety.c src\command_guard.c src\injection_detector.c src\loop_guard.c src\stream_processor.c src\tools.c src\agent_runtime.c src\json_rpc.c
+set SRCS=src\safety.c src\command_guard.c src\injection_detector.c src\loop_guard.c src\stream_processor.c src\tools.c src\agent_runtime.c src\json_rpc.c src\native_process.c
 
 echo [Shangbo Agent C-Core] Compiling shangbo_agent CLI...
 cl %CFLAGS% /Fe:bin\shangbo_agent.exe src\main.c %SRCS% /Fo:obj\

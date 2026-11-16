@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 
-#define LOOP_GUARD_HISTORY_CAPACITY 64
-#define LOOP_GUARD_SIGNATURE_MAX 256
+#define LOOP_GUARD_HISTORY_CAPACITY 100
+#define LOOP_GUARD_SIGNATURE_MAX 2048
+#define LOOP_GUARD_REASON_MAX 2560
 
 typedef struct {
     char signature[LOOP_GUARD_SIGNATURE_MAX];
@@ -20,6 +21,7 @@ typedef struct {
     ToolCallRecord history[LOOP_GUARD_HISTORY_CAPACITY];
     int count;
     int limit;
+    char last_reason[LOOP_GUARD_REASON_MAX];
 } LoopGuard;
 
 void loop_guard_init(LoopGuard *lg, int limit);

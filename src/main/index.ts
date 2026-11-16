@@ -49,6 +49,11 @@ if (!gotLock) {
     ensureDefaultProviders()
 
     registerIpcHandlers()
+    try {
+      cCoreBridge.ensureDaemon()
+    } catch (error) {
+      log.warn('[app] C-Core 守护进程预热失败（不影响主流程）', error)
+    }
     handleImageProtocol()
     createMainWindow()
     createTray()

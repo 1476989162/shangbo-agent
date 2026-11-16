@@ -120,7 +120,7 @@ onBeforeUnmount(() => {
   height: 100vh;
   overflow: hidden;
   position: relative;
-  transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: grid-template-columns var(--dur-med, 0.2s) var(--ease-spring, cubic-bezier(0.16, 1, 0.3, 1)); /* P2 与令牌对齐 */
 }
 
 .app.is-resizing {
@@ -161,6 +161,6 @@ onBeforeUnmount(() => {
 
 .viewer-resize-handle:hover,
 .app.is-resizing .viewer-resize-handle {
-  background-color: var(--accent, #b45309);
+  background-color: var(--accent, #22d3ee);
 }
 </style>

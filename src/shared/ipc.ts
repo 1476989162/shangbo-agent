@@ -42,6 +42,7 @@ export const IPC = {
   windowHide: 'window:hide',
   windowQuit: 'window:quit',
   browserClearData: 'browser:clearData',
+  browserChromeStatus: 'browser:chromeStatus',
   appToggleDevTools: 'app:toggleDevTools',
   appOpenPath: 'app:openPath',
   appExecCommand: 'app:execCommand',

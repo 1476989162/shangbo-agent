@@ -1,5 +1,4 @@
 import { auditCommandSecurity, commandTouchesPrivateData } from '../tools'
-import { cCoreBridge } from '../agent/cCoreBridge'
 
 /**
  * 工作台终端（右侧文件查看器里的命令行）的护栏。
@@ -20,16 +19,6 @@ export interface TerminalGuardResult {
 }
 
 export function checkTerminalCommand(command: string, cwd?: string): TerminalGuardResult {
-  if (cCoreBridge.isAvailable()) {
-    const cVerdict = cCoreBridge.auditHardLinesSync(command)
-    if (cVerdict && cVerdict.tier === 'blocked') {
-      return {
-        blocked: true,
-        reason: cVerdict.reason ?? '【C内核安全护栏拦截】检测到高危系统级操作，已拒绝执行。'
-      }
-    }
-  }
-
   if (commandTouchesPrivateData(command, cwd)) {
     return {
       blocked: true,

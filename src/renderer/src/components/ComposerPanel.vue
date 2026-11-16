@@ -1198,14 +1198,14 @@ defineExpose({ editMessage, setDraft })
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  box-shadow: 0 6px 22px rgba(45, 36, 22, 0.07);
+  box-shadow: var(--shadow-md);
   padding: 13px 15px 11px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .composer-card:focus-within {
-  border-color: color-mix(in srgb, var(--gold-2) 68%, var(--border));
-  box-shadow: var(--gold-glow), 0 8px 26px rgba(45, 36, 22, 0.08);
+  border-color: color-mix(in srgb, var(--accent-2) 68%, var(--border));
+  box-shadow: var(--accent-glow), var(--shadow-md);
 }
 
 /* 生成中的排队提示 */
@@ -1367,6 +1367,13 @@ defineExpose({ editMessage, setDraft })
   margin-top: 4px;
 }
 
+.perm-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
 .perm-btn {
   display: inline-flex;
   align-items: center;
@@ -1376,6 +1383,8 @@ defineExpose({ editMessage, setDraft })
   padding: 3px 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-full);
+  white-space: nowrap;
+  flex: none;
   transition: all 0.12s ease;
 }
 
@@ -1427,6 +1436,9 @@ defineExpose({ editMessage, setDraft })
   align-items: center;
   gap: 8px;
   position: relative;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
 }
 
 .model-capsule {
@@ -1440,6 +1452,8 @@ defineExpose({ editMessage, setDraft })
   font-size: 11.5px;
   color: var(--text);
   cursor: pointer;
+  min-width: 0;
+  flex: 0 1 auto;
   transition: all 0.12s ease;
 }
 
@@ -1468,6 +1482,8 @@ defineExpose({ editMessage, setDraft })
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
+  flex: none;
   transition: all 0.15s ease;
 }
 
@@ -1475,23 +1491,25 @@ defineExpose({ editMessage, setDraft })
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #10b981;
+  background: var(--success);
 }
 
 .context-badge:hover,
 .context-badge.active {
   background: var(--primary);
-  color: #ffffff;
+  color: var(--accent-contrast);
   border-color: var(--primary);
 }
 
 .context-badge.active .context-mini-bar {
-  background: #ffffff;
+  background: var(--accent-contrast);
 }
 
 .extra-label {
   color: var(--text-subtle);
   font-size: 10.5px;
+  white-space: nowrap;
+  flex: none;
 }
 
 .gateway-indicator {
@@ -1499,6 +1517,7 @@ defineExpose({ editMessage, setDraft })
   height: 6px;
   border-radius: var(--radius-full);
   background: var(--text-subtle);
+  flex: none;
 }
 
 .gateway-indicator.ready {
@@ -1510,6 +1529,7 @@ defineExpose({ editMessage, setDraft })
    ======================================================== */
 .effort-control-container {
   position: relative;
+  flex: none;
 }
 
 .effort-capsule {
@@ -1909,14 +1929,14 @@ defineExpose({ editMessage, setDraft })
 }
 
 .send-btn {
-  background: var(--gold-gradient);
+  background: var(--accent-gradient);
   color: var(--accent-contrast);
-  box-shadow: 0 1px 2px rgba(90, 64, 16, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .send-btn:hover:not(:disabled) {
-  filter: brightness(1.05);
-  box-shadow: 0 4px 14px rgba(138, 101, 32, 0.28);
+  filter: brightness(1.06);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent-2) 32%, transparent);
 }
 
 .send-btn:disabled {
@@ -1975,8 +1995,13 @@ defineExpose({ editMessage, setDraft })
   width: 22px;
   height: 22px;
   object-fit: contain;
-  border-radius: var(--radius-full);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold-2) 30%, transparent);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 1px var(--border-strong);
+  filter: grayscale(1) brightness(0.55);
+}
+
+:root[data-theme='dark'] .mascot-brand-img {
+  filter: grayscale(1) brightness(1.7);
 }
 /* ========================================================
    上下文窗口浮层 (对标图 2 样式)
@@ -2086,7 +2111,7 @@ defineExpose({ editMessage, setDraft })
   width: 100%;
   border-radius: 4px;
   overflow: hidden;
-  background: #f1f5f9;
+  background: var(--surface);
   margin-bottom: 14px;
   gap: 1px;
 }
@@ -2097,27 +2122,27 @@ defineExpose({ editMessage, setDraft })
   transition: width 0.2s ease;
 }
 
-/* 颜色对应图 2 (media_1790326705999.png) */
+/* 上下文分布分类色：冷色多 hue，色相+明度双重可区分 */
 .seg-mcp {
-  background-color: #8a6520;
+  background-color: #0ea5e9;
 }
 .seg-system-tools {
-  background-color: #b58133;
+  background-color: #6366f1;
 }
 .seg-skills {
-  background-color: #2e7a5c;
+  background-color: #14b8a6;
 }
 .seg-prompt {
-  background-color: #c9a227;
+  background-color: #f59e0b;
 }
 .seg-memory {
-  background-color: #7a5c3e;
+  background-color: #ec4899;
 }
 .seg-messages {
-  background-color: #15803d;
+  background-color: #22c55e;
 }
 .seg-free {
-  background-color: #e2e8f0;
+  background-color: var(--border-strong);
 }
 
 /* 明细表格 */

@@ -7,7 +7,9 @@
  */
 import { execSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
+import { assertReleasePreflight } from './release-preflight.mjs'
 import { join } from 'node:path'
 
 function sh(cmd, opts = {}) {
@@ -30,6 +32,13 @@ if (argVersion && argVersion !== pkg.version) {
 }
 
 console.log(`[release] 版本 v${version} 开始`)
+
+// 必须在构建和写产物之前完成：失败时不产生任何发布文件。
+try {
+  assertReleasePreflight(version)
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error))
+}
 
 // 1. 发布前校验
 sh('npm run typecheck')
@@ -60,6 +69,11 @@ const latest = readFileSync(join(outDir, 'latest.yml'), 'utf8')
 if (!latest.includes(`version: ${version}`) || !latest.includes(`path: ${exe}`)) {
   fail('latest.yml 版本/文件名与目标不一致')
 }
+const actualSha512 = createHash('sha512').update(readFileSync(join(outDir, exe))).digest('base64')
+const match = latest.match(/^sha512:\s*(\S+)$/m)
+if (!match || match[1] !== actualSha512) {
+  fail('latest.yml 的 SHA-512 与刚生成的安装包不一致，禁止发布')
+}
 
 // 5. 拷回 release/
 mkdirSync('release', { recursive: true })
@@ -69,46 +83,16 @@ copyFileSync(join(outDir, 'latest.yml'), join('release', 'latest.yml'))
 copyFileSync(join(outDir, 'latest.yml'), join('release', `latest-${version}.yml`))
 console.log('[release] 已拷回 release/')
 
-// 6. git 提交检查：工作区必须干净（构建产物/忽略目录除外）
-const status = execSync('git status --porcelain', { encoding: 'utf8' }).trim()
-const dirty = status
-  .split('\n')
-  .map((l) => l.trim())
-  .filter(Boolean)
-  // ?? 未跟踪：只看是否被 gitignore 忽略（release/、dist-mobile/、outputs/ 等构建/本地产物跳过）
-  // M 已跟踪：示例文档的行尾空格类改动也视为脏，必须先提交
-  .filter((l) => {
-    if (l.startsWith('??')) {
-      const p = l.slice(3).trim()
-      try {
-        execSync(`git check-ignore -q "${p}"`, { stdio: 'ignore' })
-        return false
-      } catch {
-        return true
-      }
-    }
-    return !l.includes('release/')
-  })
-if (dirty.length) {
-  console.log('[release] 工作区还有未提交改动（已忽略 release/）：\n' + dirty.join('\n'))
-  fail('先提交代码再打 tag，避免 tag 与代码错位')
-}
-
-// 7. 打 tag
+// 6. 打 tag（前置门禁已保证它不存在）
 const tag = `v${version}`
-const tagExists = spawnSync('git', ['rev-parse', tag], { stdio: 'ignore' }).status === 0
-if (!tagExists) {
-  sh(`git tag -a ${tag} -m "shangbo-agent v${version}"`)
-} else {
-  console.log(`[release] tag ${tag} 已存在，跳过建 tag`)
-}
+sh(`git tag -a ${tag} -m "shangbo-agent v${version}"`)
 sh(`git push origin ${tag}`)
 
 // 8. gh 发布（三件套一起传，缺 latest.yml 自动更新 404）
 const notesFile = existsSync(`outputs/release-${tag}.md`) ? `outputs/release-${tag}.md` : `CHANGELOG.md`
 const relExists = spawnSync('gh', ['release', 'view', tag], { stdio: 'ignore' }).status === 0
 if (relExists) {
-  console.log(`[release] Release ${tag} 已存在，跳过 create（需手动传资产）`)
+  fail(`Release ${tag} 已存在，禁止静默跳过资产上传；请递增版本或人工核验后另行处理。`)
 } else {
   sh(
     `gh release create ${tag} --title "尚搏 Agent v${version}" --notes-file ${notesFile} "release/${exe}" "release/${blockmap}" release/latest.yml`

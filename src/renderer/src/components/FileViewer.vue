@@ -678,7 +678,7 @@ onMounted(() => {
   height: var(--titlebar-height, 38px);
   padding: 0 6px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-card, #1c1d22);
+  background: var(--surface);
   flex: none;
 }
 .tabs-scroll-area {

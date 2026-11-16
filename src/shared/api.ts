@@ -97,6 +97,7 @@ export interface ShangboApi {
 
   browser: {
     clearData(): Promise<boolean>
+    chromeStatus(): Promise<{ connected: boolean }>
   }
 
   backup: {

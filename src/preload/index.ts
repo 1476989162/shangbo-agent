@@ -81,7 +81,8 @@ const api: ShangboApi = {
   },
 
   browser: {
-    clearData: () => ipcRenderer.invoke(IPC.browserClearData)
+    clearData: () => ipcRenderer.invoke(IPC.browserClearData),
+    chromeStatus: () => ipcRenderer.invoke(IPC.browserChromeStatus)
   },
 
   backup: {

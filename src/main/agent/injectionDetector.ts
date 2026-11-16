@@ -1,6 +1,5 @@
 import { streamWithFallback } from '../providers/gateway'
 import { resolveTarget } from './modelRuntime'
-import { cCoreBridge } from './cCoreBridge'
 
 /**
  * 注入内容分类器（对标 Claude Desktop 的外部内容扫描）。
@@ -46,14 +45,8 @@ const LOW_PATTERNS: RegExp[] = [
 
 const MAX_SCAN_CHARS = 4000
 
-export function scanInjectionRules(text: string): InjectionFinding {
+export function scanInjectionLocalRules(text: string): InjectionFinding {
   if (!text || !text.trim()) return { level: 'none', reason: '空内容。', via: 'rule' }
-
-  // 优先委托 C 语言原生内核进行注入扫描
-  if (cCoreBridge.isAvailable()) {
-    const cFinding = cCoreBridge.scanInjectionRulesSync(text)
-    if (cFinding) return cFinding
-  }
 
   const sample = text.slice(0, MAX_SCAN_CHARS)
   for (const pattern of HIGH_PATTERNS) {
@@ -67,6 +60,12 @@ export function scanInjectionRules(text: string): InjectionFinding {
     }
   }
   return { level: 'none', reason: '无注入特征。', via: 'rule' }
+}
+
+/** 默认主通道：常驻 C 异步 RPC；仅 C 故障时才回退本地 TS 规则。 */
+export async function scanInjectionRules(text: string): Promise<InjectionFinding> {
+  const { cCoreBridge } = await import('./cCoreBridge')
+  return cCoreBridge.scanInjectionRules(text)
 }
 
 export function parseInjectionLlmOutput(text: string): InjectionFinding {
@@ -122,7 +121,7 @@ export async function scanInjection(
   text: string,
   opts: { enableLlm: boolean; providerId?: string | null; signal: AbortSignal; stream?: StreamFn }
 ): Promise<InjectionFinding> {
-  const ruled = scanInjectionRules(text)
+  const ruled = await scanInjectionRules(text)
   if (!opts.enableLlm) return ruled
   if (ruled.level !== 'low') return ruled
   return confirmInjectionLlm(text, opts)

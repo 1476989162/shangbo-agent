@@ -497,7 +497,6 @@ async function load(): Promise<void> {
   await loadLessons()
   await loadPlugins()
   await loadCodeSettings()
-  void checkChromeDebuggingPort()
 }
 
 // Cowork 操作函数
@@ -939,8 +938,8 @@ const checkingChromePort = ref(false)
 async function checkChromeDebuggingPort(): Promise<void> {
   checkingChromePort.value = true
   try {
-    const res = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(1500) })
-    chromePortConnected.value = res.ok
+    const res = await window.shangbo.browser.chromeStatus()
+    chromePortConnected.value = res.connected
   } catch {
     chromePortConnected.value = false
   } finally {
@@ -3728,13 +3727,13 @@ async function toggleAutoScreenshot(): Promise<void> {
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 10px;
-  background: var(--surface-variant, rgba(0, 0, 0, 0.06));
+  background: var(--surface);
   color: var(--text-muted);
 }
 
 .nav-tab-btn.active .nav-tab-count {
-  background: var(--brand-subtle, rgba(59, 130, 246, 0.12));
-  color: var(--brand, #3b82f6);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* 右侧主体 */
@@ -3960,7 +3959,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 .seg-btn.active {
   background: var(--bg-elevated);
   color: var(--accent-strong);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), inset 0 0 0 1px color-mix(in srgb, var(--gold-2) 20%, transparent);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 24%, transparent);
 }
 
 .text-seg {
@@ -4073,8 +4072,12 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .tag-responses {
-  background: #eef2ff;
+  background: rgba(99, 102, 241, 0.14);
   color: #4338ca;
+}
+
+:root[data-theme='dark'] .tag-responses {
+  color: #a5b4fc;
 }
 
 .editor-card {
@@ -4329,8 +4332,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .btn-add-plugin {
-  background: #111111;
-  color: #ffffff;
+  background: var(--accent-gradient);
+  color: var(--accent-contrast);
   border: none;
 }
 
@@ -4355,7 +4358,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .filter-tab-pill.active {
   background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-contrast);
   border-color: var(--accent);
 }
 
@@ -4916,8 +4919,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .server-warn-pill {
   font-size: 10px;
-  background: rgba(227, 98, 9, 0.12);
-  color: #e36209;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
   padding: 1px 6px;
   border-radius: 4px;
 }
@@ -5518,7 +5521,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 /* ---------------- 应用更新 ---------------- */
-.update-warn { padding: 10px 12px; border: 1px solid #d97706; background: rgba(217,119,6,0.1); border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.update-warn { padding: 10px 12px; border: 1px solid var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); border-radius: 8px; font-size: 12px; line-height: 1.6; }
 .update-path { font-size: 11.5px; margin-top: 8px; }
 .update-head {
   display: flex;
@@ -5615,7 +5618,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .lessons-hero .wish-kicker {
-  color: #047857;
+  color: var(--success);
 }
 
 .wish-hero h2 {
@@ -5644,7 +5647,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .lessons-hero .wish-hero-mark {
-  color: #10b981;
+  color: var(--success);
 }
 
 .wish-config-card {
@@ -5711,8 +5714,8 @@ async function toggleAutoScreenshot(): Promise<void> {
   margin: -4px 0 0;
   padding: 8px 10px;
   border-radius: 7px;
-  background: rgba(245, 158, 11, 0.09);
-  color: #92400e;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
   font-size: 11.5px;
 }
 
@@ -5812,9 +5815,9 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .wish-status-pill.status-success {
-  color: #047857;
-  background: rgba(16, 185, 129, 0.1);
-  border-color: rgba(16, 185, 129, 0.25);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .wish-status-pill.status-failed {
@@ -5903,7 +5906,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .wish-run-dot.run-success {
-  background: #10b981;
+  background: var(--success);
 }
 
 .wish-run-dot.run-failed {
@@ -5912,7 +5915,7 @@ async function toggleAutoScreenshot(): Promise<void> {
 
 .wish-run-dot.run-verifying,
 .wish-run-dot.run-running {
-  background: #f59e0b;
+  background: var(--warning);
 }
 
 .lesson-card {
@@ -5940,8 +5943,8 @@ async function toggleAutoScreenshot(): Promise<void> {
 }
 
 .lesson-scope {
-  color: #047857;
-  background: rgba(16, 185, 129, 0.1);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
 }
 
 .lesson-confidence {

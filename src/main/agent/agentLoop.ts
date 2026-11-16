@@ -491,13 +491,13 @@ export async function runAgentLoop(
     const keepRecentToolResults = agentMode === 'wish' ? 3 : 6
     // 本轮已执行的工具序列，只用于打转检测，不回传模型。
     const toolHistory: ToolRecord[] = []
-    const noteToolBatch = (
+    const noteToolBatch = async (
       items: { call: { name: string; input: unknown }; result: { isError: boolean } }[]
-    ): string | null => {
+    ): Promise<string | null> => {
       for (const item of items) {
         toolHistory.push({ sig: callSignature(item.call.name, item.call.input), isError: item.result.isError })
       }
-      return detectStuck(toolHistory, effectiveStuckLimit)
+      return await detectStuck(toolHistory, effectiveStuckLimit)
     }
     let stoppedByGuard = false
     // 本轮发给模型的工具清单：本地读/写 + spawn + 已启用 MCP 服务的远端工具。
@@ -886,7 +886,7 @@ export async function runAgentLoop(
         }
 
         // 保险丝：打转就地暂停，不再浪费后面的步数。
-        const stuckReason = noteToolBatch(settled)
+        const stuckReason = await noteToolBatch(settled)
         if (stuckReason) {
           stoppedByGuard = true
           const guardNotice = `\n\n_（${stuckReason}本轮已暂停，排除问题后回复「继续」。）_`
@@ -992,7 +992,7 @@ export async function runAgentLoop(
             emit({ type: 'tool_result', runId, conversationId: conversation.id, messageId: assistantMessage.id, toolUseId: call.id, content: result.content, isError: result.isError, ...(result.image ? { image: result.image } : {}) })
             contPairs.push({ call, result })
           }
-          const contStuck = noteToolBatch(contPairs)
+          const contStuck = await noteToolBatch(contPairs)
           if (contStuck) {
             stoppedByGuard = true
             const guardNotice = `\n\n_（${contStuck}本轮已暂停，排除问题后回复「继续」。）_`

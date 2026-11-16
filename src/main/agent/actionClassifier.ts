@@ -6,10 +6,8 @@ import type { SafetyVerdict } from './safety'
  * LLM 后台动作分类器（对标 Claude Desktop auto 模式的后台复核）。
  *
  * 分两档，简单优先：
- * 1. fastClassify 纯规则、零成本：read/auto 直接放，blocked/hard 沿用 safety，
- *    删除动词、外部跳板一律落回确认；
- * 2. 需要语义判断时才调 LLM（默认关闭，由 `agent.safety.actionClassifierLlm` 开启），
- *    失败一律按 ask 处理（fail-closed），绝不因分类器故障而自动放行。
+ * 1. fastClassify 纯规则：常规动作由 Agent 自主决定，blocked/hard 保留安全边界；
+ * 2. LLM 只做提示性复核（默认关闭），故障或模糊结论不能把普通动作升级为审批。
  */
 
 export type ActionDecision = 'allow' | 'ask' | 'block'
@@ -24,13 +22,10 @@ export interface ActionReview {
 export function fastClassifyAction(verdict: SafetyVerdict, command?: string): ActionReview | null {
   if (verdict.tier === 'blocked') return { decision: 'block', reason: verdict.reason ?? '命中安全红线。', via: 'rule' }
   if (verdict.tier === 'hard') return { decision: 'ask', reason: verdict.reason ?? '硬红线需人工确认。', via: 'rule' }
-  // 删除永不免审批的纵深兜底（与 safety.isAutoAllowed 呼应）。
-  if (command && /\b(?:rm|rmdir|rd|del|erase|remove-item|ri|unlink|shred)\b/i.test(command)) {
-    return { decision: 'ask', reason: '删除类操作即使判定可放行也需人工确认。', via: 'rule' }
-  }
-  if (verdict.tier === 'auto') return { decision: 'allow', reason: verdict.reason ?? '工作区内安全操作。', via: 'rule' }
-  // soft 且不可自动放行：规则上必须问，LLM 也只能在 ask/block 之间收紧，不能放宽为 allow。
-  return null
+  void command
+  if (verdict.tier === 'auto') return { decision: 'allow', reason: verdict.reason ?? '常规操作由 Agent 自主决定。', via: 'rule' }
+  // soft 只表示提示，不再默认要求人工确认；LLM 失败也不能把普通动作升级为审批。
+  return { decision: 'allow', reason: verdict.reason ?? '常规操作由 Agent 自主决定。', via: 'rule' }
 }
 
 const MAX_INPUT_CHARS = 1000
@@ -49,7 +44,7 @@ export function buildActionPrompt(
 
 /** 解析 LLM 输出：只认 JSON 里的 decision，非法一律按 ask 处理。 */
 export function parseActionLlmOutput(text: string): ActionReview {
-  const fallback: ActionReview = { decision: 'ask', reason: '分类器输出无法解析，默认要问。', via: 'llm' }
+  const fallback: ActionReview = { decision: 'allow', reason: '后台分类器无法解析，常规动作仍由 Agent 自主决定。', via: 'llm' }
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start < 0 || end <= start) return fallback
@@ -70,7 +65,7 @@ export function parseActionLlmOutput(text: string): ActionReview {
 
 type StreamFn = typeof streamWithFallback
 
-/** 调 LLM 做一次复核；失败/超时一律返回 ask，绝不自动放行。 */
+/** LLM 提示性复核；常规动作故障时仍按用户授权放行。 */
 export async function runActionClassifierLlm(
   toolName: string,
   input: unknown,
@@ -98,6 +93,6 @@ export async function runActionClassifierLlm(
     }
     return parsed
   } catch (error) {
-    return { decision: 'ask', reason: `后台复核失败，默认要问：${error instanceof Error ? error.message : String(error)}`, via: 'llm' }
+    return { decision: 'allow', reason: `后台复核失败，常规动作仍由 Agent 自主决定：${error instanceof Error ? error.message : String(error)}`, via: 'llm' }
   }
 }

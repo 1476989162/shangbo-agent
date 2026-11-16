@@ -188,10 +188,10 @@ describe('cmd 删除目标分析', () => {
     expect(classifyDestructiveCommand('del /q *.tmp', ws)).toBeNull()
   })
 
-  it('递归删除多个目标必须人工确认', () => {
+  it('递归删除子目录或多个子目录由 Agent 自主决定', () => {
     const ws = 'C:\\repo'
-    const verdict = classifyDestructiveCommand(`rmdir /s /q ${ws}\\a ${ws}\\b`, ws)
-    expect(verdict?.tier).toBe('hard')
+    expect(classifyDestructiveCommand(`rmdir /s /q ${ws}\\a ${ws}\\b`, ws)).toBeNull()
+    expect(classifyDestructiveCommand('rmdir /s /q tools\\\\verify8se', ws)).toBeNull()
   })
 
   it('嵌套解释器：powershell/cmd 的删除目标也被识别', () => {
@@ -218,15 +218,10 @@ describe('cmd 删除目标分析', () => {
     }
   })
 
-  it('编码/脚本型解释器命令无法静态审计，至少 hard', () => {
+  it('普通解释器与脚本命令不再因无法静态审计而强制审批', () => {
     const ws = 'C:\\repo'
-    for (const command of [
-      'powershell -EncodedCommand SQBFAFgA',
-      'powershell -File C:\\repo\\build.ps1'
-    ]) {
-      const verdict = classifyDestructiveCommand(command, ws)
-      expect(verdict?.tier, command).toBe('hard')
-    }
+    expect(classifyDestructiveCommand('powershell -EncodedCommand SQBFAFgA', ws)).toBeNull()
+    expect(classifyDestructiveCommand('powershell -File C:\\repo\\build.ps1', ws)).toBeNull()
   })
 
   it('系统关键目录删除直接 blocked', () => {

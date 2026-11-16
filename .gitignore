@@ -25,4 +25,9 @@ scripts/memagent-exercise.mjs
 c-core/bin/
 c-core/obj/
 *.obj
+# 本地演示素材与调研稿（不随版本发布）
+/尚搏Agent-3分钟演示-v0.9.4.mp4
+/image-*.png
+research/
+assets/magpie/
 

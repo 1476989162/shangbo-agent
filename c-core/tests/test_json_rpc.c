@@ -62,17 +62,37 @@ static void test_json_rpc_is_safe(void) {
 }
 
 static void test_json_rpc_detect_stuck(void) {
-    char out_buf[2048] = {0};
+    char out_buf[4096] = {0};
     FILE *mem = tmpfile();
     ASSERT_TRUE(mem != NULL);
 
-    const char *req = "{\"id\":50,\"action\":\"detect_stuck\",\"limit\":3,\"history\":[{\"sig\":\"patch:a.ts\",\"isError\":true},{\"sig\":\"patch:a.ts\",\"isError\":true},{\"sig\":\"patch:a.ts\",\"isError\":true}]}";
+    /* Include braces {} inside sig and a >300-char signature to test P0-1 */
+    const char *req = "{\"id\":50,\"action\":\"detect_stuck\",\"limit\":3,\"history\":["
+                      "{\"sig\":\"patch:a.ts:{\\\"k\\\":1}\",\"isError\":true},"
+                      "{\"sig\":\"patch:a.ts:{\\\"k\\\":1}\",\"isError\":true},"
+                      "{\"sig\":\"patch:a.ts:{\\\"k\\\":1}\",\"isError\":true}],"
+                      "\"extra\":{\"sig\":\"other\",\"isError\":false}}";
     handle_json_rpc_line(req, mem);
     fseek(mem, 0, SEEK_SET);
     ASSERT_TRUE(fgets(out_buf, sizeof(out_buf), mem) != NULL);
     fclose(mem);
 
     ASSERT_TRUE(strstr(out_buf, "\"stuck\":true") != NULL);
+}
+
+static void test_json_rpc_read_file_line_and_byte_conflict(void) {
+    char out_buf[2048] = {0};
+    FILE *mem = tmpfile();
+    ASSERT_TRUE(mem != NULL);
+
+    const char *req = "{\"id\":55,\"action\":\"run_tool\",\"tool\":\"read_file\",\"path\":\"a.txt\",\"start_line\":1,\"offset_bytes\":0}";
+    handle_json_rpc_line(req, mem);
+    fseek(mem, 0, SEEK_SET);
+    ASSERT_TRUE(fgets(out_buf, sizeof(out_buf), mem) != NULL);
+    fclose(mem);
+
+    ASSERT_TRUE(strstr(out_buf, "\"toolSuccess\":false") != NULL);
+    ASSERT_TRUE(strstr(out_buf, "startLine/endLine") != NULL);
 }
 
 static void test_json_rpc_key_collision_and_escapes(void) {
@@ -113,6 +133,7 @@ void run_json_rpc_tests(void) {
     RUN_TEST(test_json_rpc_injection);
     RUN_TEST(test_json_rpc_is_safe);
     RUN_TEST(test_json_rpc_detect_stuck);
+    RUN_TEST(test_json_rpc_read_file_line_and_byte_conflict);
     RUN_TEST(test_json_rpc_key_collision_and_escapes);
     RUN_TEST(test_json_rpc_run_tool);
 }

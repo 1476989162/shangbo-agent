@@ -493,10 +493,10 @@ async function fetchModels(): Promise<void> {
 .prov-icon { width: 32px; height: 32px; border-radius: 8px; background: var(--bg-elevated); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
 .prov-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .prov-name { font-size: 13.5px; font-weight: 600; }
-.prov-badge { margin-left: 6px; padding: 1px 6px; font-size: 10px; font-weight: 500; border-radius: 999px; background: rgba(84,104,255,0.14); color: #5468ff; border: 1px solid rgba(84,104,255,0.35); vertical-align: 1px; }
+.prov-badge { margin-left: 6px; padding: 1px 6px; font-size: 10px; font-weight: 500; border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); vertical-align: 1px; }
 .prov-sub { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prov-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.prov-dot.on { background: #2ea043; }
+.prov-dot.on { background: var(--success); }
 .prov-dot.off { background: var(--border-strong); }
 .prov-keystate { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
 .prov-switch { width: 36px; height: 20px; }
@@ -514,11 +514,11 @@ async function fetchModels(): Promise<void> {
 .prov-models-head { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
 .prov-models-tabs { display: flex; gap: 6px; }
 .prov-tab { padding: 5px 12px; font-size: 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elevated); }
-.prov-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.prov-tab.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); font-weight: 600; }
 .prov-models-toolbar { display: flex; gap: 8px; align-items: center; }
 .prov-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .prov-pill { padding: 5px 12px; font-size: 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-muted); cursor: pointer; max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prov-pill.on { border-color: #5468ff; background: rgba(84, 104, 255, 0.14); color: var(--text); font-weight: 500; }
+.prov-pill.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); font-weight: 500; }
 .prov-expand { background: none; border: none; color: var(--text-muted); font-size: 12px; cursor: pointer; align-self: center; }
 .prov-adv { border-top: 1px solid var(--border); padding-top: 8px; font-size: 12px; color: var(--text-muted); }
 .prov-headers { width: 100%; margin-top: 8px; }

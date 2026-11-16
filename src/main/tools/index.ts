@@ -695,17 +695,31 @@ const patchFileTool: ToolDefinition = {
     if (count > 1) {
       throw new Error(`在文件 ${target} 中匹配到 ${count} 处完全相同的内容，无法唯一定位。请在 targetContent 中包含更多上下文行以保证唯一性。`)
     }
-    const updated = hitExact ? raw.replace(targetContent, () => replacementContent) : (() => {
-      // 按行映射回原文位置替换，避免换行符差异导致替换后文件混入LF
-      const idx = normRaw.indexOf(normTarget);
-      const beforeNorm = normRaw.slice(0, idx);
-      const lineNo = beforeNorm.split('\n').length - 1;
-      const lines = raw.split('\n');
-      const startLine = lines.slice(0, lineNo).join('\n').length + (lineNo > 0 ? 1 : 0);
-      const targetLines = normTarget.split('\n').length;
-      const endLine = lines.slice(0, lineNo + targetLines).join('\n').length + (lineNo + targetLines > 0 ? 1 : 0);
-      return raw.slice(0, startLine) + replacementContent + raw.slice(endLine);
-    })()
+    const mapNormOffsetToRaw = (source: string, normOffset: number): number => {
+      let ri = 0
+      let ni = 0
+      while (ni < normOffset && ri < source.length) {
+        if (source[ri] === '\r' && source[ri + 1] === '\n') {
+          ri += 2
+          ni += 1
+        } else {
+          ri += 1
+          ni += 1
+        }
+      }
+      return ri
+    }
+    const adaptedReplacement = raw.includes('\r\n')
+      ? replacementContent.replace(/\r?\n/g, '\r\n')
+      : replacementContent
+    const updated = hitExact
+      ? raw.replace(targetContent, () => adaptedReplacement)
+      : (() => {
+          const idx = normRaw.indexOf(normTarget)
+          const startRaw = mapNormOffsetToRaw(raw, idx)
+          const endRaw = mapNormOffsetToRaw(raw, idx + normTarget.length)
+          return raw.slice(0, startRaw) + adaptedReplacement + raw.slice(endRaw)
+        })()
     await writeFile(target, updated, 'utf8')
     return `已成功对 ${target} 进行局部精确补丁更新。`
   }
@@ -1104,8 +1118,7 @@ const searchFiles: ToolDefinition = {
         }
         scanned++
         if (nameNeedle && !entry.name.toLowerCase().includes(nameNeedle)) {
-          // 按文件名搜时不读内容；同时给了 content 才需要读文件过滤
-          if (!contentNeedle) continue
+          continue
         }
         if (!contentNeedle) {
           results.push(full)

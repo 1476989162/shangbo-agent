@@ -499,11 +499,11 @@ watch(usageDays, () => {
 }
 
 .code-box {
-  background: #2f7d5d;
+  background: var(--success);
 }
 
 .legacy-box {
-  background: #8a8f98;
+  background: var(--text-subtle);
 }
 
 .histogram-wrapper {
@@ -549,7 +549,7 @@ watch(usageDays, () => {
 }
 
 .code-segment {
-  background: #2f7d5d;
+  background: var(--success);
 }
 
 .cowork-segment {
@@ -557,7 +557,7 @@ watch(usageDays, () => {
 }
 
 .legacy-segment {
-  background: #8a8f98;
+  background: var(--text-subtle);
 }
 
 .bar-empty-dot {

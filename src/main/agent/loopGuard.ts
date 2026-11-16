@@ -1,4 +1,3 @@
-import { cCoreBridge } from './cCoreBridge'
 
 /**
  * 防死循环保险丝（学 Cursor 的连续犯错上限 + Hermes 按模型连贯性设帽）。
@@ -30,14 +29,8 @@ export function callSignature(name: string, input: unknown): string {
  * - 最近 limit 次全是失败 → 模型在同一类错误里撞墙（比如 patch 原文永远对不上）。
  * - 最近 limit 次是同一个调用 → 模型在重复上一模一样的操作。
  */
-export function detectStuck(history: ToolRecord[], limit = 3): string | null {
+export function detectStuckRules(history: ToolRecord[], limit = 3): string | null {
   if (limit <= 0 || history.length < limit) return null
-
-  // 优先委托 C 语言原生内核进行死循环检测
-  if (cCoreBridge.isAvailable()) {
-    const cReason = cCoreBridge.detectStuckSync(history, limit)
-    if (cReason) return cReason
-  }
 
   const recent = history.slice(-limit)
 
@@ -51,4 +44,10 @@ export function detectStuck(history: ToolRecord[], limit = 3): string | null {
   }
 
   return null
+}
+
+/** 默认主通道：常驻 C 异步 RPC；仅 C 不可用时使用本地 TS 规则。 */
+export async function detectStuck(history: ToolRecord[], limit = 3): Promise<string | null> {
+  const { cCoreBridge } = await import('./cCoreBridge')
+  return cCoreBridge.detectStuck(history, limit)
 }

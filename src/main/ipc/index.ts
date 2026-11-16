@@ -12,6 +12,7 @@ import { getAllSettings, getSetting, setSetting } from '../settings'
 import { parseSettingValue } from '../settingsSchema'
 import { toolRegistry } from '../tools'
 import { checkTerminalCommand } from './terminalGuard'
+import { probeChromeDebugging } from '../browserProbe'
 import { agentRuntime } from '../agent/runtime'
 import { cCoreBridge } from '../agent/cCoreBridge'
 import {
@@ -390,8 +391,8 @@ export function registerIpcHandlers(): void {
     const parsed = z.enum(['light', 'dark']).parse(theme)
     const colors =
       parsed === 'dark'
-        ? { background: '#131110', symbol: '#F1EBDF' }
-        : { background: '#FBFAF6', symbol: '#1D1B18' }
+        ? { background: '#0C0E12', symbol: '#E8EBF1' }
+        : { background: '#F5F7FA', symbol: '#171B23' }
     for (const win of BrowserWindow.getAllWindows()) {
       win.setBackgroundColor(colors.background)
       try {
@@ -457,6 +458,10 @@ export function registerIpcHandlers(): void {
       return ''
     }
   })
+
+  ipcMain.handle(IPC.browserChromeStatus, async () => ({
+    connected: await probeChromeDebugging()
+  }))
 
   ipcMain.handle(IPC.browserClearData, async () => {
     try {

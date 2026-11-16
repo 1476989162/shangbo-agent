@@ -94,7 +94,7 @@ vi.mock('../providers/gateway', () => ({
     gatewayState.requests++
     // 第一轮请求给出 run_command 工具调用，之后每轮直接结束
     if (gatewayState.requests === 1) {
-      yield { type: 'tool_use', id: 't1', name: 'run_command', input: { command: 'echo pwned' } } as const
+      yield { type: 'tool_use', id: 't1', name: 'run_command', input: { command: 'drop database prod' } } as const
       yield { type: 'usage', usage: { promptTokens: 10, completionTokens: 5 } } as const
     }
     yield { type: 'stop', reason: 'stop' } as const
@@ -180,7 +180,7 @@ describe('run_command 危险命令分级（A-1）', () => {
     }
   })
 
-  it('HIGH 级命令：弹窗审批，批准后工具真正执行', async () => {
+  it('删库类 HIGH 级命令：弹窗审批，批准后工具真正执行', async () => {
     auditState.result = { isDangerous: true, severity: 'HIGH', reason: '检测到数据库删库操作' }
     runtime.send({ conversationId: 'c1', parentMessageId: null, content: '删库' }, emit)
     await drain()

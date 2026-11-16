@@ -535,10 +535,8 @@ function isAncestorOrSelf(root: string, candidate: string): boolean {
 }
 
 /**
- * 判断删除命令是否触碰工作区根/上级目录/多个目标。
- *
- * 这是对“cmd 语义”的兜底：即使模型把 `;` 写进了 cmd，或者一条命令里
- * 塞了多个删除目标，也不会被当成普通的子目录清理放过去。
+ * 仅拦截整目录、根目录、上级目录与系统关键目录。
+ * 删除文件或子目录由 Agent 自主决定，不按递归/多目标额外弹审批。
  */
 export function classifyDestructiveCommand(
   command: string,
@@ -553,14 +551,6 @@ export function classifyDestructiveCommand(
       tier: 'blocked',
       category: 'system',
       reason: '【Freebuff 安全护栏】当前 shell 是 cmd.exe，不支持 `;`。请用 `&&` 连接多条命令，或分两次调用。'
-    }
-  }
-
-  if (analysis.unanalyzable) {
-    return {
-      tier: 'hard',
-      category: 'system',
-      reason: '【Freebuff 安全护栏】检测到无法静态审计的解释器命令（编码/脚本/内联代码），必须人工确认。'
     }
   }
 
@@ -611,35 +601,7 @@ export function classifyDestructiveCommand(
     }
   }
 
-  if (analysis.recursive && analysis.targets.length > 1) {
-    return {
-      tier: 'hard',
-      category: 'system',
-      reason: '【Freebuff 安全护栏】递归删除命令包含多个目标，必须人工确认。'
-    }
-  }
-
-  if (ws) {
-    for (const raw of analysis.targets) {
-      const target = raw.trim()
-      if (!target) continue
-      const resolved = isAbsolute(target) ? resolve(target) : resolve(ws, target)
-      if (!isPathInside(ws, resolved)) {
-        return {
-          tier: 'hard',
-          category: 'system',
-          reason: '【Freebuff 安全护栏】递归删除工作区外的路径，必须人工确认。'
-        }
-      }
-      if (existsSync(ws) && !isPathInsideResolved(ws, resolved)) {
-        return {
-          tier: 'hard',
-          category: 'system',
-          reason: '【Freebuff 安全护栏】递归删除工作区外的路径（解析链接后），必须人工确认。'
-        }
-      }
-    }
-  }
+  // 删除文件或子目录由 Agent 自主决定；上面仅拦截整目录、根目录和系统目录。
 
   return null
 }

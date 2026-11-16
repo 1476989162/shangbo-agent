@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { cCoreBridge } from './cCoreBridge'
 import { runSubagent, SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME, type SubagentCallbacks } from './subagent'
 import type { StreamChunk } from '../providers/types'
 
@@ -35,6 +36,7 @@ describe('子智能体 (runSubagent)', () => {
   })
 
   it('工具调用会被执行，结果回填后再收结论', async () => {
+    const cDetect = vi.spyOn(cCoreBridge, 'detectStuck').mockResolvedValue(null)
     const seen: unknown[] = []
     let round = 0
     const res = await runSubagent(
@@ -57,6 +59,8 @@ describe('子智能体 (runSubagent)', () => {
       })
     )
     expect(seen).toHaveLength(1)
+    expect(cDetect).toHaveBeenCalledTimes(1)
+    cDetect.mockRestore()
     expect(res.content).toContain('42')
   })
 
