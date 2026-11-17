@@ -20,7 +20,7 @@
 static void print_banner(void) {
     printf("========================================================\n");
     printf("        尚搏 Agent (Shangbo Agent) C-Core Engine        \n");
-    printf("             Version: 0.9.4 (C Architecture)            \n");
+    printf("             Version: 0.9.6 (C Architecture)            \n");
     printf("========================================================\n\n");
 }
 

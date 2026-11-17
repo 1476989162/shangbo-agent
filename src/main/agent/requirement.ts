@@ -45,6 +45,12 @@ const RISK_PATTERNS: RegExp[] = [
   /删库|清表|清掉|清空|清数据|删表|drop|delete\s+from|rm\s+-rf|格式化|删\s*\.git|强制推送|硬重置|密钥|凭据|生产|线上|发布|上线|删文件|删除数据库/,
 ]
 
+/** 全自动（wish）窄口径：只拦删工作区/批量删/删库表/格式化；发布/上线/对外发送不再算红线。
+ * 系统硬红线（.git/强推/注册表等）由 safety 层独立拦截，不依赖这段文案。 */
+const WISH_RISK_PATTERNS: RegExp[] = [
+  /删库|清表|删表|删掉|清掉|清空|drop\s+(?:database|schema|table)|truncate\s+table|delete\s+from|格式化|删.*工作区|大量删除|批量删除|清空.*目录|rm\s+-rf|删\s*\.git|强制推送|硬重置|删除数据库/,
+]
+
 const VERIFY_HINT = /(npm (?:test|run [a-z0-9_-]+)|pytest|cargo test|go test|make test|tsc|vite build)/i
 
 function firstSentences(text: string, maxChars: number): string {
@@ -104,7 +110,7 @@ export function buildRequirementBrief(
   const acceptHits = pickMatches(text, ACCEPT_PATTERNS)
   const constraintHits = pickMatches(text, CONSTRAINT_PATTERNS)
   const nonGoalHits = pickMatches(text, NON_GOAL_PATTERNS)
-  const riskHits = pickMatches(text, RISK_PATTERNS)
+  const riskHits = pickMatches(text, mode === 'wish' ? WISH_RISK_PATTERNS : RISK_PATTERNS)
   const verifyMatch = text.match(VERIFY_HINT)?.[1] ?? ''
 
   const acceptance =
@@ -146,7 +152,9 @@ export function buildRequirementBrief(
     `- 明确不做：${nonGoalHits.length > 0 ? nonGoalHits.join('、') : '无（不要扩大范围）'}`,
   ]
   if (riskHits.length > 0) {
-    lines.push(`- 风险信号：${riskHits.join('、')}→命中安全红线必须停下确认`)
+    lines.push(mode === 'wish'
+      ? `- 风险信号：${riskHits.join('、')}→命中全自动红线（删工作区/批量删/删库表/格式化），需停下确认`
+      : `- 风险信号：${riskHits.join('、')}→命中安全红线必须停下确认`)
   }
   if (verifyMatch) {
     lines.push(`- 用户指定的验证线索：${verifyMatch}`)

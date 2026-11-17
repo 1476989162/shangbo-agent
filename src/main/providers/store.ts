@@ -11,6 +11,15 @@ import type { ProviderAdapter } from './types'
 const secretKey = (id: string) => `provider:${id}`
 const SEED_FLAG = 'providers.seeded'
 
+/** Magpie 网关种子唯一真源：新增模型只改这里，种子+自愈共用。 */
+export const MAGPIE_BASE_URL = 'http://127.0.0.1:34254/v1'
+export const MAGPIE_MODELS = [
+  'trae-cn/deepseek-v4.1-flash-max',
+  'maas-qianwenaiapi/deepseek-v4.1-flash-1017',
+  'maas-qianwenaiapi/glm-5.3-flash',
+  'maas-qianwenaiapi/qwen3.8-flash'
+]
+
 interface ProviderRow {
   id: string
   name: string
@@ -140,9 +149,8 @@ export function routingOrder(preferredId?: string | null): Provider[] {
 
 /** 首次启动写入常用供应商模板（默认关闭，填好密钥后自行启用）。 */
 export function ensureDefaultProviders(): void {
-  if (getSetting(SEED_FLAG, false)) return
-
-  const presets: Omit<ProviderInput, 'id'>[] = [
+  if (!getSetting(SEED_FLAG, false)) {
+    const presets: Omit<ProviderInput, 'id'>[] = [
     {
       name: 'DeepSeek',
       kind: 'openai-compatible',
@@ -178,8 +186,8 @@ export function ensureDefaultProviders(): void {
     {
       name: 'Magpie 网关',
       kind: 'openai-compatible',
-      baseUrl: 'http://127.0.0.1:34254/v1',
-      models: ['trae-cn/deepseek-v4.1-flash-max'],
+      baseUrl: MAGPIE_BASE_URL,
+      models: [...MAGPIE_MODELS],
       enabled: false,
       priority: 5
     },
@@ -197,4 +205,31 @@ export function ensureDefaultProviders(): void {
     upsertProvider(preset)
   }
   setSetting(SEED_FLAG, true)
+  }
+
+  // 老库迁移：已种子化的 Magpie 网关只有 trae-cn 单模型，
+  // 网关 /v1/models 明明有 50 个（含 3 个 maas-qianwenaiapi/*），
+  // 用户在尚搏下拉里看不到就是因为这里没收录。自动补齐，不覆盖用户已有勾选。
+  healMagpieModels()
+}
+
+/** 补齐 Magpie 网关缺失模型（幂等，可重复跑；保留用户自加模型，只做并集）。 */
+export function healMagpieModels(): void {
+  const wanted = MAGPIE_MODELS
+  try {
+    const rows = getDb()
+      .prepare(`SELECT * FROM providers WHERE base_url = ?`)
+      .all(MAGPIE_BASE_URL) as ProviderRow[]
+    for (const row of rows) {
+      const models = JSON.parse(row.models) as string[]
+      const missing = wanted.filter((m) => !models.includes(m))
+      if (missing.length === 0) continue
+      const merged = [...models, ...missing]
+      getDb()
+        .prepare(`UPDATE providers SET models = @models, updated_at = @updatedAt WHERE id = @id`)
+        .run({ id: row.id, models: JSON.stringify(merged), updatedAt: Date.now() })
+    }
+  } catch {
+    // 迁移失败不挡启动：用户仍可用「重新获取模型」手动拉取
+  }
 }

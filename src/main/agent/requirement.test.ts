@@ -23,6 +23,16 @@ describe('需求预整理', () => {
     expect(brief).toContain('风险信号')
   })
 
+  it('全自动窄口径：wish 下发布/上线不再算风险，删库表仍算', () => {
+    const pub = buildRequirementBrief('把这个版本发布到线上', 'wish')
+    expect(pub).not.toContain('风险信号')
+    const drop = buildRequirementBrief('把这个表删掉重导数据', 'wish')
+    expect(drop).toContain('风险信号')
+    expect(drop).toContain('全自动红线')
+    const builderPub = buildRequirementBrief('把这个版本发布到线上', 'builder')
+    expect(builderPub).toContain('风险信号')
+  })
+
   it('未指明范围时给出默认解释', () => {
     const brief = buildRequirementBrief('实现导出功能', 'builder')
     expect(brief).toContain('缺口与默认解释')

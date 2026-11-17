@@ -15,7 +15,7 @@ static void test_json_rpc_ping(void) {
 
     ASSERT_TRUE(strstr(out_buf, "\"id\":10") != NULL);
     ASSERT_TRUE(strstr(out_buf, "\"engine\":\"c-core\"") != NULL);
-    ASSERT_TRUE(strstr(out_buf, "\"version\":\"0.9.4\"") != NULL);
+    ASSERT_TRUE(strstr(out_buf, "\"version\":\"0.9.6\"") != NULL);
 }
 
 static void test_json_rpc_audit(void) {

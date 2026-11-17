@@ -31,14 +31,14 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
     expect(status.available).toBe(true)
     expect(status.executablePath).not.toBeNull()
     expect(existsSync(status.executablePath!)).toBe(true)
-    expect(status.version).toBe('0.9.4')
+    expect(status.version).toBe('0.9.6')
     expect(status.engine).toContain('C-Core')
   })
 
   it('2. 桌面 GUI 与 C-Core Daemon 快速双向 RPC 连通性 (ping / audit / inject / is-safe)', async () => {
     const ping = await cCoreBridge.callRpc<{ engine: string; version: string }>('ping')
     expect(ping.engine).toBe('c-core')
-    expect(ping.version).toBe('0.9.4')
+    expect(ping.version).toBe('0.9.6')
 
     const auditRes = await cCoreBridge.auditHardLines('format c:')
     expect(auditRes).not.toBeNull()
