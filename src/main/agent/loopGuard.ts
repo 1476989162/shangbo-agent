@@ -24,10 +24,20 @@ export function callSignature(name: string, input: unknown): string {
   return `${name}:${raw.length > 500 ? raw.slice(0, 500) : raw}`
 }
 
+/** 异步任务轮询类工具：同参反复查询是正常等结果，不算打转。 */
+const POLLING_TOOL_PATTERN = /(?:^|:|__)generation_result$/i
+
+function isPollingSignature(sig: string): boolean {
+  const toolName = sig.split(':')[0] ?? sig
+  return POLLING_TOOL_PATTERN.test(toolName.trim())
+}
+
 /**
  * 检查最近 limit 条记录是否打转。返回停机原因，无事返回 null。
  * - 最近 limit 次全是失败 → 模型在同一类错误里撞墙（比如 patch 原文永远对不上）。
  * - 最近 limit 次是同一个调用 → 模型在重复上一模一样的操作。
+ * - 例外：生图/视频等异步任务的轮询（generation_result 同 id 反复查询）是正常等结果，
+ *   不算打转，跳过“相同调用”检查（连续失败仍照常拦截；最终由步数上限兜底）。
  */
 export function detectStuckRules(history: ToolRecord[], limit = 3): string | null {
   if (limit <= 0 || history.length < limit) return null
@@ -40,6 +50,8 @@ export function detectStuckRules(history: ToolRecord[], limit = 3): string | nul
 
   const first = recent[0].sig
   if (recent.every((r) => r.sig === first)) {
+    // 轮询豁免：生图 generation_result 同 id 查 N 次是正常等图，不暂停。
+    if (isPollingSignature(first)) return null
     return `同一个工具调用已重复 ${limit} 次（${first}），疑似原地打转，先停下来。`
   }
 

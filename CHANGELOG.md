@@ -2,6 +2,25 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.7] - 2026-11-18
+
+CLI 桥接修复版本：codex/claude/qoder 外部调用桥在 Windows 下全部 spawn ENOENT，根因是 execFile 裸名直调（.cmd 必须经 cmd.exe）；新增 opencode 双桥，四家齐了。
+
+### 新增
+
+- **Opencode 双桥**：`opencode_ask` / `opencode_status`（`opencode run --dir`，ANSI 脱色后截断）。
+- **本地可靠桥脚本**：`scripts/local-cli-bridge.cjs`（`npm run cli:check` / `cli:versions`），MCP 桥异常时走 cmd.exe 同通道兜底。
+
+### 修复
+
+- **CLI 桥 Windows 解析**：`resolveCliFile` 按绝对路径候选探测 .cmd，统一配 `shell: cmd.exe`，prompt 仍走 argv 数组；裸名 ENOENT / 绝对路径 EINVAL 均已本机实证。
+- **轮询误判**：生图/视频异步任务 `generation_result` 同 id 轮询是正常等结果，不算打转。
+- **跨工作区删除**：递归/通配删工作区外目录一律 hard 需人工确认（F:\router 误删复盘补强）。
+
+### 测试
+
+- TS 68 文件 489 用例全过；`typecheck:node` 通过；codex/claude/opencode 三家 CLI 最小只读任务实跑 exit 0。
+
 ## [0.9.6] - 2026-11-17
 
 全自动与版本对齐版本：许愿模式只拦删工作区/批量删/删库表/格式化与系统硬红线，发布/上线不再单独拦截；C/TS 版本号单源对齐到 0.9.6 并加漂移契约测试。

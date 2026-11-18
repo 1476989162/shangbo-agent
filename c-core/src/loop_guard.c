@@ -51,6 +51,26 @@ void loop_guard_record(LoopGuard *lg, const char *tool_name, const char *args_sn
     trim_incomplete_utf8_lg(rec->signature);
 }
 
+static bool is_polling_signature_lg(const char *sig) {
+    /* 生图/视频异步任务的轮询（generation_result 同 id 反复查询）是正常等结果，不算打转。 */
+    /* sig 形如 "tool:args"，只看冒号前的工具名是否以 generation_result 结尾（含 MCP 前缀）。 */
+    if (!sig || !*sig) return false;
+    const char *colon = strchr(sig, ':');
+    size_t name_len = colon ? (size_t)(colon - sig) : strlen(sig);
+    while (name_len > 0 && (sig[name_len - 1] == ' ' || sig[name_len - 1] == '\t')) name_len--;
+    const char *suffix = "generation_result";
+    size_t suffix_len = strlen(suffix);
+    if (name_len < suffix_len) return false;
+    const char *tail = sig + name_len - suffix_len;
+    for (size_t i = 0; i < suffix_len; i++) {
+        char a = tail[i];
+        char b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+        if (a != b) return false;
+    }
+    return true;
+}
+
 const char *loop_guard_check_stuck(const LoopGuard *lg) {
     if (!lg || lg->limit <= 0 || lg->count < lg->limit) {
         return NULL;
@@ -85,6 +105,10 @@ const char *loop_guard_check_stuck(const LoopGuard *lg) {
         }
     }
     if (all_identical) {
+        /* 轮询豁免：generation_result 同 id 查 N 次是正常等图，不暂停；连续失败仍照常拦截。 */
+        if (is_polling_signature_lg(first_sig)) {
+            return NULL;
+        }
         LoopGuard *mut_lg = (LoopGuard *)lg;
         snprintf(mut_lg->last_reason, sizeof(mut_lg->last_reason),
                  "同一个工具调用已重复 %d 次（%s），疑似原地打转，先停下来。",

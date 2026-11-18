@@ -287,6 +287,33 @@ function commandVerdict(command: string, cwd: string | null, ctx: SafetyContext)
     }
   }
 
+  // 跨工作区整目录/通配删除拦截（F:\router 误删复盘补强）：
+  // 工作区绑定 G:\A 时 `rd /s /q F:\router` 会清空另一个整项目，此前会一路落到 auto。
+  // 递归删除的绝对/相对路径目标落在工作区外，或通配整目录删除指向工作区外，一律 hard 需人工确认。
+  // 单文件删除与工作区内子目录清理保持原策略不变。
+  if (ctx.workingDirectory && baseDir) {
+    const wipeAnalysis = analyzeCmdCommand(cmd)
+    if (
+      wipeAnalysis.destructive &&
+      !wipeAnalysis.unanalyzable &&
+      wipeAnalysis.targets.length > 0 &&
+      (wipeAnalysis.recursive ||
+        wipeAnalysis.targets.some((raw) => /[*?]/.test(raw.trim())))
+    ) {
+      const outsideWipe = wipeAnalysis.targets.some((raw) => {
+        const target = raw.trim()
+        if (!target) return false
+        const resolved = isAbsolute(target) ? resolve(target) : resolve(baseDir, target)
+        if (isPathInsideResolved(ctx.workingDirectory as string, resolved)) return false
+        if (wipeAnalysis.recursive) return true
+        const base = target.replace(/[\\/][^\\/]*[*?][^\\/]*$/, '')
+        return base !== target
+      })
+      if (outsideWipe) {
+        return hard('workspace', '检测到递归/通配删除工作区之外的目录：可能清空其他项目，需要人工确认。')
+      }
+    }
+  }
   if (ctx.autonomy === 'strict') {
     return soft('workspace', '当前为严格模式：常规命令需要确认。')
   }

@@ -151,14 +151,16 @@ describe('工作区自治与自动放行', () => {
     expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
   })
 
-  it('子目录递归删除直接放行，系统目录仍永久禁止', () => {
+  it('工作区外递归删除需人工确认，系统目录仍永久禁止', () => {
     const dir = workspace()
-    const allowed = classifyToolCall('run_command', { command: 'rd /s /q D:\\Data' }, {
-      workingDirectory: dir,
-      autonomy: 'balanced'
-    })
-    expect(allowed.tier).toBe('auto')
-    expect(isAutoAllowed(allowed, 'balanced')).toBe(true)
+    for (const autonomy of ['trusted', 'balanced'] as const) {
+      const verdict = classifyToolCall('run_command', { command: 'rd /s /q D:\\Data' }, {
+        workingDirectory: dir,
+        autonomy
+      })
+      expect(verdict.tier, autonomy).toBe('hard')
+      expect(isAutoAllowed(verdict, autonomy), autonomy).toBe(false)
+    }
     const system = classifyToolCall('run_command', { command: 'Remove-Item -Recurse -Force C:\\Windows\\Temp' }, {
       workingDirectory: dir,
       autonomy: 'trusted'
@@ -271,6 +273,62 @@ describe('工作区自治与自动放行', () => {
     expect(verdict.tier).toBe('blocked')
     expect(verdict.category).toBe('private-data')
   })
+
+describe('F:\\router 整项目删除回归（2026-11-04 误删复盘）', () => {
+  const ROUTER = 'F:\\router'
+
+  it('绑定 F:\\router 时整项目删除一律拦下，完全信任也不放行', () => {
+    const ctx = { workingDirectory: ROUTER, autonomy: 'trusted' } as const
+    const blocked = [
+      `rmdir /s /q ${ROUTER}`,
+      `del /q ${ROUTER}\\*`,
+      `del /s /q ${ROUTER}\\*.*`,
+      'rm -rf F:/router',
+      `powershell -Command "Remove-Item -Recurse -Force ${ROUTER}"`,
+      `cmd /c rmdir /s /q ${ROUTER}`,
+      `node -e "require('fs').rmSync('F:/router',{recursive:true})"`,
+      `python -c "import shutil; shutil.rmtree('F:/router')"`
+    ]
+    for (const command of blocked) {
+      const verdict = classifyToolCall('run_command', { command }, ctx)
+      expect(verdict.tier, command).toBe('blocked')
+      expect(isAutoAllowed(verdict, 'trusted'), command).toBe(false)
+    }
+  })
+
+  it('事故原形：分号不是 cmd 分隔符，整条直接 blocked', () => {
+    const command = `rmdir /s /q ${ROUTER}\\deploy\\__pycache__ 2>&1; git -C ${ROUTER} diff --stat`
+    const verdict = classifyToolCall('run_command', { command }, {
+      workingDirectory: ROUTER,
+      autonomy: 'trusted'
+    })
+    expect(verdict.tier).toBe('blocked')
+    expect(isAutoAllowed(verdict, 'trusted')).toBe(false)
+  })
+
+  it('删 .git 与 git clean -fdx 必须人工确认', () => {
+    const ctx = { workingDirectory: ROUTER, autonomy: 'trusted' } as const
+    for (const command of [`rmdir /s /q ${ROUTER}\\.git`, 'git clean -fdx']) {
+      const verdict = classifyToolCall('run_command', { command }, ctx)
+      expect(verdict.tier, command).toBe('hard')
+      expect(isAutoAllowed(verdict, 'trusted'), command).toBe(false)
+    }
+  })
+
+  it('在别的会话里删 F:\\router 也必须人工确认', () => {
+    const dir = workspace()
+    for (const autonomy of ['trusted', 'balanced'] as const) {
+      for (const command of [`rmdir /s /q ${ROUTER}`, `del /q ${ROUTER}\\*`]) {
+        const verdict = classifyToolCall('run_command', { command }, {
+          workingDirectory: dir,
+          autonomy
+        })
+        expect(verdict.tier, command).toBe('hard')
+        expect(isAutoAllowed(verdict, autonomy), command).toBe(false)
+      }
+    }
+  })
+})
 
   it('常规工具由 Agent 自主决定，严格模式才保留确认', () => {
     const verdict = classifyToolCall('computer_click', { x: 10, y: 20 }, {

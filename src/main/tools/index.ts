@@ -1,5 +1,5 @@
 import { exec } from 'node:child_process'
-import { createReadStream, readdirSync } from 'node:fs'
+import { createReadStream, existsSync, readdirSync } from 'node:fs'
 import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -29,6 +29,50 @@ import {
 const execAsync = promisify(exec)
 
 /**
+ * Windows 下 npm 全局 CLI 落盘都是 .cmd 包装（codex.cmd / claude.cmd / qoder.cmd / opencode.cmd）：
+ * execFile 裸名直调在宿主 PATH 不全时报 spawn ENOENT，直调 .cmd 绝对路径则报 EINVAL，
+ * 两条路都必须经 cmd.exe shell（2026-11-17 本机实证：裸名 ENOENT、绝对路径 EINVAL、shell 全通）。
+ * 本函数按绝对路径候选逐个探测，命中返回绝对路径；兜底返回裸名但仍走 cmd.exe 自身的
+ * PATH + PATHEXT 解析（与 run_command 同通道）。prompt 仍经 argv 数组传，不拼 shell 字符串。
+ */
+function resolveCliFile(name: 'codex' | 'claude' | 'qoder' | 'opencode'): {
+  file: string
+  shell: 'cmd.exe' | undefined
+} {
+  if (process.platform !== 'win32') return { file: name, shell: undefined }
+  const candidates: string[] = []
+  if (name === 'qoder') candidates.push('C:\\Program Files\\Qoder IDE\\bin\\qoder.cmd')
+  // 修 opencode 时确认：postinstall 未跑时 bin 下是 479 字节占位脚本，真二进制靠 postinstall 下；
+  // 占位脚本 exit 1 会如实报错，不会再伪装成 ENOENT。
+  const npmDir = process.env.APPDATA ? `${process.env.APPDATA}\\npm` : null
+  if (npmDir) candidates.push(`${npmDir}\\${name}.cmd`)
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) return { file: c, shell: 'cmd.exe' }
+    } catch {
+      // 探测失败就试下一个，不挡裸名兜底
+    }
+  }
+  return { file: name, shell: 'cmd.exe' }
+}
+
+interface CliExecOptions {
+  cwd?: string | undefined
+  timeout?: number
+  maxBuffer?: number
+  signal?: AbortSignal
+  windowsHide?: boolean
+}
+
+/** execFile 的 CLI 专用包装：先解析可执行体，再透传全部 options（只追加 shell）。 */
+async function execCliFileAsync(name: 'codex' | 'claude' | 'qoder' | 'opencode', args: string[], options: CliExecOptions) {
+  const { execFile } = await import('node:child_process')
+  const execFileAsync = promisify(execFile)
+  const cli = resolveCliFile(name)
+  return execFileAsync(cli.file, args, { ...options, shell: cli.shell })
+}
+
+/**
  * Qoder CLI 桥接（外部 Agent 调用 Qoder 干活的唯一正统通道）。
  * 已验证：npm i -g @qoder-ai/qodercli → qoder login → qoder -p/-o json 可用。
  * MCP 方向只能反向（Qoder 调尚搏），调不动 Qoder；9209 本地口路径全 404 不啃；
@@ -39,7 +83,7 @@ async function runQoderCli(args: string[], cwd: string | undefined, signal: Abor
   const { execFile } = await import('node:child_process')
   const execFileAsync = promisify(execFile)
   try {
-    const { stdout, stderr } = await execFileAsync('qoder', args, {
+    const { stdout, stderr } = await execCliFileAsync('qoder', args, {
       cwd,
       timeout: 300_000,
       maxBuffer: 8 * 1024 * 1024,
@@ -124,7 +168,7 @@ async function runCodexCli(
   if (model) args.push('-m', model)
   args.push(prompt)
   try {
-    await execFileAsync('codex', args, {
+    await execCliFileAsync('codex', args, {
       cwd,
       timeout: 300_000,
       maxBuffer: 8 * 1024 * 1024,
@@ -198,8 +242,8 @@ const codexStatus: ToolDefinition = {
     const execFileAsync = promisify(execFile)
     try {
       const [{ stdout: v }, { stdout: s }] = await Promise.all([
-        execFileAsync('codex', ['--version'], { windowsHide: true, signal: context.signal }),
-        execFileAsync('codex', ['login', 'status'], { windowsHide: true, signal: context.signal })
+        execCliFileAsync('codex', ['--version'], { windowsHide: true, signal: context.signal }),
+        execCliFileAsync('codex', ['login', 'status'], { windowsHide: true, signal: context.signal })
       ])
       return truncate(`${v.trim()}\n${s.trim()}`.trim() || '（Codex 无输出）')
     } catch (error) {
@@ -227,7 +271,7 @@ async function runClaudeCli(
   const args = ['-p', prompt, '--output-format', 'json']
   if (model) args.push('--model', model)
   try {
-    const { stdout } = await execFileAsync('claude', args, {
+    const { stdout } = await execCliFileAsync('claude', args, {
       cwd,
       timeout: 300_000,
       maxBuffer: 8 * 1024 * 1024,
@@ -302,13 +346,102 @@ const claudeStatus: ToolDefinition = {
     const { execFile } = await import('node:child_process')
     const execFileAsync = promisify(execFile)
     try {
-      const { stdout } = await execFileAsync('claude', ['--version'], {
+      const { stdout } = await execCliFileAsync('claude', ['--version'], {
         windowsHide: true,
         signal: context.signal
       })
       return truncate(stdout.trim() || '（Claude 无输出）')
     } catch (error) {
       return truncate(`--- Claude 调用失败 ---\n${describeError(error)}`)
+    }
+  }
+}
+
+/**
+ * Opencode CLI 桥接（外部 Agent 调用 Opencode 干活的通道，2026-11-17 新增）。
+ * 已验证：opencode run --dir <dir> "prompt" 可回结果（默认走 Glob/Grep 读文件）。
+ * 输出是带 ANSI 的 formatted 文本，这里只做脱色 + 截断，不做语义解析。
+ * 注意：opencode 没有 login status 概念，opencode_status 只查版本。
+ * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
+ */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '')
+}
+
+async function runOpencodeCli(
+  prompt: string,
+  cwd: string | undefined,
+  model: string | undefined,
+  signal: AbortSignal
+): Promise<string> {
+  const args = ['run']
+  if (cwd) args.push('--dir', cwd)
+  if (model) args.push('-m', model)
+  args.push(prompt)
+  try {
+    const { stdout, stderr } = await execCliFileAsync('opencode', args, {
+      cwd,
+      timeout: 300_000,
+      maxBuffer: 8 * 1024 * 1024,
+      signal,
+      windowsHide: true
+    })
+    const out = stripAnsi(`${stdout.trim()}${stderr.trim() ? `\n--- 标准错误 ---\n${stderr.trim()}` : ''}`)
+    return truncate(out.trim() || '（Opencode 无输出）')
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; message?: string }
+    const parts = ['--- Opencode 调用失败 ---']
+    const so = failure.stdout?.trim() ? stripAnsi(failure.stdout.trim()) : ''
+    if (so) parts.push(so)
+    if (failure.stderr?.trim()) parts.push(failure.stderr.trim())
+    if (parts.length === 1) parts.push(failure.message ?? String(error))
+    return truncate(parts.join('\n'))
+  }
+}
+
+const opencodeAsk: ToolDefinition = {
+  name: 'opencode_ask',
+  description:
+    '调用本机 Opencode CLI（opencode run）让 Opencode 干活并回结果。适合代码问答、改写、审查等一次任务；要在指定工程目录下问就传 cwd。需要本机已装 CLI 且配好模型鉴权。',
+  parameters: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: '要发给 Opencode 的问题/任务' },
+      cwd: { type: 'string', description: '工作目录，缺省为当前项目目录' },
+      model: { type: 'string', description: '模型名（provider/model 格式），缺省用 Opencode 默认' }
+    },
+    required: ['prompt']
+  },
+  requiresApproval: true,
+  approvalReason: '将调用本机 Opencode CLI 并消耗你的模型额度，结果会回传给尚搏。',
+  async execute(input, context) {
+    const { prompt, cwd, model } = z
+      .object({
+        prompt: z.string().min(1).max(8000),
+        cwd: z.string().optional(),
+        model: z.string().optional()
+      })
+      .parse(input)
+    const dir = cwd ? resolveUserPath(context, cwd) : (context.workingDirectory ?? undefined)
+    if (dir) guardPrivatePath(dir)
+    return runOpencodeCli(prompt, dir, model, context.signal)
+  }
+}
+
+const opencodeStatus: ToolDefinition = {
+  name: 'opencode_status',
+  description: '查看本机 Opencode CLI 的版本（opencode --version）。不消耗额度，接线前先查这个。',
+  parameters: { type: 'object', properties: {}, required: [] },
+  requiresApproval: false,
+  async execute(_input, context) {
+    try {
+      const { stdout } = await execCliFileAsync('opencode', ['--version'], {
+        windowsHide: true,
+        signal: context.signal
+      })
+      return truncate(stdout.trim() || '（Opencode 无输出）')
+    } catch (error) {
+      return truncate(`--- Opencode 调用失败 ---\n${describeError(error)}`)
     }
   }
 }
@@ -1487,6 +1620,8 @@ const definitions: ToolDefinition[] = [
   codexStatus,
   claudeAsk,
   claudeStatus,
+  opencodeAsk,
+  opencodeStatus,
   computerScreenshot,
   computerClick,
   computerType,

@@ -42,4 +42,20 @@ describe('防死循环保险丝：C 主通道与 TS 兜底', () => {
       { sig: 'same', isError: false }, { sig: 'same', isError: false }, { sig: 'same', isError: false }
     ])).toContain('重复 3 次')
   })
+
+  it('生图轮询同 id 查 N 次不算打转', () => {
+    const sig = callSignature('mcp__magpie-image__generation_result', { id: 'img_8a1b2a937fa26eab49b89b31' })
+    expect(detectStuckRules([
+      { sig, isError: false }, { sig, isError: false }, { sig, isError: false }
+    ])).toBeNull()
+    // 普通工具重复仍要拦
+    const plain = callSignature('read_file', { path: 'a.ts' })
+    expect(detectStuckRules([
+      { sig: plain, isError: false }, { sig: plain, isError: false }, { sig: plain, isError: false }
+    ])).toContain('重复 3 次')
+    // 轮询连续报错仍要拦
+    expect(detectStuckRules([
+      { sig, isError: true }, { sig, isError: true }, { sig, isError: true }
+    ])).toContain('连续失败 3 次')
+  })
 })
