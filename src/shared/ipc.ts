@@ -29,6 +29,10 @@ export const IPC = {
   providerDelete: 'provider:delete',
   providerTest: 'provider:test',
   providerFetchModels: 'provider:fetchModels',
+  /** Model Autopilot：真实硬件探测 + 本地引擎健康状态 */
+  providerAutopilotProbe: 'providers:autopilotProbe',
+  /** Model Autopilot：真题验活（发一个真实的最小问题） */
+  providerAutopilotVerify: 'providers:autopilotVerify',
 
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
@@ -71,6 +75,9 @@ export const IPC = {
   remoteStatus: 'remote:status',
   remotePair: 'remote:pair',
   remoteDevices: 'remote:devices',
+  remotePending: 'remote:pending',
+  remoteConfirmPairing: 'remote:confirm-pairing',
+  remoteDenyPairing: 'remote:deny-pairing',
   remoteRevoke: 'remote:revoke',
   remoteDisconnect: 'remote:disconnect',
   /** 本机中转身份指纹：用户据此配置服务器白名单。 */

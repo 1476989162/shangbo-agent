@@ -31,6 +31,62 @@ const detailExpanded = ref(false)
 const detailShowKey = ref(false)
 const detailNewModel = ref('')
 
+/* ---- Model Autopilot：真实硬件探测 + 真题验活（IPC / Preload 已通） ---- */
+interface AutopilotProbeResult {
+  hardware: {
+    gpuTier: string
+    gpuMemGB: number | null
+    totalMemGB: number
+    gpuName?: string
+    vramNote?: string
+  }
+  health: { running: boolean; model?: string; note?: string; error?: string }
+  pick: { model: string }
+}
+const autopilotBusy = ref(false)
+const autopilotInfo = ref<AutopilotProbeResult | null>(null)
+const localBaseUrl = ref('http://127.0.0.1:8080/v1')
+const localModelName = ref('Qwen3.8-Flash-Next')
+
+async function runAutopilotProbe(): Promise<void> {
+  autopilotBusy.value = true
+  feedback.value = null
+  try {
+    const result = await window.shangbo.provider.autopilotProbe()
+    autopilotInfo.value = result
+    const hw = result.hardware
+    feedback.value = {
+      ok: true,
+      message: `探测完成：${hw.gpuName || hw.gpuTier} · 显存 ${hw.gpuMemGB ?? '未知'} GB · 内存 ${hw.totalMemGB} GB；推荐 ${result.pick.model}；本地引擎${result.health.running ? '在线' : '未启动'}${hw.vramNote ? `（${hw.vramNote}）` : ''}`
+    }
+  } catch (e) {
+    feedback.value = { ok: false, message: `硬件探测失败：${e instanceof Error ? e.message : String(e)}` }
+  } finally {
+    autopilotBusy.value = false
+  }
+}
+
+async function runAutopilotVerify(): Promise<void> {
+  autopilotBusy.value = true
+  feedback.value = null
+  try {
+    const result = await window.shangbo.provider.autopilotVerify({
+      baseUrl: localBaseUrl.value.trim(),
+      model: localModelName.value.trim()
+    })
+    feedback.value = {
+      ok: result.ok,
+      message: result.ok
+        ? `真题验活通过（${result.latencyMs}ms，回答「${result.reply ?? ''}」），可以启用该端点`
+        : `验活失败：${result.error ?? '未知错误'}。请确认引擎已启动、模型已下载完成。`
+    }
+  } catch (e) {
+    feedback.value = { ok: false, message: `验活调用失败：${e instanceof Error ? e.message : String(e)}` }
+  } finally {
+    autopilotBusy.value = false
+  }
+}
+
 function blankForm(): ProviderForm {
   return {
     name: '',
@@ -339,6 +395,35 @@ async function fetchModels(): Promise<void> {
         <input v-model="providerSearch" class="prov-search" placeholder="查找供应商" spellcheck="false" />
       </div>
       <p class="prov-tip">密钥由系统安全密钥环加密托管于本地，支持 OpenAI 兼容、Responses 协议及 Anthropic 直连。</p>
+
+      <!-- Model Autopilot：探测真实显卡/显存，并用一道真实问题验证本地引擎是否就绪 -->
+      <div class="prov-autopilot">
+        <div class="prov-autopilot-head">
+          <div>
+            <div class="prov-autopilot-title">本地模型 Autopilot</div>
+            <div class="prov-sub">探测真实显卡与显存，并用一道真实问题验活本地推理引擎；通过后再启用下方「本地推理引擎」端点</div>
+          </div>
+          <div class="prov-autopilot-actions">
+            <button class="btn btn-ghost tiny" :disabled="autopilotBusy" @click="runAutopilotProbe">
+              {{ autopilotBusy ? '处理中…' : '一键探测显卡' }}
+            </button>
+            <button class="btn btn-primary tiny" :disabled="autopilotBusy" @click="runAutopilotVerify">真题验活</button>
+          </div>
+        </div>
+        <div class="prov-autopilot-form">
+          <input v-model="localBaseUrl" class="input prov-input" placeholder="本地端点 Base URL" spellcheck="false" />
+          <input v-model="localModelName" class="input prov-input" placeholder="模型名" spellcheck="false" />
+        </div>
+        <div v-if="autopilotInfo" class="prov-autopilot-result">
+          硬件：{{ autopilotInfo.hardware.gpuName || autopilotInfo.hardware.gpuTier }} ·
+          显存 {{ autopilotInfo.hardware.gpuMemGB ?? '?' }} GB · 内存 {{ autopilotInfo.hardware.totalMemGB }} GB ·
+          推荐 {{ autopilotInfo.pick.model }} ·
+          引擎 {{ autopilotInfo.health.running ? '在线' : '未启动' }}
+          <template v-if="autopilotInfo.hardware.vramNote"> · {{ autopilotInfo.hardware.vramNote }}</template>
+          <template v-if="autopilotInfo.health.note"> · {{ autopilotInfo.health.note }}</template>
+        </div>
+      </div>
+
       <div class="prov-list-card">
         <div
           v-for="p in filteredProviders"
@@ -503,6 +588,12 @@ async function fetchModels(): Promise<void> {
 .prov-arrow { color: var(--text-subtle); font-size: 16px; }
 .prov-empty { padding: 16px; text-align: center; }
 .prov-add { align-self: flex-start; }
+.prov-autopilot { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.prov-autopilot-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.prov-autopilot-title { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; }
+.prov-autopilot-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.prov-autopilot-form { display: flex; gap: 8px; }
+.prov-autopilot-result { font-size: 11.5px; color: var(--text-muted); line-height: 1.7; border-top: 1px solid var(--border); padding-top: 8px; }
 .prov-detail-head { display: flex; align-items: center; gap: 12px; }
 .prov-detail-title { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .prov-detail-actions { display: flex; gap: 6px; }

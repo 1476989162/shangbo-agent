@@ -9,6 +9,10 @@ export default defineConfig({
     }
   },
   test: {
-    include: ['src/**/*.test.ts']
+    include: ['src/**/*.test.ts'],
+    // Windows 上 vitest 5 一次性拉起 74 个 worker 时，runner 会在 describe 阶段
+    // 报 "Cannot read properties of undefined (reading 'config')"（并非用例失败）。
+    // 固定并发上限后，文档里的 `npx vitest run` 验收命令可原样稳定跑全绿。
+    maxWorkers: 4
   }
 })

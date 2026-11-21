@@ -73,6 +73,45 @@ export interface ShangboApi {
     remove(id: string): Promise<boolean>
     test(id: string): Promise<ProviderTestResult>
     fetchModels(input: ProviderInput): Promise<string[]>
+    /** 真实硬件探测 + 本地推理引擎健康 + 推荐模型 */
+    autopilotProbe(): Promise<{
+      hardware: {
+        platform: string
+        totalMemGB: number
+        cpuCount: number
+        gpuTier: string
+        gpuMemGB: number | null
+        gpuName?: string
+        source: string
+        vramNote?: string
+      }
+      health: {
+        running: boolean
+        loaded?: boolean
+        model?: string
+        maxContext?: number
+        images?: boolean
+        error?: string
+        source?: 'health' | 'models'
+        note?: string
+      }
+      pick: {
+        model: string
+        quant: string
+        contextK: number
+        kv: string
+        expectedTps: string
+        level: string
+        comparesWith: string
+        reason: string
+      }
+    }>
+    /** 发一个真实最小问题验证本地模型可用性 */
+    autopilotVerify(input: {
+      baseUrl: string
+      model: string
+      apiKey?: string
+    }): Promise<{ ok: boolean; latencyMs: number; reply?: string; error?: string }>
   }
 
   settings: {
@@ -163,6 +202,12 @@ export interface ShangboApi {
     pair(phoneName?: string): Promise<{ qrText: string; code: string; expiresAt: number; fingerprint: string }>
     /** 已配对设备列表。 */
     devices(): Promise<{ id: string; name: string; createdAt: number; lastSeenAt: number | null }[]>
+    /** 待确认的配对请求：手机扫码后需桌面人工确认。 */
+    pending(): Promise<{ deviceName: string; phonePubB64: string; phoneToken: string; fingerprint: string; receivedAt: number }[]>
+    /** 确认配对：派生会话密钥并通知中转放行手机。 */
+    confirmPairing(phoneToken: string): Promise<{ deviceId: string; fingerprint: string }>
+    /** 拒绝配对：丢弃请求并断开该手机。 */
+    denyPairing(phoneToken: string): Promise<boolean>
     /** 吊销设备。 */
     revoke(id: string): Promise<boolean>
     /** 一键断开所有远程设备并关闭远程功能。 */

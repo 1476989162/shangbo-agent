@@ -57,7 +57,10 @@ const api: ShangboApi = {
     upsert: (input: ProviderInput) => ipcRenderer.invoke(IPC.providerUpsert, input),
     remove: (id) => ipcRenderer.invoke(IPC.providerDelete, id),
     test: (id) => ipcRenderer.invoke(IPC.providerTest, id),
-    fetchModels: (input: ProviderInput) => ipcRenderer.invoke(IPC.providerFetchModels, input)
+    fetchModels: (input: ProviderInput) => ipcRenderer.invoke(IPC.providerFetchModels, input),
+    autopilotProbe: () => ipcRenderer.invoke(IPC.providerAutopilotProbe),
+    autopilotVerify: (input: { baseUrl: string; model: string; apiKey?: string }) =>
+      ipcRenderer.invoke(IPC.providerAutopilotVerify, input)
   },
 
   settings: {
@@ -116,6 +119,9 @@ const api: ShangboApi = {
     status: () => ipcRenderer.invoke(IPC.remoteStatus),
     pair: (phoneName?: string) => ipcRenderer.invoke(IPC.remotePair, phoneName),
     devices: () => ipcRenderer.invoke(IPC.remoteDevices),
+    pending: () => ipcRenderer.invoke(IPC.remotePending),
+    confirmPairing: (phoneToken: string) => ipcRenderer.invoke(IPC.remoteConfirmPairing, phoneToken),
+    denyPairing: (phoneToken: string) => ipcRenderer.invoke(IPC.remoteDenyPairing, phoneToken),
     revoke: (id: string) => ipcRenderer.invoke(IPC.remoteRevoke, id),
     disconnect: () => ipcRenderer.invoke(IPC.remoteDisconnect),
     identity: () => ipcRenderer.invoke(IPC.remoteIdentity),    onEvent: (handler: (status: string, detail: string) => void) => {

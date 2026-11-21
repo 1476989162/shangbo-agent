@@ -10,9 +10,29 @@ import { eventBus } from '../events/bus'
 import { getSetting } from '../settings'
 import { resolveWishPrompt } from '../agent/wish'
 import { auditCommandSecurity, commandTouchesPrivateData } from '../tools'
+import { textOf } from '../providers/types'
+import { decideProactiveDetailed } from '../memory/dreaming'
+import {
+  applyFeedback,
+  isChatQuiet,
+  loadProactiveContext,
+  noteUserMessage,
+  queueFollowUp,
+  recordDecision,
+  takeFollowUps
+} from '../memory/proactiveRepo'
 import type { AgentEvent, AutonomousTask, AutonomousTaskInput } from '../../shared/types'
 
 const execAsync = promisify(exec)
+
+/** 通知档：normal 保持原行为；gated 等聊天安静；silent 进静默汇总；suppressed 完全不打扰。 */
+type NotifyMode = 'normal' | 'gated' | 'silent' | 'suppressed'
+interface ProactiveGate {
+  skip: boolean
+  notifyMode: NotifyMode
+  reason: string
+}
+const DEFAULT_GATE: ProactiveGate = { skip: false, notifyMode: 'normal', reason: '常规执行' }
 
 /**
  * 自主任务调度器。
@@ -27,6 +47,16 @@ class AutonomousScheduler {
   /** 已经进入验收阶段的会话：防止 message_done 与后续事件重复触发验收。 */
   private verifyingConversations = new Set<string>()
   private paused = false
+  /** 每次 run 的打扰档：launch 时按 decideProactiveDetailed 的结果写入。 */
+  private runNotifyModes = new Map<string, NotifyMode>()
+  /** 调度器自己发起的许愿 prompt：不能当成用户反馈去学规则。 */
+  private selfSentPrompts = new Set<string>()
+  /** 待推送（聊天未安静满 3 分钟）与静默期汇总的通知。 */
+  private pendingNotifications: Array<{ title: string; body: string }> = []
+  /** conversationId → 任务名（作为反馈规则的 kind）。 */
+  private taskConversations = new Map<string, string>()
+  /** 用户回复暂存：等 message_done 之后才异步学习，绝不占用首字响应路径。 */
+  private pendingFeedback = new Map<string, { text: string; kind: string; at: number }>()
 
   start(): void {
     if (this.timer) return
@@ -104,6 +134,7 @@ class AutonomousScheduler {
       if (active.taskId === id) {
         agentRuntime.abortConversationRuns(conversationId)
         this.activeRuns.delete(conversationId)
+        this.runNotifyModes.delete(conversationId)
         this.verifyingConversations.delete(conversationId)
       }
     }
@@ -111,13 +142,21 @@ class AutonomousScheduler {
   }
 
   private async tick(): Promise<void> {
+    // 无论是否暂停都要冲刷待推送通知，否则静默期攒下的汇总永远发不出去。
+    this.flushDeferredNotifications()
     if (this.paused || !getSetting<boolean>('agent.autonomous.enabled', false)) return
     // 不 await 单个任务：一个长任务会阻塞后面所有到期任务的启动。
     for (const task of store.dueTasks()) {
       if (this.activeTasks.has(task.id)) continue
       const nextRunAt = store.computeNextRunAt(task.schedule, task.intervalMinutes)
+      const gate = this.proactiveGate(task)
+      if (gate.skip) {
+        store.markTaskFinished(task.id, 'skipped', gate.reason, nextRunAt)
+        log.info(`[autonomous] 任务 ${task.name} 被主动决策跳过：${gate.reason}`)
+        continue
+      }
       if (!store.claimTask(task.id, task.nextRunAt, nextRunAt)) continue
-      void this.launch(task).catch((error) => {
+      void this.launch(task, gate).catch((error) => {
         const message = error instanceof Error ? error.message : String(error)
         this.activeTasks.delete(task.id)
         log.warn(`[autonomous] 任务 ${task.name} 启动失败：${message}`)
@@ -131,8 +170,136 @@ class AutonomousScheduler {
     }
   }
 
+  /**
+   * 周期任务启动前的主动决策（Another Me）：
+   * - 已学规则 stay-silent 或开启严格模式且同一事项今天判过 → 跳过本次运行；
+   * - quiet hours / 今日提醒已满 5 条 / 默认跟进 → 任务照常执行，但通知按档位处理；
+   * - tell-now → 任务执行，通知等聊天安静满 3 分钟再投递。
+   *
+   * 注意与 linger 原语义的一处工程取舍：linger 的「同一事项一天只判一次」用于
+   * 主动消息；尚搏的自主任务是分钟级监控，若照搬跳过运行会让 15 分钟周期退化成
+   * 一天一次。因此默认只抑制重复通知，严格跳过由 agent.proactive.strictSkip 控制。
+   */
+  private proactiveGate(task: AutonomousTask): ProactiveGate {
+    if (!getSetting<boolean>('agent.proactive.enabled', true)) return DEFAULT_GATE
+    try {
+      const now = new Date()
+      const ctx = loadProactiveContext(now)
+      const itemKey = `${task.id}:${ctx.dayStr}`
+      const decision = decideProactiveDetailed(
+        { itemKey, kind: task.name, hour: now.getHours() },
+        ctx
+      )
+      let gate: ProactiveGate
+      switch (decision.bucket) {
+        case 'already-judged':
+          gate = {
+            skip: getSetting<boolean>('agent.proactive.strictSkip', false),
+            notifyMode: 'silent',
+            reason: decision.reason
+          }
+          break
+        case 'rule':
+          gate =
+            decision.action === 'stay-silent'
+              ? { skip: true, notifyMode: 'suppressed', reason: decision.reason }
+              : decision.action === 'tell-now'
+                ? { skip: false, notifyMode: 'gated', reason: decision.reason }
+                : { skip: false, notifyMode: 'silent', reason: decision.reason }
+          break
+        case 'quiet-hours':
+        case 'daily-cap':
+          gate = { skip: false, notifyMode: 'silent', reason: decision.reason }
+          break
+        default:
+          gate = { ...DEFAULT_GATE, reason: decision.reason }
+      }
+      // daily_log 记「有效动作」：会/计划会打扰用户的记 tell-now，供每日 5 条上限计数。
+      const effectiveAction =
+        gate.notifyMode === 'normal' || gate.notifyMode === 'gated'
+          ? 'tell-now'
+          : gate.notifyMode === 'silent'
+            ? 'follow-up'
+            : 'stay-silent'
+      recordDecision(ctx.dayStr, itemKey, effectiveAction, now.getTime())
+      return gate
+    } catch {
+      // 决策层异常绝不阻断自主任务本身
+      return DEFAULT_GATE
+    }
+  }
+
+  /** 08:00 后汇总静默期消息；聊天安静满 3 分钟后补发被推迟的通知。 */
+  private flushDeferredNotifications(): void {
+    const hour = new Date().getHours()
+    const followUps = takeFollowUps(hour)
+    if (followUps.length > 0) {
+      this.notify(
+        `自主任务汇总（${followUps.length} 条）`,
+        followUps.slice(0, 5).map((f) => `- ${f.title}：${f.body}`).join('\n')
+      )
+    }
+    if (this.pendingNotifications.length === 0 || !isChatQuiet()) return
+    const due = this.pendingNotifications.splice(0)
+    for (const item of due) this.notify(item.title, item.body)
+  }
+
+  /** 会话绑定的任务名；用作反馈规则的 kind。 */
+  private taskConversationKind(conversationId: string): string | null {
+    const active = this.activeRuns.get(conversationId)
+    if (active) return store.getTask(active.taskId)?.name ?? active.taskId
+    if (this.taskConversations.has(conversationId)) {
+      return this.taskConversations.get(conversationId) ?? null
+    }
+    for (const task of store.listTasks()) {
+      if (task.conversationId) this.taskConversations.set(task.conversationId, task.name)
+    }
+    return this.taskConversations.get(conversationId) ?? null
+  }
+
+  /** run_start 携带刚落库的 user 消息：区分真实用户回复与调度器自发起的许愿 prompt。 */
+  private observeUserMessage(event: Extract<AgentEvent, { type: 'run_start' }>): void {
+    const text = textOf(event.userMessage.blocks)
+    if (this.selfSentPrompts.delete(text)) return
+    const now = Date.now()
+    noteUserMessage(now)
+    const kind = this.taskConversationKind(event.conversationId)
+    if (kind) this.pendingFeedback.set(event.conversationId, { text, kind, at: now })
+  }
+
+  /** message_done 之后才异步做反馈归类 / 线索晋升，关键路径零阻塞。 */
+  private learnFeedbackAfterDone(conversationId: string): void {
+    const pending = this.pendingFeedback.get(conversationId)
+    if (!pending) return
+    this.pendingFeedback.delete(conversationId)
+    setImmediate(() => {
+      try {
+        applyFeedback(pending.text, pending.kind, new Date(pending.at).getHours())
+      } catch {
+        // 规则学习失败不影响任何对话或任务
+      }
+    })
+  }
+
+  private notifyForRun(conversationId: string, title: string, body: string): void {
+    const mode = this.runNotifyModes.get(conversationId) ?? 'normal'
+    if (mode === 'suppressed') return
+    if (mode === 'silent') {
+      queueFollowUp(title, body)
+      return
+    }
+    if (mode === 'gated' && !isChatQuiet()) {
+      if (this.pendingNotifications.length < 50) {
+        this.pendingNotifications.push({ title, body })
+      }
+      return
+    }
+    this.notify(title, body)
+  }
+
   private async launch(
-    task: AutonomousTask
+    task: AutonomousTask,
+    gate: ProactiveGate = DEFAULT_GATE
   ): Promise<{ runRecordId: string; conversationId: string }> {
     if (!getSetting<boolean>('agent.wish.enabled', true)) {
       throw new Error('许愿模式未启用，请先在设置中开启')
@@ -176,18 +343,24 @@ class AutonomousScheduler {
       runRecordId: runRecord.id,
       conversationId
     })
+    this.taskConversations.set(conversationId, task.name)
+    this.runNotifyModes.set(conversationId, gate.notifyMode)
 
     const prompt = resolveWishPrompt({
       task,
       lessons: store.listLessons({ projectPath: task.workingDir, limit: 12 })
     })
+    this.rememberSelfPrompt(prompt)
     const emit = agentRuntime.withBus(() => {})
     try {
       const { runId } = agentRuntime.send(
         {
           conversationId,
           parentMessageId: null,
-          content: prompt
+          content: prompt,
+          // 周期自主任务走低优先级 + 可抢占：前台聊天来了自动让路。
+          priority: 'proactive',
+          preemptible: true
         },
         emit
       )
@@ -198,10 +371,11 @@ class AutonomousScheduler {
         runRecordId: runRecord.id,
         conversationId
       })
-      this.notify(`自主任务已启动：${task.name}`, '尚搏 Agent 正在许愿模式下执行')
+      this.notifyForRun(conversationId, `自主任务已启动：${task.name}`, '尚搏 Agent 正在许愿模式下执行')
     } catch (error) {
       this.activeTasks.delete(task.id)
       this.activeRuns.delete(conversationId)
+      this.runNotifyModes.delete(conversationId)
       const message = error instanceof Error ? error.message : String(error)
       store.updateRun(runRecord.id, {
         status: 'failed',
@@ -224,10 +398,21 @@ class AutonomousScheduler {
    * message_done 只代表某条助手消息结束，队列里仍可能有后续修复消息。
    */
   private observe(event: AgentEvent): void {
-    if (event.type !== 'message_done' && event.type !== 'run_error' && event.type !== 'run_end') return
+    if (event.type === 'run_start') {
+      this.observeUserMessage(event)
+      return
+    }
+    if (event.type === 'message_done') {
+      // Dreaming 反馈归类一律放在消息结束之后异步执行（关键路径零阻塞纪律）。
+      this.learnFeedbackAfterDone(event.conversationId)
+      return
+    }
+    if (event.type !== 'run_error' && event.type !== 'run_end') return
     const active = this.activeRuns.get(event.conversationId)
-    if (!active) return
-    if (event.type === 'message_done') return
+    if (!active) {
+      this.pendingFeedback.delete(event.conversationId)
+      return
+    }
     if (event.type === 'run_error') {
       this.finishFailure(active, event.error)
       return
@@ -235,6 +420,12 @@ class AutonomousScheduler {
     if (event.type === 'run_end' && event.queued === 0) {
       void this.verify(active.taskId, active.runRecordId, active.conversationId)
     }
+  }
+
+  /** 自发 prompt 集合设上限，避免长年运行无限增长。 */
+  private rememberSelfPrompt(prompt: string): void {
+    if (this.selfSentPrompts.size > 100) this.selfSentPrompts.clear()
+    this.selfSentPrompts.add(prompt)
   }
 
   private async verify(taskId: string, runRecordId: string, conversationId: string): Promise<void> {
@@ -278,9 +469,16 @@ class AutonomousScheduler {
           output: result.output
         }
       })
+      this.rememberSelfPrompt(retryPrompt)
       try {
         const { runId } = agentRuntime.send(
-          { conversationId, parentMessageId: null, content: retryPrompt },
+          {
+            conversationId,
+            parentMessageId: null,
+            content: retryPrompt,
+            priority: 'proactive',
+            preemptible: true
+          },
           agentRuntime.withBus(() => {})
         )
         store.updateRun(runRecordId, { runId, status: 'running' })
@@ -323,8 +521,9 @@ class AutonomousScheduler {
         null,
         store.computeNextRunAt(task.schedule, task.intervalMinutes)
       )
-      this.notify(`许愿完成：${task.name}`, '验收已通过，结果已写回会话')
+      this.notifyForRun(conversationId, `许愿完成：${task.name}`, '验收已通过，结果已写回会话')
     }
+    this.runNotifyModes.delete(conversationId)
   }
 
   private finishFailure(
@@ -347,8 +546,9 @@ class AutonomousScheduler {
         error.slice(0, 4000),
         store.computeNextRunAt(task.schedule, task.intervalMinutes)
       )
-      this.notify(`许愿失败：${task.name}`, error.slice(0, 160))
+      this.notifyForRun(active.conversationId, `许愿失败：${task.name}`, error.slice(0, 160))
     }
+    this.runNotifyModes.delete(active.conversationId)
   }
 
   /**

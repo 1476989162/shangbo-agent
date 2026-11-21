@@ -143,7 +143,15 @@ export async function runSubagent(input: unknown, ctx: SubagentCallbacks): Promi
     const toolUses: { id: string; name: string; input: unknown }[] = []
     let stopReason = 'stop'
     for await (const chunk of ctx.stream(
-      { model: ctx.model, system, messages, tools: ctx.schemas, maxTokens: ctx.maxTokens, reasoningEffort: ctx.reasoningEffort },
+      {
+        model: ctx.model,
+        system,
+        messages,
+        tools: ctx.schemas,
+        maxTokens: ctx.maxTokens,
+        reasoningEffort: ctx.reasoningEffort,
+        priority: 'task'
+      },
       ctx.signal,
       ctx.providerId
     )) {

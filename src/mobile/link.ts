@@ -8,7 +8,7 @@
  */
 
 import { b64urlDecode, b64urlEncode, paramHashOf, type SealedMessage } from './crypto-web'
-import { openXChaCha, sealXChaCha } from './chacha'
+import { buildNonce24, checkNonceSeq, openXChaCha, sealXChaCha } from './chacha'
 
 export interface MobileCredentials {
   relayUrl: string
@@ -43,6 +43,11 @@ export class MobileLink {
   >()
   private reqSeq = 0
   private pairAcknowledged = false
+
+  /** 配对是否已获桌面确认：App 用它决定显示已配对还是等待确认。 */
+  wasPairAcknowledged(): boolean {
+    return this.pairAcknowledged
+  }
   private joinWaiter: {
     resolve: () => void
     reject: (error: Error) => void
@@ -213,11 +218,11 @@ export class MobileLink {
   private async sealFrame(plaintext: string): Promise<ArrayBuffer> {
     if (!this.cipherKey) throw new Error('未配对')
     const seq = this.sendSeq++
-    const nonce = new Uint8Array(24)
-    crypto.getRandomValues(nonce.subarray(0, 12))
-    const view = new DataView(nonce.buffer)
-    view.setUint32(16, Math.floor(seq / 0x100000000), false)
-    view.setUint32(20, seq >>> 0, false)
+    if (seq > 0xffffffff) throw new Error('序号耗尽请重新配对')
+    // nonce 布局必须与桌面 SessionCipher.seal 完全一致：12B 随机 + hi/be32 + lo/be32 + 4 零字节
+    const rand12 = new Uint8Array(12)
+    crypto.getRandomValues(rand12)
+    const nonce = buildNonce24(seq, rand12)
     const sealed = await sealXChaCha(new TextEncoder().encode(plaintext), nonce, this.cipherKey)
     const frame: SealedMessage = { seq, nonce: b64urlEncode(nonce), data: b64urlEncode(sealed) }
     const bytes = new TextEncoder().encode(JSON.stringify(frame))
@@ -232,10 +237,7 @@ export class MobileLink {
     const nonce = b64urlDecode(frame.nonce)
     const sealed = b64urlDecode(frame.data)
     if (nonce.length !== 24) throw new Error('非法 nonce')
-    const view = new DataView(nonce.buffer, nonce.byteOffset)
-    const hi = view.getUint32(16, false)
-    const lo = view.getUint32(20, false)
-    if (hi * 0x100000000 + lo !== frame.seq) throw new Error('序号与 nonce 不一致')
+    if (!checkNonceSeq(nonce, frame.seq)) throw new Error('序号与 nonce 不一致')
     const plain = await openXChaCha(sealed, nonce, this.cipherKey)
     if (!plain) throw new Error('解密失败')
     this.recvSeen.add(frame.seq)

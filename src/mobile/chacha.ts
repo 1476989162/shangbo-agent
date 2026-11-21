@@ -103,10 +103,47 @@ function poly1305Mac(msg: Uint8Array, key32: Uint8Array): Uint8Array {
   return out
 }
 
+/** 24 字节 nonce 构造（与桌面 seqToBytes 12 字节布局一致）：12B 随机 + hi/be32 + lo/be32 + 4 零字节。 */
+export function buildNonce24(seq: number, rand12: Uint8Array): Uint8Array {
+  if (!Number.isInteger(seq) || seq < 0 || seq > 0xffffffff) throw new Error('序号越界请重新配对')
+  if (rand12.length !== 12) throw new Error('随机前缀必须为 12 字节')
+  const nonce = new Uint8Array(24)
+  nonce.set(rand12, 0)
+  const view = new DataView(nonce.buffer)
+  view.setUint32(12, Math.floor(seq / 0x100000000), false)
+  view.setUint32(16, seq >>> 0, false)
+  // 20-23 保持全零
+  return nonce
+}
+
+/** 校验 nonce 后 12 字节与序号一致（与桌面 timingSafeEqual 等价，不一致返回 false）。 */
+export function checkNonceSeq(nonce24: Uint8Array, seq: number): boolean {
+  if (nonce24.length !== 24) return false
+  if (!Number.isInteger(seq) || seq < 0 || seq > 0xffffffff) return false
+  const view = new DataView(nonce24.buffer, nonce24.byteOffset, nonce24.byteLength)
+  const hi = view.getUint32(12, false)
+  const lo = view.getUint32(16, false)
+  if (view.getUint32(20, false) !== 0) return false
+  return hi * 0x100000000 + lo === seq
+}
+
+/** RFC 8439 §2.8 的 Poly1305 输入：密文补 16 对齐 + le64(aad_len=0) + le64(密文长)。桌面 OpenSSL 即此构造。 */
+export function macData8439(ciphertext: Uint8Array): Uint8Array {
+  const paddedLen = (ciphertext.length + 15) & ~15
+  const m = new Uint8Array(paddedLen + 16)
+  m.set(ciphertext, 0)
+  const view = new DataView(m.buffer)
+  view.setUint32(paddedLen, 0, true)
+  view.setUint32(paddedLen + 4, 0, true)
+  view.setUint32(paddedLen + 8, ciphertext.length >>> 0, true)
+  view.setUint32(paddedLen + 12, Math.floor(ciphertext.length / 0x100000000), true)
+  return m
+}
+
 async function hkdfSubkey(key: Uint8Array, salt16: Uint8Array): Promise<Uint8Array> {
-  const baseKey = await crypto.subtle.importKey('raw', key as BufferSource, 'HKDF', false, ['deriveBits'])
+  const baseKey = await crypto.subtle.importKey('raw', key, 'HKDF', false, ['deriveBits'])
   const bits = await crypto.subtle.deriveBits(
-    { name: 'HKDF', hash: 'SHA-256', salt: salt16 as BufferSource, info: new TextEncoder().encode('xchacha-subkey') },
+    { name: 'HKDF', hash: 'SHA-256', salt: salt16, info: new TextEncoder().encode('xchacha-subkey') },
     baseKey,
     256
   )
@@ -134,7 +171,8 @@ export async function sealXChaCha(
     offset += take
   }
   // aad 为空，poly 输入 = ciphertext（按 RFC 8439 构造，此处简化：ciphertext 直接 mac）
-  const tag = poly1305Mac(out, polyKey)
+  // aad 为空：mac 输入 = 密文补齐 + le64(0) + le64(密文长)，与桌面 OpenSSL 完全一致
+  const tag = poly1305Mac(macData8439(out), polyKey)
   const result = new Uint8Array(out.length + 16)
   result.set(out, 0)
   result.set(tag, out.length)
@@ -154,7 +192,7 @@ export async function openXChaCha(
     const data = sealed.subarray(0, sealed.length - 16)
     const tag = sealed.subarray(sealed.length - 16)
     const polyKey = chachaBlock(subkey, nonce12, 0).subarray(0, 32)
-    const expect = poly1305Mac(data, polyKey)
+    const expect = poly1305Mac(macData8439(data), polyKey)
     let diff = 0
     for (let i = 0; i < 16; i++) diff |= tag[i] ^ expect[i]
     if (diff !== 0) return null

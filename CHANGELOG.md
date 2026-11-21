@@ -2,6 +2,33 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.8] - 2026-11-20
+
+对标 `simplexai-labs/linger` 的架构演进版本：打通三个悬空的纯函数内核，补齐双层记忆、主动决策、端点级调度、异步分身、真实硬件探测与桌面并发车道；同时纳入手机远程配对确认与移动端改动，以及设置页 Autopilot 可视化。
+
+### 新增
+
+- **双层记忆（Personal Wiki）**：SQLite v8 迁移一次建齐 5 张表；`wiki_search` / `wiki_upsert` 工具；RRF 双榜检索（Wiki 实体概览榜 + 历史消息精确榜，最多 6 个同义别名）；Section 正文 3000 字、Change Log 20 条且时间戳由代码生成。动态记忆从 `system` 移到首条 user 消息的 `<memory_context>`，保住 Prompt Cache 恒定前缀；每 5 次成功回合后台异步提取实体（本地确定性规则，零 LLM、零阻塞）。
+- **Proactive / Dreaming 闭环**：`decideProactiveDetailed` 结构化 bucket；22:00–08:00 静默期、每日 5 条上限、3 分钟聊天安静窗口、静默期消息次日汇总；用户反馈支持「以后这类都…」一步成规，普通吐槽仍走 Clue × 2，深夜绝不直达 stay-silent。默认不跳过周期任务，严格跳过由 `agent.proactive.strictSkip` 控制。
+- **ModelScheduler**：按端点维护 6 级优先级队列、软硬水位（给 chat/approval 留最后一槽）、AIMD 自适应并发（429/超时折半并冻结 60s）、后台抢占让路；首字节超时在拿到槽位后才计时。全链路标记 approval / chat / task / proactive / compaction。
+- **Meta / AlterEgo 异步分身**：`task_create` / `task_status` / `task_send` / `task_cancel`，独立隐藏子会话、`.shangbo-tasks/<id>/` 隔离产出、`team.md` 协作协议、`delegated_task_report` 事件；单父会话最多 10 个并发，默认不自动唤醒 Meta（可开关）。
+- **Model Autopilot**：`probeRealHardware`（nvidia-smi → WMI → 如实 cpu-only）、`/health` → `/v1/models` 健康探测回退、16-token 真题验活；默认禁用的「本地推理引擎（OpenAI 兼容）」预置端点与老库自愈；IPC / Preload / API 接线，设置页「模型供应商」新增「一键探测显卡 / 真题验活」。
+- **Screen Lane**：全局 FIFO 键鼠互斥锁、操作前预写 WAL（状态 unknown 永久禁止重放）、前台窗口焦点守护（用户切走即停手，不抢焦点）；5 个物理输入工具统一包裹。
+- **手机远程配对确认与移动端**（工作区既有改动）：`src/main/remote/`、`src/mobile/` 相关兼容与待确认队列。
+
+### 修复
+
+- **WMI 显存溢出误判**：12GB 卡常被 `Win32_VideoController.AdapterRAM`（uint32）报成 4095MB；改为识别溢出、按确定型号推断并显式标注 `vramNote`，未知型号返回 `unknown` 而非 `cpu-only`，虚拟显示适配器（Oray / GameViewer）被过滤。
+- **本地引擎状态误报**：官方未承诺 `/health`，改为 `/health` → `/v1/models` 回退，避免在线引擎被判成未启动。
+- **Windows 全量单测启动失败**：vitest 5 一次拉起 74 个 worker 会让全部测试文件报 `Cannot read properties of undefined (reading 'config')`；`vitest.config.ts` 固定 `maxWorkers: 4`，文档验收命令可原样运行。
+- 修复英文 `whenever` 中的 `never` 被否定词正则误命中，把「立刻告诉我」错判成「别提醒」。
+
+### 测试
+
+- TS 81 文件 / 565 用例全过；`npm run typecheck`（node + web）通过；既有 C 二进制测试套件 51/51 通过；`npm run mobile:build` 成功。
+- `versionDrift.test.ts` 通过：package.json / cCoreBridge / C 源码版本单源对齐 0.9.8，TS 硬红线基线未弱化。
+- 本地发版说明：本机构建时 MSVC 环境初始化依赖 `reg.exe`，被沙箱安全策略禁止；本版本 C 源码仅修改版本号字符串（功能代码零改动），因此未重编译 C 内核，改为对既有 `shangbo_agent.exe` 做等长版本串对齐（3 处），并以 `electron-vite build` 重新生成 `out/`。如需完全从源码重编 C 内核，请在本机普通终端执行 `npm run build:c` 后再打包。
+
 ## [0.9.7] - 2026-11-18
 
 CLI 桥接修复版本：codex/claude/qoder 外部调用桥在 Windows 下全部 spawn ENOENT，根因是 execFile 裸名直调（.cmd 必须经 cmd.exe）；新增 opencode 双桥，四家齐了。

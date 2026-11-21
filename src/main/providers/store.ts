@@ -13,6 +13,14 @@ const SEED_FLAG = 'providers.seeded'
 
 /** Magpie 网关种子唯一真源：新增模型只改这里，种子+自愈共用。 */
 export const MAGPIE_BASE_URL = 'http://127.0.0.1:34254/v1'
+
+/**
+ * 本地推理引擎（OpenAI 兼容 / Anthropic messages / responses 三协议的常见端口）。
+ * 预置但默认禁用：只有用户在本机跑起引擎并「真题验活」通过后才应启用，
+ * 避免把一个没装好的端点混进供应商降级链。模型清单可在设置页用 /v1/models 刷新。
+ */
+export const LOCAL_ENGINE_BASE_URL = 'http://127.0.0.1:8080/v1'
+export const LOCAL_ENGINE_MODELS = ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B', 'Qwen2.5-7B']
 export const MAGPIE_MODELS = [
   'trae-cn/deepseek-v4.1-flash-max',
   'maas-qianwenaiapi/deepseek-v4.1-flash-1017',
@@ -198,6 +206,14 @@ export function ensureDefaultProviders(): void {
       models: ['qwen2.5:7b'],
       enabled: false,
       priority: 90
+    },
+    {
+      name: '本地推理引擎（OpenAI 兼容）',
+      kind: 'openai-compatible',
+      baseUrl: LOCAL_ENGINE_BASE_URL,
+      models: [...LOCAL_ENGINE_MODELS],
+      enabled: false,
+      priority: 95
     }
   ]
 
@@ -211,6 +227,30 @@ export function ensureDefaultProviders(): void {
   // 网关 /v1/models 明明有 50 个（含 3 个 maas-qianwenaiapi/*），
   // 用户在尚搏下拉里看不到就是因为这里没收录。自动补齐，不覆盖用户已有勾选。
   healMagpieModels()
+  healLocalEngineProvider()
+}
+
+/**
+ * 老库自愈：已经种子化过的库不会再走 presets，这里补一个默认禁用的本地端点。
+ * 幂等；用户删掉后不会强行塞回（只有完全不存在于 providers 表时才补）。
+ */
+export function healLocalEngineProvider(): void {
+  try {
+    const existing = getDb()
+      .prepare('SELECT id FROM providers WHERE base_url = ?')
+      .get(LOCAL_ENGINE_BASE_URL)
+    if (existing) return
+    upsertProvider({
+      name: '本地推理引擎（OpenAI 兼容）',
+      kind: 'openai-compatible',
+      baseUrl: LOCAL_ENGINE_BASE_URL,
+      models: [...LOCAL_ENGINE_MODELS],
+      enabled: false,
+      priority: 95
+    })
+  } catch {
+    // 自愈失败不挡启动，用户可手动新增供应商
+  }
 }
 
 /** 补齐 Magpie 网关缺失模型（幂等，可重复跑；保留用户自加模型，只做并集）。 */

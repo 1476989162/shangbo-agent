@@ -37,6 +37,19 @@ export interface PairingInfo {
   fingerprint: string
 }
 
+/** 桌面待确认的配对请求：手机扫码提交公钥后，需桌面人工确认才派生会话密钥。 */
+export interface PendingPairing {
+  deviceName: string
+  phonePubB64: string
+  phoneToken: string
+  /** 手机公钥指纹：确认时与手机端显示核对，防止中间人。 */
+  fingerprint: string
+  receivedAt: number
+}
+
+/** 配对请求有效期：与一次性配对码一致，5 分钟，过期自动清理。 */
+const PENDING_PAIRING_MS = 5 * 60 * 1000
+
 type StatusListener = (status: RemoteStatus, detail?: string) => void
 
 class RemoteService {
@@ -154,6 +167,8 @@ class RemoteService {
         getIdentity: () => getIdentity(),
         signChallenge: (challenge, publicKeyB64) => signChallenge(challenge, publicKeyB64),
         getSession: () => {
+          // 重启后内存会话丢失：在这里按需从 secrets 恢复，避免必须重新配对。
+          this.ensureSessionLoaded()
           if (!this.currentDeviceId) return null
           const cipher = this.sessions.get(this.currentDeviceId)
           if (!cipher) return null
@@ -162,14 +177,8 @@ class RemoteService {
         handlerContext: () => this.handlerContext(),
         onStatus: (s, d) => this.emit(s, d ?? ''),
         onPairingHello: (hello) => {
-          try {
-            this.completePairing(hello.deviceName, hello.phonePub, hello.phoneToken)
-            void this.client?.confirmPairing(hello.phoneToken).catch((error) => {
-              log.warn('[remote] 配对确认发送失败', error)
-            })
-          } catch (error) {
-            log.warn('[remote] 完成配对失败', error)
-          }
+          // 只暂存，需人工确认：设置页出现确认按钮前手机一直显示等待桌面确认。
+          this.handlePairingHello(hello.deviceName, hello.phonePub, hello.phoneToken)
         }
       })
     }
@@ -178,8 +187,27 @@ class RemoteService {
 
   /** 申请配对：返回二维码内容。必须在线才能申请。 */
   async issuePairing(phoneName = ''): Promise<PairingInfo> {
-    if (!this.client) throw new Error('远程功能未开启')
-    const { code, expiresAt } = await this.client.issuePairingCode()
+    if (!this.isEnabled()) throw new Error('远程功能未开启：请先打开「开启手机远程」开关')
+    if (!this.client) {
+      throw new Error(`中转未连接（${this.status}${this.statusDetail ? `：${this.statusDetail}` : ''}），请等状态变 online 后再点生成配对码`)
+    }
+    if (this.status !== 'online') {
+      const d = this.statusDetail || ''
+      const needKey =
+        d.includes('准入') || d.includes('身份') || d.includes('指纹') || d.includes('access denied') || d.includes('not allowed') || d.includes('banned')
+      const hint = needKey
+        ? '：请核对「中转准入密钥」是否与中转 RELAY_ACCESS_KEY 一致，白名单模式请把本机指纹加入 RELAY_ALLOWED_DESKTOPS'
+        : d ? `：${d}` : '：中转还没连上，稍等重连'
+      throw new Error(`中转未连接（${this.status}${hint}），online 后再生成配对码`)
+    }
+    let code: string
+    let expiresAt: number
+    try {
+      ;({ code, expiresAt } = await this.client.issuePairingCode())
+    } catch (error) {
+      const d = this.statusDetail ? `（当前 ${this.status}：${this.statusDetail}）` : `（当前 ${this.status}）`
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${d}`)
+    }
     const { publicRaw } = this.ensureDeviceKeys()
     const fingerprint = publicKeyFingerprint(publicRaw)
     const qrText = buildPairingUrl(
@@ -198,6 +226,28 @@ class RemoteService {
    */
   getIdentityInfo(): { publicKeyB64: string; fingerprint: string } {
     return ensureIdentity()
+  }
+
+  /** 重启后内存会话丢失：按最近配对设备从 secrets 恢复，会话不断必须重新配对。 */
+  private ensureSessionLoaded(): void {
+    if (this.currentDeviceId && this.sessions.has(this.currentDeviceId)) return
+    try {
+      const devices = listPairedDevices().filter((d) => !d.revokedAt)
+      for (const d of devices) {
+        if (this.sessions.has(d.id)) {
+          if (!this.currentDeviceId) this.currentDeviceId = d.id
+          continue
+        }
+        const keyB64 = getSecret(SESSION_PREFIX + d.id)
+        if (!keyB64) continue
+        try {
+          const key = Buffer.from(keyB64, 'base64url')
+          if (key.length !== 32) continue
+          this.sessions.set(d.id, new SessionCipher(key))
+          if (!this.currentDeviceId) this.currentDeviceId = d.id
+        } catch {}
+      }
+    } catch {}
   }
 
   /** 配对完成：手机经中转控制面提交 X25519 公钥，桌面派生会话密钥并落库。 */
@@ -234,6 +284,101 @@ class RemoteService {
     this.currentDeviceId = device.id
     appendRemoteAudit('remote.pair', `device=${device.name}`)
     return { deviceId: device.id, fingerprint: publicKeyFingerprint(phonePub) }
+  }
+
+  /** 待确认配对（phoneToken -> 请求）：需用户在设置页点确认才完成握手。 */
+  private pendingPairings = new Map<string, PendingPairing>()
+  private pendingListeners = new Set<() => void>()
+
+  /** 配对请求变化订阅（设置页轮询兜底 + 事件即时刷新）。 */
+  onPendingChange(fn: () => void): () => void {
+    this.pendingListeners.add(fn)
+    return () => {
+      this.pendingListeners.delete(fn)
+    }
+  }
+
+  private emitPending(): void {
+    for (const fn of [...this.pendingListeners]) {
+      try {
+        fn()
+      } catch {}
+    }
+  }
+
+  private sweepPending(): void {
+    const now = Date.now()
+    let changed = false
+    for (const [token, p] of this.pendingPairings) {
+      if (now - p.receivedAt > PENDING_PAIRING_MS) {
+        this.pendingPairings.delete(token)
+        changed = true
+      }
+    }
+    if (changed) this.emitPending()
+  }
+
+  /** 待确认的配对请求列表（自动清理过期）。 */
+  listPendingPairings(): PendingPairing[] {
+    this.sweepPending()
+    return [...this.pendingPairings.values()].sort((a, b) => a.receivedAt - b.receivedAt)
+  }
+
+  /**
+   * 收到手机配对请求：只暂存需人工确认，不再自动派生密钥。
+   * 同一 phoneToken 重复上报（手机重连）直接覆盖避免堆积。
+   */
+  handlePairingHello(deviceName: string, phonePubB64: string, phoneToken: string): void {
+    try {
+      const phonePub = Buffer.from(phonePubB64, 'base64url')
+      if (phonePub.length !== 32) {
+        log.warn('[remote] 配对请求公钥非法已忽略')
+        return
+      }
+      if (!phoneToken) return
+      this.pendingPairings.set(phoneToken, {
+        deviceName: deviceName?.slice(0, 100) || '未命名手机',
+        phonePubB64,
+        phoneToken,
+        fingerprint: publicKeyFingerprint(phonePub),
+        receivedAt: Date.now()
+      })
+      this.sweepPending()
+      this.emitPending()
+      appendRemoteAudit('remote.pair', `pending device=${deviceName}`)
+    } catch (error) {
+      log.warn('[remote] 暂存配对请求失败', error)
+    }
+  }
+
+  /** 人工确认配对：派生会话密钥并落库，通知中转放行手机。 */
+  async confirmPendingPairing(phoneToken: string): Promise<{ deviceId: string; fingerprint: string }> {
+    const p = this.pendingPairings.get(phoneToken)
+    if (!p) throw new Error('配对请求已过期或不存在请手机重新扫码')
+    const res = this.completePairing(p.deviceName, p.phonePubB64, p.phoneToken)
+    this.pendingPairings.delete(phoneToken)
+    this.emitPending()
+    try {
+      await this.client?.confirmPairing(phoneToken)
+    } catch (error) {
+      log.warn('[remote] 配对确认发送失败', error)
+    }
+    return res
+  }
+
+  /** 拒绝配对：丢弃请求并通知中转断开该手机。 */
+  async denyPendingPairing(phoneToken: string): Promise<boolean> {
+    const p = this.pendingPairings.get(phoneToken)
+    if (!p) return false
+    this.pendingPairings.delete(phoneToken)
+    this.emitPending()
+    appendRemoteAudit('remote.pair.deny', `deny device=${p.deviceName}`)
+    try {
+      await this.client?.revokePhone(phoneToken)
+    } catch (error) {
+      log.warn('[remote] 拒绝配对后吊销手机失败', error)
+    }
+    return true
   }
 
   listDevices() {

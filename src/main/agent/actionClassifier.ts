@@ -78,7 +78,14 @@ export async function runActionClassifierLlm(
     let text = ''
     const model = resolveTarget(opts.providerId ?? null, null).model
     for await (const chunk of stream(
-      { model, system, messages: [{ role: 'user', blocks: [{ type: 'text', text: user }] }], maxTokens: 200 },
+      {
+        model,
+        system,
+        messages: [{ role: 'user', blocks: [{ type: 'text', text: user }] }],
+        maxTokens: 200,
+        // 安全复核是审批链路：最高优先级，必要时直接抢占后台请求。
+        priority: 'approval'
+      },
       opts.signal,
       opts.providerId ?? undefined,
       opts.firstByteTimeoutMs !== undefined ? { firstByteTimeoutMs: opts.firstByteTimeoutMs } : undefined

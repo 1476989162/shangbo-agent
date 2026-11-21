@@ -30,7 +30,8 @@ import type {
   ConversationRuntimeState,
   Message,
   MessageStatus,
-  Usage
+  Usage,
+  WorkPriority
 } from '../../shared/types'
 // 值导入（非 type）：桌面类工具判定要受 computerUse 总开关约束
 import { isDesktopTool } from '../../shared/types'
@@ -924,7 +925,8 @@ export class AgentRuntime {
         userMessage,
         { providerId: payload.providerId, model: payload.model },
         emit,
-        controller
+        controller,
+        { priority: payload.priority, preemptible: payload.preemptible }
       )
     } finally {
       if (worktreeCleanup) {
@@ -956,7 +958,10 @@ export class AgentRuntime {
             '你是对话摘要器。把下面的历史压成不超过 400 字的中文摘要，保留：用户目标、已确认的事实与约束、已完成与未完成的事项、关键文件与命令。不要编造，不要输出标题。',
           messages: [{ role: 'user', blocks: [{ type: 'text', text: transcript }] }],
           maxTokens: 800,
-          temperature: 0
+          temperature: 0,
+          // 历史压缩是后台工作：空闲槽位才跑，前台到来可抢占让路。
+          priority: 'compaction',
+          preemptible: true
         },
         signal,
         providerId
@@ -982,7 +987,9 @@ export class AgentRuntime {
     userMessage: Message,
     target: { providerId?: string | null; model?: string | null },
     emit: Emitter,
-    controller: AbortController
+    controller: AbortController,
+    /** 主进程内部：自主任务标 proactive + preemptible，前台对话不传。 */
+    workPriority?: { priority?: WorkPriority; preemptible?: boolean }
   ): Promise<void> {
     // 模式判定只做一次：主循环与工具审批共用，避免两边各判一套。
     const triggerText = userMessage.blocks
@@ -1054,7 +1061,12 @@ export class AgentRuntime {
       target,
       emit,
       controller,
-      { effectiveMode, workMode: userMessage.usageMode ?? null }
+      {
+        effectiveMode,
+        workMode: userMessage.usageMode ?? null,
+        priority: workPriority?.priority,
+        preemptible: workPriority?.preemptible
+      }
     )
   }
 

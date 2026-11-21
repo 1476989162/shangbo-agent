@@ -25,6 +25,7 @@ import {
   runAgentDesktop,
   type SnapshotData
 } from '../computer/agentDesktop'
+import { FocusLostError, ScreenLaneError, screenLane } from '../computer/screenLane'
 
 const execAsync = promisify(exec)
 
@@ -1602,6 +1603,273 @@ const desktopListWindows: ToolDefinition = {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Personal Wiki 双榜检索（linger Wiki-and-memory）：
+ * 概览榜给实体全貌，精确榜给历史原话；最多 6 个中英别名参与 RRF 融合。
+ * 只读、免审批，动态 import 避免工具注册表顶层带上 DB 依赖。
+ */
+const wikiSearch: ToolDefinition = {
+  name: 'wiki_search',
+  description:
+    '检索个人记忆库：返回「Wiki 实体概览榜」（人物/客户/项目/主题的结构化页面）与「原始对话精确榜」（命中关键词的历史消息片段）。需要查以前聊过的人、项目、决策、报价时用。可传最多 6 个中英同义词/别名提高召回率。',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: '主查询词，如「Acme 报价」' },
+      alternateQueries: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '最多 6 个同义词 / 英文名 / 别名，各自成榜做 RRF 融合',
+        maxItems: 6
+      },
+      kind: {
+        type: 'string',
+        enum: ['client', 'contact', 'project', 'topic', 'session'],
+        description: '只查某一类实体页'
+      },
+      limit: { type: 'number', description: '每榜返回条数，默认 5' }
+    },
+    required: ['query']
+  },
+  requiresApproval: false,
+  async execute(input) {
+    const params = z
+      .object({
+        query: z.string().min(1).max(300),
+        alternateQueries: z.array(z.string().min(1).max(300)).max(6).optional(),
+        kind: z.enum(['client', 'contact', 'project', 'topic', 'session']).optional(),
+        limit: z.number().int().min(1).max(20).optional()
+      })
+      .parse(input)
+    const { searchKnowledge } = await import('../memory/wikiRepo')
+    return truncate(JSON.stringify(searchKnowledge(params), null, 2))
+  }
+}
+
+/** Section 级记忆写入：Change Log 的时间戳与摘要由代码生成，模型不可伪造。 */
+const wikiUpsert: ToolDefinition = {
+  name: 'wiki_upsert',
+  description:
+    '把一条事实写入个人记忆库（Personal Wiki）。按「实体页 + Section」组织：同名 Section 覆盖并记改写理由，页面有自动 Change Log。用于记住客户、联系人、项目、决策、偏好等跨会话要复用的信息；不要用来存临时输出或大段日志。',
+  parameters: {
+    type: 'object',
+    properties: {
+      kind: {
+        type: 'string',
+        enum: ['client', 'contact', 'project', 'topic', 'session'],
+        description: '实体类型'
+      },
+      title: { type: 'string', description: '实体名，如「Acme」「李总」「尚搏 Agent」' },
+      section: { type: 'string', description: '页内小节名，如「报价」「决策」「偏好」' },
+      body: { type: 'string', description: '该小节的正文，上限 3000 字符' },
+      reason: { type: 'string', description: '本次改写理由（可选，会写入 Change Log）' },
+      links: { type: 'array', items: { type: 'string' }, description: '关联的其他实体页 id（可选）' }
+    },
+    required: ['kind', 'title', 'section', 'body']
+  },
+  requiresApproval: false,
+  async execute(input) {
+    const params = z
+      .object({
+        kind: z.enum(['client', 'contact', 'project', 'topic', 'session']),
+        title: z.string().min(1).max(120),
+        section: z.string().min(1).max(120),
+        body: z.string().min(1).max(3_000),
+        reason: z.string().max(200).optional(),
+        links: z.array(z.string().max(200)).max(20).optional()
+      })
+      .parse(input)
+    const { upsertWikiPage } = await import('../memory/wikiRepo')
+    const page = upsertWikiPage(params)
+    return `已写入记忆库：${page.title} / ${params.section}（页面 id：${page.id}，Change Log ${page.changes.length} 条）。`
+  }
+}
+
+/**
+ * Meta / AlterEgo 异步分身工具集（非阻塞）：
+ * 动态 import 避免 tools → taskDelegation → runtime → tools 的循环依赖。
+ */
+const taskCreate: ToolDefinition = {
+  name: 'task_create',
+  description:
+    '把一个耗时较长、可独立推进的任务派给后台分身（AlterEgo），立即返回 taskId，不阻塞当前对话。分身有独立隐藏会话与 .shangbo-tasks/<taskId>/ 产出目录，完成后用 task_status 查结果。同一会话最多 10 个并发分身。复杂多角色任务可传 team 生成 team.md 协作协议。',
+  parameters: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: '任务标题' },
+      brief: { type: 'string', description: '任务目标、范围与交付要求，尽量具体' },
+      team: {
+        type: 'object',
+        description: '可选：多角色协作协议，会写成 team.md',
+        properties: {
+          goal: { type: 'string' },
+          coordinator: { type: 'string' },
+          members: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                role: { type: 'string' },
+                receivesFrom: { type: 'array', items: { type: 'string' } },
+                deliverable: { type: 'string' }
+              },
+              required: ['id', 'role', 'deliverable']
+            }
+          }
+        },
+        required: ['goal', 'members']
+      }
+    },
+    required: ['title', 'brief']
+  },
+  requiresApproval: false,
+  async execute(input, context) {
+    const params = z
+      .object({
+        title: z.string().min(1).max(200),
+        brief: z.string().min(1).max(8_000),
+        team: z
+          .object({
+            goal: z.string().min(1).max(2_000),
+            coordinator: z.string().max(100).optional(),
+            members: z
+              .array(
+                z.object({
+                  id: z.string().min(1).max(100),
+                  role: z.string().min(1).max(200),
+                  receivesFrom: z.array(z.string().max(100)).max(10).optional(),
+                  deliverable: z.string().min(1).max(500)
+                })
+              )
+              .max(10)
+          })
+          .optional()
+      })
+      .parse(input)
+    const delegation = await import('../agent/taskDelegation')
+    if (delegation.isDelegatedChildConversation(context.conversationId)) {
+      throw new Error('分身不允许再创建分身（禁止无限套娃）')
+    }
+    const result = delegation.startTask({
+      parentConversationId: context.conversationId,
+      title: params.title,
+      brief: params.brief,
+      workingDirectory: context.workingDirectory,
+      team: params.team
+    })
+    return truncate(JSON.stringify(result, null, 2))
+  }
+}
+
+const taskStatus: ToolDefinition = {
+  name: 'task_status',
+  description:
+    '查询本会话派出的后台分身状态（running / waiting_for_approval / idle / failed / canceled）、最新汇报与产出目录。不传 taskId 时列出全部。',
+  parameters: {
+    type: 'object',
+    properties: { taskId: { type: 'string', description: '可选：只查指定分身' } },
+    required: []
+  },
+  requiresApproval: false,
+  async execute(input, context) {
+    const params = z.object({ taskId: z.string().min(1).optional() }).parse(input ?? {})
+    const delegation = await import('../agent/taskDelegation')
+    const tasks = delegation.listDelegatedTasks(context.conversationId, params.taskId)
+    return truncate(JSON.stringify({ tasks }, null, 2))
+  }
+}
+
+const taskSend: ToolDefinition = {
+  name: 'task_send',
+  description: '给正在运行或已 idle / canceled 的后台分身追加补充指令，并重新唤醒它的子循环。',
+  parameters: {
+    type: 'object',
+    properties: {
+      taskId: { type: 'string' },
+      instruction: { type: 'string', description: '补充指令，如「顺便把新 Logo 也加上」' }
+    },
+    required: ['taskId', 'instruction']
+  },
+  requiresApproval: false,
+  async execute(input) {
+    const params = z
+      .object({ taskId: z.string().min(1), instruction: z.string().min(1).max(8_000) })
+      .parse(input)
+    const delegation = await import('../agent/taskDelegation')
+    const task = delegation.sendInstruction(params.taskId, params.instruction)
+    return truncate(
+      JSON.stringify({ taskId: task.id, state: task.state, workspaceDir: task.workspaceDir }, null, 2)
+    )
+  }
+}
+
+const taskCancel: ToolDefinition = {
+  name: 'task_cancel',
+  description: '暂停 / 取消后台分身（保留已生成文件与子会话历史，之后仍可用 task_send 恢复）。',
+  parameters: {
+    type: 'object',
+    properties: { taskId: { type: 'string' } },
+    required: ['taskId']
+  },
+  requiresApproval: false,
+  async execute(input) {
+    const params = z.object({ taskId: z.string().min(1) }).parse(input)
+    const delegation = await import('../agent/taskDelegation')
+    const task = delegation.cancelTask(params.taskId)
+    return truncate(JSON.stringify({ taskId: task.id, state: task.state }, null, 2))
+  }
+}
+
+/**
+ * 焦点守护：只在模型给了目标窗口（windowId / app）时才探测前台窗口。
+ * 探测不到或辅助进程不可用一律返回 null（放行），绝不因为守护本身卡死操作。
+ */
+screenLane.setFocusProvider(async () => {
+  try {
+    const run = await runAgentDesktop(['list-windows', '--focused'], { timeoutMs: 1_500 })
+    if (!run.ok || !run.envelope?.data) return null
+    const data = run.envelope.data
+    const nested = (data.window ?? data.focused) as Record<string, unknown> | undefined
+    const pickString = (...values: unknown[]): string | undefined =>
+      values.find((v): v is string => typeof v === 'string' && v.length > 0)
+    const windowId = pickString(data.windowId, data.window_id, data.id, nested?.id, nested?.windowId)
+    const app = pickString(data.app, data.process, nested?.app, nested?.process)
+    return windowId || app ? { windowId, app } : null
+  } catch {
+    return null
+  }
+})
+
+/**
+ * 把物理键鼠工具包进 Screen Lane：预写 WAL、FIFO 互斥、焦点丢失停手。
+ * 执行异常统一转成 isError 工具结果（含 opId 与「先重新快照」指令），不炸主循环。
+ */
+function withScreenLane(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    async execute(input, context) {
+      const raw = (input ?? {}) as Record<string, unknown>
+      const meta = {
+        conversationId: context.conversationId,
+        toolName: tool.name,
+        target: JSON.stringify(raw).slice(0, 200),
+        ...(typeof raw.windowId === 'string' ? { expectedWindowId: raw.windowId } : {}),
+        ...(typeof raw.app === 'string' ? { expectedApp: raw.app } : {})
+      }
+      try {
+        return await screenLane.runExclusive(meta, () => tool.execute(input, context))
+      } catch (error) {
+        const content =
+          error instanceof FocusLostError || error instanceof ScreenLaneError
+            ? error.message
+            : `桌面操作失败：${describeError(error)}`
+        return { content, isError: true }
+      }
+    }
+  }
+}
+
 const definitions: ToolDefinition[] = [
   getCurrentTime,
   listDirectory,
@@ -1623,14 +1891,20 @@ const definitions: ToolDefinition[] = [
   opencodeAsk,
   opencodeStatus,
   computerScreenshot,
-  computerClick,
-  computerType,
-  computerPressKey,
-  computerScroll,
+  withScreenLane(computerClick),
+  withScreenLane(computerType),
+  withScreenLane(computerPressKey),
+  withScreenLane(computerScroll),
   desktopListApps,
   desktopListWindows,
   desktopSnapshot,
-  desktopClickRef
+  withScreenLane(desktopClickRef),
+  wikiSearch,
+  wikiUpsert,
+  taskCreate,
+  taskStatus,
+  taskSend,
+  taskCancel
 ]
 
 const byName = new Map(definitions.map((tool) => [tool.name, tool]))
@@ -1643,7 +1917,9 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'search_files',
   'glob_files',
   'list_skills',
-  'read_skill'
+  'read_skill',
+  'wiki_search',
+  'task_status'
 ])
 export const toolRegistry = {
   all(): ToolDefinition[] {

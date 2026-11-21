@@ -331,6 +331,12 @@ export interface ContextStatics {
   memory: number
 }
 
+/**
+ * 模型端点的工作优先级（由高到低）。主进程内部用于 providers/scheduler.ts
+ * 的排队与抢占；渲染端不需要传，缺省按前台 chat 处理。
+ */
+export type WorkPriority = 'approval' | 'chat' | 'task' | 'proactive' | 'compaction' | 'background'
+
 export interface SendPayload {
   conversationId: string
   /** 新消息挂载到哪个父消息下；为 null 表示作为根消息（新分支起点）。 */
@@ -344,6 +350,10 @@ export interface SendPayload {
   viewMode?: UsageMode
   /** 开启隔离分支 (Worktree) */
   worktree?: boolean
+  /** 主进程内部：该轮请求的模型调度优先级（自主任务/后台任务用）。 */
+  priority?: WorkPriority
+  /** 主进程内部：是否允许为前台任务抢占让路并重新入队。 */
+  preemptible?: boolean
 }
 
 /** 主进程内部使用的发送请求：图片已落盘，只剩路径。 */
@@ -492,6 +502,17 @@ export type AgentEvent =
       conversationId: string
       messageId: string
       items: TodoItem[]
+    }
+  /** 后台分身（AlterEgo）完成 / 失败 / 等待审批时向主会话（Meta）汇报。 */
+  | {
+      type: 'delegated_task_report'
+      /** 父会话 id，不是分身自己的隐藏子会话 */
+      conversationId: string
+      taskId: string
+      childConversationId: string
+      state: 'running' | 'waiting_for_approval' | 'idle' | 'failed' | 'canceled'
+      report: string
+      error?: string
     }
 
 export interface ApprovalDecision {

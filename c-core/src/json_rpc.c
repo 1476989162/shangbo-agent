@@ -591,7 +591,7 @@ void handle_json_rpc_line(const char *line, FILE *out) {
     }
 
     if (strcmp(action, "ping") == 0) {
-        fprintf(out, "{\"id\":%d,\"success\":true,\"engine\":\"c-core\",\"version\":\"0.9.7\"}\n", id);
+        fprintf(out, "{\"id\":%d,\"success\":true,\"engine\":\"c-core\",\"version\":\"0.9.8\"}\n", id);
         free(action);
         return;
     }
@@ -976,7 +976,7 @@ void handle_json_detect_stuck_cmd(int limit, const char *history_json) {
 }
 
 void handle_json_ping_cmd(void) {
-    printf("{\"success\":true,\"engine\":\"c-core\",\"version\":\"0.9.7\"}\n");
+    printf("{\"success\":true,\"engine\":\"c-core\",\"version\":\"0.9.8\"}\n");
 }
 
 static char *read_line_dynamic(FILE *f) {

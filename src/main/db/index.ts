@@ -200,6 +200,61 @@ const MIGRATIONS: Migration[] = [
       // v7：记录消息发送时的协同 / 代码模式，避免统计时用“是否绑定目录”猜模式
       version: 7,
       sql: `ALTER TABLE messages ADD COLUMN usage_mode TEXT;`
+    },
+    {
+      // v8：对标 linger 的双层记忆 / 主动决策 / 异步分身一次性建表。
+      // 五个阶段共用这一个迁移，避免后续阶段反复追加版本号。
+      // 注意：wiki_pages.changes 由代码生成，工具入参不接受伪造的 Change Log。
+      version: 8,
+      sql: `
+      CREATE TABLE IF NOT EXISTS wiki_pages (
+        id          TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        sections    TEXT NOT NULL DEFAULT '[]',
+        links       TEXT NOT NULL DEFAULT '[]',
+        changes     TEXT NOT NULL DEFAULT '[]',
+        updated_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_pages_kind ON wiki_pages(kind, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS proactive_rules (
+        kind        TEXT PRIMARY KEY,
+        action      TEXT NOT NULL,
+        updated_at  INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proactive_clues (
+        kind        TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        seen        INTEGER NOT NULL DEFAULT 1,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (kind, action)
+      );
+
+      CREATE TABLE IF NOT EXISTS proactive_daily_log (
+        day_str     TEXT NOT NULL,
+        item_key    TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        PRIMARY KEY (day_str, item_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS delegated_tasks (
+        id                     TEXT PRIMARY KEY,
+        parent_conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        child_conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        title                  TEXT NOT NULL,
+        brief                  TEXT NOT NULL,
+        state                  TEXT NOT NULL DEFAULT 'running',
+        workspace_dir          TEXT,
+        last_report            TEXT NOT NULL DEFAULT '',
+        error                  TEXT,
+        created_at             INTEGER NOT NULL,
+        updated_at             INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_delegated_parent ON delegated_tasks(parent_conversation_id, created_at DESC);
+    `
     }
   ]
 

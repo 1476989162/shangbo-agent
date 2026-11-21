@@ -8,6 +8,7 @@ export type RemoteAuditKind =
   | 'remote.reject'
   | 'remote.send'
   | 'remote.pair'
+  | 'remote.pair.deny'
   | 'remote.revoke'
   | 'remote.ban'
   | 'remote.disconnect'

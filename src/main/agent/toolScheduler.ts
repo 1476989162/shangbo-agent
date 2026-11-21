@@ -3,7 +3,8 @@ export const READ_ONLY_TOOL_NAMES = new Set([
   'read_file',
   'list_directory',
   'search_files',
-  'glob_files'
+  'glob_files',
+  'wiki_search'
 ])
 
 /** 纯本地零 IO 开销的工具：不占并发槽，直接同步跑，避免 worker 调度开销。 */

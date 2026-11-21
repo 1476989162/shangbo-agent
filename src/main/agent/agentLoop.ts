@@ -23,9 +23,10 @@ import { matchReviewIntent, REVIEW_PLAYBOOK } from './playbooks'
 import { buildTaskContract, classifyIntent, matchTaskPlaybook } from './intent'
 import { buildRequirementBrief } from './requirement'
 import { lessonForTask, listLessons, markLessonsUsed, upsertLesson } from '../autonomous/store'
+import { attachMemoryNote, buildMemoryNote, isWikiIndexLoaded } from '../memory/memoryNote'
 import { resolveAgentMode } from './wishMode'
 import { buildWorkModeDirective } from './workMode'
-import type { AgentMode, UsageMode } from '../../shared/types'
+import type { AgentMode, UsageMode, WorkPriority } from '../../shared/types'
 import { isDesktopTool } from '../../shared/types'
 import type { ToolOutcome } from './toolOutcome'
 import {
@@ -41,6 +42,31 @@ import {
 } from './modelRuntime'
 
 export type LoopEmitter = (event: AgentEvent) => void
+
+/**
+ * 后台记忆工作（关键路径零延迟纪律）：
+ * 用户发消息 → 模型首字响应的路径上不得插入 DB 读取或模型调用，因此
+ * Wiki 索引只在 setImmediate 后台异步加载，每 5 次成功回合才做一次本地规则提取。
+ * 任何异常都吞掉，记忆功能故障绝不影响对话本身。
+ */
+let successfulTurnsSinceExtraction = 0
+
+function scheduleBackgroundMemoryWork(userText: string, assistantText: string): void {
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const wikiRepo = await import('../memory/wikiRepo')
+        if (!isWikiIndexLoaded()) wikiRepo.refreshWikiIndexCache()
+        if (successfulTurnsSinceExtraction >= 5) {
+          successfulTurnsSinceExtraction = 0
+          wikiRepo.extractWikiAndMemory(userText, assistantText)
+        }
+      } catch {
+        // 记忆提取失败不影响对话
+      }
+    })()
+  })
+}
 
 /** MCP 远端工具清单缓存：同工作区+读写档 30s 内复用，避免每轮重算。 */
 let mcpSchemasCache: {
@@ -247,7 +273,13 @@ export async function runAgentLoop(
    * runtime 已按自然语言判定好的模式；缺省时按会话声明与意图兜底。
    * workMode 是发送时用户选的协同 / 代码视图，只影响提示词倾向，不影响工具权限。
    */
-  options?: { effectiveMode?: AgentMode; workMode?: UsageMode | null }
+  options?: {
+    effectiveMode?: AgentMode
+    workMode?: UsageMode | null
+    /** 端点调度优先级：自主任务传 proactive + preemptible，前台对话缺省 chat。 */
+    priority?: WorkPriority
+    preemptible?: boolean
+  }
 ): Promise<void> {
     const resolved = resolveTarget(
       target.providerId,
@@ -346,19 +378,15 @@ export async function runAgentLoop(
     if (globalInstructions) {
       system += `\n\n【全局协作约定】\n${globalInstructions.slice(0, 4000)}`
     }
+    // 动态记忆不再拼进 system：见下方 memoryNote（保住 Prompt Cache 恒定前缀）。
+    const memoryNoteMemories: string[] = []
     if (getSetting<boolean>('cowork.useMemory', false)) {
       const memories = getSetting<{ title?: unknown; desc?: unknown }[]>('cowork.memories', [])
-      const lines = memories
-        .slice(0, 8)
-        .map((item) => {
-          const title = typeof item.title === 'string' ? item.title.trim() : ''
-          const desc = typeof item.desc === 'string' ? item.desc.trim() : ''
-          return title && desc ? `- ${title}：${desc}` : ''
-        })
-        .filter(Boolean)
-        .join('\n')
-        .slice(0, 2400)
-      if (lines) system += `\n\n【长期记忆（用户已确认的背景，可作为默认前提）】\n${lines}`
+      for (const item of memories.slice(0, 8)) {
+        const title = typeof item.title === 'string' ? item.title.trim() : ''
+        const desc = typeof item.desc === 'string' ? item.desc.trim() : ''
+        if (title && desc) memoryNoteMemories.push(`${title}：${desc.slice(0, 300)}`)
+      }
     }
 
     // 许愿闭环：把当前分支的真实 diff 作为“改动证据”注入，避免模型只凭记忆总结。
@@ -373,7 +401,7 @@ export async function runAgentLoop(
       }
     }
     if (agentMode === 'builder') {
-      system += '\n\n【建造者】直接动手：改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。'
+      system += '\n\n【建造者】直接动手：改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。长耗时且可独立推进的任务改用 task_create 异步派后台分身（不阻塞聊天），之后用 task_status 查结果、task_send 追加指令。'
     } else if (agentMode === 'chat') {
       system += '\n\n【问答】给结论和核心片段即可，不要为了显得勤快而改文件。'
     } else if (agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)) {
@@ -422,12 +450,22 @@ export async function runAgentLoop(
     } catch {
       activeLessons = []
     }
-    if (activeLessons.length > 0) {
-      system += `\n\n【已验证的经验库（优先复用）】\n${activeLessons
-        .map((lesson, index) => `${index + 1}. [${lesson.scope === 'global' ? '全局' : '项目'}] ${lesson.title}\n${lesson.content}`)
-        .join('\n')}`
-    }
+    // 经验库同样改为首条 user 消息里的 <memory_context> 块（system 保持恒定）。
+    const memoryNoteLessons: string[] = activeLessons.map(
+      (lesson) =>
+        `[${lesson.scope === 'global' ? '全局' : '项目'}] ${lesson.title}｜${lesson.content.slice(0, 300)}`
+    )
     if (pluginDirectives.length > 0) system += `\n已启用技能：${pluginDirectives.join(' ')}`
+
+    /**
+     * 动态记忆（长期背景 + 经验库 + Wiki 索引）统一在运行时附加到首条 user 消息，
+     * 不写回 DB、不进 system —— 保证 system 与工具清单在跨轮次间字节级恒定，
+     * Anthropic / OpenAI 的 Prompt Cache 前缀不会被一条新经验击穿。
+     */
+    const memoryNote = buildMemoryNote({
+      coworkMemories: memoryNoteMemories,
+      lessons: memoryNoteLessons
+    })
 
     // 外部技能包（Foxtable 这类 SKILL.md 目录）：只注入路由器索引，
     // 子技能全文由模型按需调 list_skills / read_skill 拉取，避免上下文爆炸。
@@ -642,7 +680,10 @@ export async function runAgentLoop(
 
         // 持久化路径 + 本轮尚未落库的累积块，拼出这次请求的完整消息序列
         const inMemory: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
-        const messages: LLMMessage[] = [...context.messages, ...toLLMMessages(inMemory)]
+        const messages: LLMMessage[] = attachMemoryNote(
+          [...context.messages, ...toLLMMessages(inMemory)],
+          memoryNote
+        )
 
         const toolUses: { id: string; name: string; input: unknown }[] = []
 
@@ -674,7 +715,9 @@ export async function runAgentLoop(
             tools: offeredSchemas,
             maxTokens: resolvedEffort.maxTokens,
             reasoningEffort: resolvedEffort.reasoningEffort,
-            promptCache
+            promptCache,
+            priority: options?.priority ?? 'chat',
+            preemptible: options?.preemptible ?? false
           },
           controller.signal,
           resolved.providerId,
@@ -948,11 +991,16 @@ export async function runAgentLoop(
             {
               model: servedModel,
               system: system + SKIP_THINKING_SUFFIX,
-              messages: [...contextNow.messages, ...toLLMMessages(inMemoryNow)],
+              messages: attachMemoryNote(
+                [...contextNow.messages, ...toLLMMessages(inMemoryNow)],
+                memoryNote
+              ),
               tools: offeredSchemas,
               maxTokens: contEffort.maxTokens,
               reasoningEffort: contEffort.reasoningEffort,
-              promptCache: contPromptCache
+              promptCache: contPromptCache,
+              priority: options?.priority ?? 'chat',
+              preemptible: options?.preemptible ?? false
             },
             controller.signal,
             servedProviderId
@@ -1101,4 +1149,14 @@ export async function runAgentLoop(
       messageId: assistantMessage.id,
       status
     })
+
+    // 只在成功回合之后做后台记忆工作：绝不占用「用户发消息 → 首字响应」的关键路径。
+    if (status === 'done') {
+      successfulTurnsSinceExtraction += 1
+      const assistantTextForMemory = blocks
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join(' ')
+        .slice(0, 8_000)
+      scheduleBackgroundMemoryWork(triggerText, assistantTextForMemory)
+    }
 }

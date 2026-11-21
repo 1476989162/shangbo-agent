@@ -1,4 +1,4 @@
-import type { ContentBlock, ProviderKind, Usage } from '../../shared/types'
+import type { ContentBlock, ProviderKind, Usage, WorkPriority } from '../../shared/types'
 
 /**
  * 网关侧按 User-Agent 认客户端（Magpie 路由页显示 Codex/node 即按此区分）。
@@ -65,6 +65,10 @@ export interface CompletionRequest {
    * 部分兼容网关不支持 cache_control，需要能整体关掉。
    */
   promptCache?: boolean
+  /** 端点级调度优先级；缺省 chat（前台对话）。安全复核传 approval。 */
+  priority?: WorkPriority
+  /** 后台任务标记：槽位紧张时允许被前台抢占并重新入队，不计失败。 */
+  preemptible?: boolean
 }
 
 export type StreamChunk =

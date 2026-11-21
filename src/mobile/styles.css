@@ -96,3 +96,23 @@ body {
   .m-cols { flex-direction: column; }
   .m-side { width: 100%; max-width: none; border-right: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
 }
+/* 桌面级手机布局：工具条 / 会话横滑 / 气泡 / 错误条 */
+.m-status.ok { color: #8fd6a0; }
+.m-toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 12px 0; }
+.m-err-inline { color: var(--danger); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-err { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
+.m-convbar { display: flex; gap: 8px; overflow-x: auto; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.m-chip { flex: none; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 13px; }
+.m-chip.active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.m-convtitle { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px 0; font-size: 15px; }
+.m-apprzone { border-bottom: 1px solid var(--border); padding: 4px 12px 8px; max-height: 38vh; overflow-y: auto; }
+.m-msg.role-assistant { background: var(--panel); }
+.m-msg.role-user { background: #2c2417; border: 1px solid rgba(201, 162, 39, 0.28); margin-left: 32px; }
+.m-msg.role-assistant { margin-right: 16px; }
+.m-result img { max-width: 100%; border-radius: 8px; margin-bottom: 6px; display: block; }
+.m-block + .m-block { margin-top: 6px; }
+.m-input-row { position: sticky; bottom: 0; background: var(--bg); padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+.m-input-row .m-btn:disabled { opacity: 0.45; }
+.m-btn.m-block { width: 100%; margin-top: 10px; }
+.m-build { color: var(--sub); font-size: 11px; text-align: center; margin-top: 12px; }
+.m-build-inline { color: var(--sub); font-size: 11px; }

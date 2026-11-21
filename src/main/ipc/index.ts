@@ -21,8 +21,15 @@ import {
   getApiKey,
   getProvider,
   listProviders,
-  upsertProvider
+  upsertProvider,
+  LOCAL_ENGINE_BASE_URL
 } from '../providers/store'
+import {
+  probePolyStrataHealth,
+  probeRealHardware,
+  recommendLocalModel,
+  verifyLocalModelReady
+} from '../providers/autopilot'
 import { probeProvider } from '../providers/gateway'
 import { mcpManager } from '../mcp/manager'
 import { updateService } from '../update'
@@ -52,6 +59,12 @@ const ProviderInputSchema = z.object({
   enabled: z.boolean(),
   priority: z.number().int(),
   headers: z.record(z.string(), z.string()).optional()
+})
+
+const LocalModelVerifySchema = z.object({
+  baseUrl: z.string().url('Base URL 必须是合法地址'),
+  model: z.string().min(1, '模型名不能为空'),
+  apiKey: z.string().optional()
 })
 
 const MAX_IMAGES_PER_MESSAGE = 8
@@ -258,6 +271,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.providerDelete, (_event, id: string) => {
     deleteProvider(id)
     return true
+  })
+
+  // Model Autopilot：探测真实 GPU/显存与本地推理引擎状态，并给出模型推荐。
+  ipcMain.handle(IPC.providerAutopilotProbe, async () => {
+    const hardware = await probeRealHardware()
+    const health = await probePolyStrataHealth(LOCAL_ENGINE_BASE_URL.replace(/\/v1$/, ''))
+    return { hardware, health, pick: recommendLocalModel(hardware) }
+  })
+
+  // 真题验活：只有模型真能用一个最小问题答上来，才算「就绪」。
+  ipcMain.handle(IPC.providerAutopilotVerify, async (_event, input: unknown) => {
+    const parsed = LocalModelVerifySchema.parse(input)
+    return verifyLocalModelReady(parsed.baseUrl, parsed.model, parsed.apiKey)
   })
 
   // 渲染进程传来的一切都在这里校验；排队消息的编辑/撤回只允许作用于本会话
@@ -667,6 +693,16 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.remoteDevices, () => remoteService.listDevices())
+
+  ipcMain.handle(IPC.remotePending, () => remoteService.listPendingPairings())
+
+  ipcMain.handle(IPC.remoteConfirmPairing, async (_event, phoneToken: string) =>
+    remoteService.confirmPendingPairing(z.string().min(1).parse(phoneToken))
+  )
+
+  ipcMain.handle(IPC.remoteDenyPairing, async (_event, phoneToken: string) =>
+    remoteService.denyPendingPairing(z.string().min(1).parse(phoneToken))
+  )
 
   ipcMain.handle(IPC.remoteIdentity, () => remoteService.getIdentityInfo())
 

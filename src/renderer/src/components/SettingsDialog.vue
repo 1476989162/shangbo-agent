@@ -238,6 +238,17 @@ const remotePairing = ref<{ qrText: string; code: string; expiresAt: number; fin
 const remoteDevices = ref<RemoteDevice[]>([])
 const remoteIdentityFp = ref('')
 const remoteBusy = ref(false)
+interface RemotePendingPairing {
+  deviceName: string
+  phonePubB64: string
+  phoneToken: string
+  fingerprint: string
+  receivedAt: number
+}
+const remotePending = ref<RemotePendingPairing[]>([])
+const remotePairingBusy = ref(false)
+/** 待确认配对轮询：只在设置弹窗打开且切到手机远程页时跑，关闭即停。 */
+let remotePendingTimer: ReturnType<typeof setInterval> | null = null
 /** 配对二维码画布：生成配对码后绘制 qrText，手机扫码直达配对页。 */
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const qrFailed = ref(false)
@@ -252,6 +263,11 @@ async function loadRemote(): Promise<void> {
   }
   try {
     remoteDevices.value = await window.shangbo.remote.devices()
+    try {
+      remotePending.value = await window.shangbo.remote.pending()
+    } catch {
+      remotePending.value = []
+    }
   } catch {
     remoteDevices.value = []
   }
@@ -322,6 +338,54 @@ async function revokeRemoteDevice(id: string): Promise<void> {
   const ok = await window.shangbo.remote.revoke(id)
   feedback.value = ok ? { ok: true, message: '已吊销' } : { ok: false, message: '吊销失败' }
   await loadRemote()
+}
+
+async function refreshRemotePending(): Promise<void> {
+  try {
+    remotePending.value = await window.shangbo.remote.pending()
+  } catch {
+    /* 忽略轮询抖动，下次再试 */
+  }
+}
+
+function startRemotePendingPoll(): void {
+  stopRemotePendingPoll()
+  void refreshRemotePending()
+  remotePendingTimer = setInterval(() => {
+    void refreshRemotePending()
+  }, 3000)
+}
+
+function stopRemotePendingPoll(): void {
+  if (remotePendingTimer) {
+    clearInterval(remotePendingTimer)
+    remotePendingTimer = null
+  }
+}
+
+async function confirmRemotePairing(phoneToken: string): Promise<void> {
+  remotePairingBusy.value = true
+  try {
+    await window.shangbo.remote.confirmPairing(phoneToken)
+    feedback.value = { ok: true, message: '已确认配对：手机马上就能连上' }
+  } catch (error) {
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '确认配对失败' }
+  } finally {
+    remotePairingBusy.value = false
+    await loadRemote()
+  }
+}
+
+async function denyRemotePairing(phoneToken: string): Promise<void> {
+  if (!confirm('拒绝这次配对请求？对方手机将立即断开。')) return
+  try {
+    await window.shangbo.remote.denyPairing(phoneToken)
+    feedback.value = { ok: true, message: '已拒绝配对请求' }
+  } catch (error) {
+    feedback.value = { ok: false, message: error instanceof Error ? error.message : '拒绝失败' }
+  } finally {
+    await loadRemote()
+  }
 }
 
 async function disconnectRemoteAll(): Promise<void> {
@@ -576,17 +640,31 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.shangbo.update.offEvent()
+  stopRemotePendingPoll()
 })
 
 watch(
   () => props.open,
   (open) => {
-    if (!open) return
+    if (!open) {
+      stopRemotePendingPoll()
+      return
+    }
     feedback.value = null
     if (props.initialTab) {
       activeTab.value = props.initialTab as SettingsTab
     }
     void load()
+    if (activeTab.value === 'remote') startRemotePendingPoll()
+  }
+)
+
+watch(
+  () => activeTab.value,
+  (tab) => {
+    if (!props.open) return
+    if (tab === 'remote') startRemotePendingPoll()
+    else stopRemotePendingPoll()
   }
 )
 
@@ -2608,6 +2686,22 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <div class="info-item"><span class="info-k">桌面公钥指纹:</span> <span class="info-v mono">{{ remotePairing.fingerprint }}</span></div>
                 <div class="info-item"><span class="info-k">有效期至:</span> <span class="info-v">{{ new Date(remotePairing.expiresAt).toLocaleString() }}</span></div>
               </div>
+            </div>
+          </div>
+
+          <div class="divider" />
+
+          <div class="section-block">
+            <h3 class="pane-title">待确认的配对请求（{{ remotePending.length }}）</h3>
+            <p class="row-sub">手机扫码后在这里点确认，对方才能连上。5 分钟有效先核对手机上显示的公钥指纹再点。</p>
+            <div v-if="remotePending.length === 0" class="row-sub">暂无待确认请求。</div>
+            <div v-for="p in remotePending" :key="p.phoneToken" class="setting-row">
+              <div class="row-text">
+                <span class="setting-label">{{ p.deviceName || '未命名手机' }}</span>
+                <span class="row-sub">指纹 <code class="mono">{{ p.fingerprint }}</code> · {{ new Date(p.receivedAt).toLocaleString() }}</span>
+              </div>
+              <button class="btn btn-ghost tiny btn-danger" :disabled="remotePairingBusy" @click="denyRemotePairing(p.phoneToken)">拒绝</button>
+              <button class="btn btn-primary tiny" :disabled="remotePairingBusy" @click="confirmRemotePairing(p.phoneToken)">确认配对</button>
             </div>
           </div>
 

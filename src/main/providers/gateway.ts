@@ -1,5 +1,6 @@
 import log from 'electron-log/main'
 import { ProviderHttpError } from './sse'
+import { modelScheduler, PreemptedError, type ScheduleSlot } from './scheduler'
 import { adapterFor, getApiKey, getProvider, listProviders, routingOrder } from './store'
 import type { CompletionRequest, StreamChunk } from './types'
 import type { Provider } from '../../shared/types'
@@ -231,6 +232,9 @@ export async function* streamWithFallback(
       effectiveModel === request.model ? request : { ...request, model: effectiveModel }
 
     let attempt = 0
+    // 抢占后重新入队时保持原入队时刻，避免后台任务被后来者无限插队。
+    const enqueueAt = Date.now()
+    const promptTokensEstimate = Math.max(1, Math.round(JSON.stringify(request.messages).length / 4))
     while (true) {
       attempt++
       // 首字节超时需要能单独拉断本次尝试，同时不干扰外层的用户取消信号，
@@ -242,8 +246,24 @@ export async function* streamWithFallback(
       let firstByteTimer: ReturnType<typeof setTimeout> | null = null
       let firstByteTimedOut = false
       let emitted = false
+      let slot: ScheduleSlot | null = null
+      let onPreempt: (() => void) | null = null
+      let httpStartedAt = 0
 
       try {
+        // 排队等待不计时：首字节超时只在拿到执行槽位、真正发起 HTTP 后才启动。
+        slot = await modelScheduler.acquire({
+          providerId: provider.id,
+          baseUrl: provider.baseUrl,
+          priority: request.priority,
+          preemptible: request.preemptible,
+          signal,
+          enqueueAt
+        })
+        httpStartedAt = Date.now()
+        onPreempt = (): void => attemptController.abort(new PreemptedError())
+        slot.preemptSignal.addEventListener('abort', onPreempt, { once: true })
+
         firstByteTimer = setTimeout(() => {
           firstByteTimedOut = true
           attemptController.abort()
@@ -273,12 +293,32 @@ export async function* streamWithFallback(
             clearTimeout(firstByteTimer)
             firstByteTimer = null
           }
+          if (!emitted) slot?.markBodyEmitted()
           emitted = true
           yield chunk
         }
+        modelScheduler.reportResult(provider.id, {
+          durationMs: Date.now() - httpStartedAt,
+          promptTokens: promptTokensEstimate,
+          queueDepth: modelScheduler.stats(provider.id).queued
+        })
         return
       } catch (error) {
         if (signal.aborted) throw error
+
+        // 为前台让路：重新入队执行，不计入失败次数、不发 retry_status、不写失败链。
+        if (slot?.preempted || error instanceof PreemptedError) {
+          attempt--
+          continue
+        }
+
+        modelScheduler.reportResult(provider.id, {
+          durationMs: httpStartedAt > 0 ? Date.now() - httpStartedAt : 0,
+          promptTokens: promptTokensEstimate,
+          queueDepth: modelScheduler.stats(provider.id).queued,
+          rateLimited: isRateLimit(error),
+          timedOut: firstByteTimedOut
+        })
 
         // 超时触发的是底层的 AbortError，报错文案换成对用户有意义的描述
         const message = firstByteTimedOut
@@ -324,6 +364,8 @@ export async function* streamWithFallback(
         await abortableSleep(plan.waitMs, signal)
       } finally {
         if (firstByteTimer) clearTimeout(firstByteTimer)
+        if (onPreempt && slot) slot.preemptSignal.removeEventListener('abort', onPreempt)
+        slot?.release()
         signal.removeEventListener('abort', onOuterAbort)
       }
     }

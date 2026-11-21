@@ -1,6 +1,6 @@
 {
   "name": "shangbo-agent",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "private": true,
   "description": "尚搏 Agent —— 个人 Agent 桌面应用",
   "main": "./out/main/index.js",
@@ -26,6 +26,9 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@nut-tree-fork/nut-js": "^4.2.6",
