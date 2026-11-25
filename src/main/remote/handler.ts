@@ -1,6 +1,8 @@
 import { z } from 'zod'
+import log from 'electron-log/main'
 import * as repo from '../db/repo'
 import { agentRuntime } from '../agent/runtime'
+import { deleteConversationImages } from '../storage/images'
 import {
   ALLOWED_REMOTE_OPS,
   parseRemoteRequest,
@@ -28,14 +30,40 @@ export interface RemoteHandlerResult {
   error?: string
 }
 
-/** 写操作集合：read-only 策略下拒绝。 */
-const WRITE_OPS: ReadonlySet<RemoteOp> = new Set(['send', 'approve', 'regenerate', 'cancelQueued'])
+/** 写操作集合：read-only 策略下拒绝。
+    createConversation/deleteConversation/setLeaf/abort 同样改动本地会话与执行状态，
+    遗漏会令 read-only 名存实亡（能远程建会/删会/切分支/打断执行）。 */
+const WRITE_OPS: ReadonlySet<RemoteOp> = new Set([
+  'send',
+  'approve',
+  'regenerate',
+  'cancelQueued',
+  'createConversation',
+  'deleteConversation',
+  'setLeaf',
+  'abort'
+])
 
-/** 高危工具前缀：confirm-high 策略下必须回桌面确认，远程直接拒绝。 */
-const HIGH_RISK_PREFIXES = ['run_command', 'write_file', 'patch_file', 'computer_']
+/** 高危工具前缀：confirm-high 策略下必须回桌面确认，远程直接拒绝。
+    multi_patch_file 与 desktop_click_ref 是真实的写盘/击键入口。 */
+const HIGH_RISK_PREFIXES = [
+  'run_command',
+  'write_file',
+  'patch_file',
+  'multi_patch_file',
+  'computer_',
+  'desktop_click_ref'
+]
+/** 高危工具名单（非前缀）： *_ask CLI 代理 / spawn_subagent / task_create
+    会衍生新的执行链与后台实体，不允许未经桌面确认从手机端发起。 */
+const HIGH_RISK_EXACT = new Set(['spawn_subagent', 'task_create'])
 
 function isHighRiskToolName(name: string): boolean {
-  return HIGH_RISK_PREFIXES.some((p) => name === p || name.startsWith(`${p}`)) || name.startsWith('mcp__')
+  if (HIGH_RISK_PREFIXES.some((p) => name === p || name.startsWith(`${p}`))) return true
+  if (HIGH_RISK_EXACT.has(name)) return true
+  // 动态注册的 CLI 代理（qoder_ask / codex_ask / claude_ask / opencode_ask 等）
+  if (name.endsWith('_ask')) return true
+  return name.startsWith('mcp__')
 }
 
 export async function handleRemoteRequest(
@@ -70,12 +98,21 @@ export async function handleRemoteRequest(
           data: repo.createConversation({ title: p.title ?? '新对话', workingDir: p.workingDir ?? null })
         }
       }
+
       case 'deleteConversation': {
         const p = params as { conversationId: string }
         agentRuntime.abortConversation(p.conversationId)
         repo.deleteConversation(p.conversationId)
+        // 会话删了但图片还在磁盘：同步清理会话图片目录，避免孤儿文件永久占盘
+        try {
+          deleteConversationImages(p.conversationId)
+        } catch (error) {
+          // 删除失败不阻断会话删除，但要留可查的审计线索，不静默吞
+          log.warn('[remote] deleteConversationImages 失败', error)
+        }
         return { ok: true, data: true }
       }
+
       case 'getMessages': {
         const p = params as { conversationId: string }
         const conversation = repo.getConversation(p.conversationId)
@@ -119,8 +156,13 @@ export async function handleRemoteRequest(
           const pending = agentRuntime.listPendingApprovals().find(
             (a) => a.runId === p.runId && a.toolUseId === p.toolUseId
           )
-          if (pending && isHighRiskToolName(pending.toolName)) {
-            return { ok: false, error: '高危操作需回桌面确认，远程审批已被策略拒绝' }
+          // critical 是硬红线（永久禁止类），任何远程批准一律拒绝
+          if (pending && pending.severity === 'critical' && p.approved === true) {
+            return { ok: false, error: '硬红线操作必须回本机桌面确认，远程批准已被拒绝' }
+          }
+          // 只拦「远程批准」：拒绝是安全的（少做事不越权），手机必须能远程拒绝
+          if (pending && p.approved === true && isHighRiskToolName(pending.toolName)) {
+            return { ok: false, error: '高危操作需回桌面确认，远程批准已被策略拒绝' }
           }
         }
         const accepted = agentRuntime.decideWithHash(p.runId, p.toolUseId, p.approved, p.paramHash)

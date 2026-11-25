@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { join, normalize, extname } from 'node:path'
+import { join, normalize, extname, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
@@ -67,9 +67,19 @@ const server = createServer(async (req, res) => {
   }
   // 静态：/ -> index.html；其余按路径取文件，防目录穿越
   try {
-    const rel = url.pathname === '/' || url.pathname === '' ? 'index.html' : url.pathname.replace(/^\/+/, '')
+    // 先解码 %XX：不解码时 ..%2f 之类能绕过 normalize 的前缀检查
+    let rel
+    try {
+      rel = decodeURIComponent(url.pathname === '/' || url.pathname === '' ? 'index.html' : url.pathname.replace(/^\/+/, ''))
+    } catch {
+      res.writeHead(400)
+      res.end('bad encoding')
+      return
+    }
     const file = normalize(join(PUBLIC_DIR, rel))
-    if (!file.startsWith(PUBLIC_DIR)) {
+    // 必须等于 PUBLIC_DIR 或以 PUBLIC_DIR + sep 开头：startsWith 裸前缀会被
+    // 同前缀目录（public-evil/）穿越
+    if (file !== PUBLIC_DIR && !file.startsWith(PUBLIC_DIR + sep)) {
       res.writeHead(403)
       res.end('forbidden')
       return
@@ -207,6 +217,12 @@ wss.on('connection', (ws, req) => {
     alive = true
   })
 
+  // ws 层错误（握手后异常断开、ECONNRESET 等）不监听会作为 unhandled 'error'
+  // 直接把中转进程打掉
+  ws.on('error', () => {
+    try { ws.close() } catch {}
+  })
+
   ws.on('message', (data, isBinary) => {
     // 超限帧由 ws 的 maxPayload 直接断开，这里只做限流
     if (!limiter.take()) {
@@ -252,7 +268,9 @@ wss.on('connection', (ws, req) => {
     if (peer.kind === 'desktop') {
       if (room.desktop === ws) room.desktop = null
     } else {
-      phoneSockets.delete(peer.phoneToken)
+      // 只有当前登记的还是这个连接才删：旧连接被新连接顶替后先 close，
+      // 不能把新连接从索引里抹掉
+      if (phoneSockets.get(peer.phoneToken) === ws) phoneSockets.delete(peer.phoneToken)
     }
   })
 
@@ -338,6 +356,12 @@ wss.on('connection', (ws, req) => {
           info.lastSeen = Date.now()
           room.lastActiveAt = Date.now()
           peer = { kind: 'phone', roomId: room.roomId, phoneToken }
+          // 同一手机重连（刷新/换网）时先关旧连接：旧 ws 挂着会继续吃心跳与转发资源，
+          // 且旧连接 close 时会无条件删掉新登记的 socket
+          const previous = phoneSockets.get(phoneToken)
+          if (previous && previous !== ws && previous.readyState <= 1) {
+            try { previous.close(1000, 'replaced') } catch {}
+          }
           phoneSockets.set(phoneToken, ws)
           reply(true, { roomId: room.roomId, pendingApprovals: [] })
           if (typeof phonePub === 'string') {

@@ -64,6 +64,15 @@ export class PythonBridge {
     this.child.stdout.setEncoding('utf8')
     this.child.stdout.on('data', (chunk: string) => this.consume(chunk))
 
+    // 边车异常退出瞬间 stdin 可能已失效，此时写入会抛 EPIPE 并带上 'error' 事件；
+    // 必须显式监听，否则 Node 进程直接崩掉（unhandled 'error' event）。
+    this.child.stdin.on('error', (error: NodeJS.ErrnoException) => {
+      log.warn(`[python] 写入边车 stdin 失败：${error.code ?? ''} ${error.message}`)
+      this.failAllPending(
+        new Error(`Python 边车通道已断开（${error.code ?? 'EPIPE'}），请稍后重试`)
+      )
+    })
+
     this.child.stderr.setEncoding('utf8')
     this.child.stderr.on('data', (chunk: string) => {
       log.warn(`[python] ${chunk.trim()}`)

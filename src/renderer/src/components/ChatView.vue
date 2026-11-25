@@ -271,7 +271,7 @@ const capabilities = [
         <button
           class="btn btn-ghost tiny workbench-toggle-btn"
           :class="{ active: viewer.isOpen && !viewer.collapsed }"
-          title="打开或折叠 WorkBuddy 工作台"
+          title="打开或折叠 尚搏 工作台"
           @click="viewer.isOpen ? viewer.toggleCollapsed() : viewer.openWorkbench('new-tab')"
         >
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none">

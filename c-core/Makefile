@@ -1,5 +1,11 @@
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2 -Iinclude -std=c11
+# 严格 -std=c11 会隐匿 POSIX 扩展声明（strdup/lstat/dirent 等），
+# 非 Windows 编译必须显式开启 _GNU_SOURCE 与 pthread；
+# Windows（nmake/MinGW 直接调 make）下这两个标志无意义甚至报错，故按 OS 变量条件赋值。
+ifneq ($(OS),Windows_NT)
+UNIXONLY := -D_GNU_SOURCE -pthread
+endif
 BINDIR = bin
 OBJDIR = obj
 
@@ -12,16 +18,16 @@ TEST_OBJS = $(TEST_SRCS:tests/%.c=$(OBJDIR)/%.o)
 all: $(BINDIR)/shangbo_agent $(BINDIR)/test_runner
 
 $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(UNIXONLY) -c $< -o $@
 
 $(OBJDIR)/%.o: tests/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(UNIXONLY) -c $< -o $@
 
 $(BINDIR)/shangbo_agent: $(OBJDIR)/main.o $(OBJS) | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(UNIXONLY) -o $@ $^
 
 $(BINDIR)/test_runner: $(TEST_OBJS) $(OBJS) | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(UNIXONLY) -o $@ $^
 
 test: $(BINDIR)/test_runner
 	./$(BINDIR)/test_runner

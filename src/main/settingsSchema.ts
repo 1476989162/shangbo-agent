@@ -32,6 +32,17 @@ export const SettingSchemas: Record<string, z.ZodType> = {
     .int()
     .min(500, '工具输出截断需为 500–100000 之间的整数')
     .max(100_000, '工具输出截断需为 500–100000 之间的整数'),
+  // 只读工具并发上限：与 agentLoop.ts 的默认值 8 保持一致
+  'agent.toolConcurrency': z
+    .number()
+    .int()
+    .min(1, '工具并发需为 1–16 之间的整数')
+    .max(16, '工具并发需为 1–16 之间的整数'),
+  // 主动建议开关与其文件级排除策略
+  'agent.proactive.enabled': z.boolean(),
+  'agent.proactive.strictSkip': z.boolean(),
+  // 子任务完成后是否唤醒元任务
+  'agent.tasks.wakeMetaOnDone': z.boolean(),
   'providers.firstByteTimeoutMs': z
     .number()
     .int()
@@ -104,6 +115,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.skillDirs': z.array(z.string().max(1000)).max(10),
   'agent.mcpServers': z.array(z.string().max(200)).max(200),
   'chat.hiddenModels': z.array(z.string().max(200)).max(1000),
+  // 供应商思考模式名单：最多 100 条、每条 200 字以内
+  'providers.reasoningPatterns': z.array(z.string().max(200)).max(100),
   'cowork.trustedFolders': z.array(z.string().max(1000)).max(1000),
   // 安全相关：自动批准名单。成员必须是已知工具名（MCP 工具动态注册，
   // 以 mcp__ 前缀放行），由 parseSettingValue 按 knownToolNames 附加校验

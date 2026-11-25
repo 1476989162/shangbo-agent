@@ -41,5 +41,17 @@ jobs:
       - name: Relay tests
         run: npm test --prefix relay
 
-      - name: Build
-        run: npm run build
+      - name: Python sidecar syntax check
+        run: python3 -m py_compile python/sidecar.py
+
+      - name: Mobile web build
+        run: npm run mobile:build
+
+      - name: Build C core (Linux, gcc)
+        run: sudo apt-get update && sudo apt-get install -y build-essential && node scripts/build-c.mjs
+
+      # build:c 已在 Linux C 核心步骤里跑过一遍，这里只构建 Electron 产物，避免重复编译
+      - name: Build (electron-vite only)
+        run: npx electron-vite build
+
+

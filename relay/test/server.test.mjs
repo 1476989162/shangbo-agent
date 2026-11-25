@@ -1,6 +1,7 @@
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import http from 'node:http'
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -243,5 +244,111 @@ describe('身份白名单：只有我能用（进程级）', () => {
     const both = await registerWithIdentity(mine, { accessKey: ACCESS_KEY })
     assert.equal(both.ok, true)
     assert.ok(both.data.roomId)
+  })
+})
+
+/* Ticket 2：静态文件校验与手机重连覆盖 */
+describe('静态文件校验与手机重连 (Ticket 2)', () => {
+  before(async () => {
+    stopServer()
+    await startServer({ RELAY_ACCESS_KEY: '' })
+  })
+  after(() => stopServer())
+
+  /** HTTP GET 静态路径，返回 { status, body }。 */
+  function httpGet(path, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port: PORT, path, method: 'GET' },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
+        }
+      )
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('http timeout')) })
+      req.on('error', reject)
+      req.end()
+    })
+  }
+
+  it('非法百分号编码的静态路径返回 400', async () => {
+    const res = await httpGet('/%zz-bad-encoding')
+    assert.equal(res.status, 400)
+    assert.equal(res.body, 'bad encoding')
+  })
+
+  it('..穿越（反斜杠与裸写）返回 403', async () => {
+    // new URL() 会把 /%2e%2e%2f 规范化成 /，所以用反斜杠形态与裸 .. 测真穿越：
+    // normalize 前文件路径若逃出 PUBLIC_DIR 必须在 readFile 之前就拒 403
+    const bs = await httpGet('/..%5cserver.mjs')
+    assert.equal(bs.status, 403)
+    assert.equal(bs.body, 'forbidden')
+    const raw = await httpGet('/..%2fserver.mjs')
+    assert.equal(raw.status, 403)
+  })
+
+  it('..%2f 穿越（编码点段）返回 403', async () => {
+    // %2f 解码后是 /：join 前把 .. 提到 PUBLIC_DIR 之上，normalize 收敛后必在界外 → 403
+    const res = await httpGet('/..%2f..%2fserver.mjs')
+    assert.equal(res.status, 403)
+    assert.equal(res.body, 'forbidden')
+  })
+
+  it('手机重连时旧连接被关闭，新连接接管索引', async () => {
+    // register 与 pair-issue 必须在同一条连接上（pair-issue 校验 peer 是 desktop）
+    const code = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(BASE, { headers: { 'x-forwarded-proto': 'https' } })
+      const timer = setTimeout(() => reject(new Error('pair flow timeout')), 8000)
+      ws.on('open', () => ws.send(JSON.stringify({ op: 'register-desktop' })))
+      ws.on('message', (d) => {
+        const m = JSON.parse(String(d))
+        if (m.ok && m.data?.roomId) ws.send(JSON.stringify({ op: 'pair-issue' }))
+        else if (m.ok && m.data?.code) { clearTimeout(timer); ws.close(); resolve(m.data.code) }
+        else { clearTimeout(timer); ws.close(); reject(new Error(`unexpected: ${JSON.stringify(m)}`)) }
+      })
+      ws.on('error', reject)
+    })
+    assert.ok(code)
+    const redeem = await control({ op: 'pair-redeem', code })
+    assert.equal(redeem.ok, true)
+    const phoneToken = redeem.data.phoneToken
+
+    // 第一条手机连接：保持打开
+    const ws1 = new WebSocket(BASE, { headers: { 'x-forwarded-proto': 'https' } })
+    await new Promise((resolve, reject) => {
+      ws1.on('open', () => ws1.send(JSON.stringify({ op: 'join-phone', phoneToken })))
+      ws1.on('message', (d) => { if (JSON.parse(String(d)).ok) resolve() })
+      ws1.on('error', reject)
+    })
+
+    let ws1Closed = false
+    const closed1 = new Promise((resolve) => ws1.on('close', (code, reason) => {
+      ws1Closed = true
+      resolve({ code, reason: String(reason) })
+    }))
+
+    // 第二条同 token 连接：应顶替第一条
+    const ws2 = new WebSocket(BASE, { headers: { 'x-forwarded-proto': 'https' } })
+    await new Promise((resolve, reject) => {
+      ws2.on('open', () => ws2.send(JSON.stringify({ op: 'join-phone', phoneToken })))
+      ws2.on('message', (d) => { if (JSON.parse(String(d)).ok) resolve() })
+      ws2.on('error', reject)
+    })
+
+    // 旧连接被服务端以 1000/replaced 关掉
+    const closeInfo = await closed1
+    assert.equal(ws1Closed, true)
+    assert.equal(closeInfo.code, 1000)
+    assert.equal(closeInfo.reason, 'replaced')
+
+    // 新连接仍活着，服务进程没崩：再发一次 join-phone 仍能正常应答
+    const again = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('ws2 no reply')), 5000)
+      ws2.once('message', (d) => { clearTimeout(timer); resolve(JSON.parse(String(d))) })
+      ws2.send(JSON.stringify({ op: 'join-phone', phoneToken }))
+    })
+    assert.equal(again.ok, true)
+    ws2.close()
   })
 })

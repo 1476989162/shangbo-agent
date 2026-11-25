@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import DOMPurify from 'dompurify'
 import { useViewerStore, type WorkbenchTabKind } from '../stores/viewer'
 import { useChatStore } from '../stores/chat'
 import { renderMarkdown } from '../lib/markdown'
+import { isDark } from '../lib/theme'
 import { t } from '../i18n'
 
 const viewer = useViewerStore()
@@ -264,12 +266,12 @@ function getTabIcon(kind: WorkbenchTabKind): string {
 async function openArtifactExternal(relPath: string): Promise<void> {
   const convo = chat.activeConversationId
   if (!convo) return
-  const fullWorkingDir = chat.activeConversation?.workingDir
-  if (fullWorkingDir) {
-    const full = `${fullWorkingDir.replace(/[\\/]+$/, '')}/${relPath.replace(/^[\\/]+/, '')}`
-    await window.shangbo.app.openPath(full)
-  } else {
+  // 统一走 file.open：主进程侧有边界校验（含 symlink 收敛）；
+  // 旧版直接拼 workingDir 走 app.openPath 会绕开所有工程目录护栏
+  try {
     await window.shangbo.file.open(convo, relPath)
+  } catch (error) {
+    viewer.error = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -294,7 +296,17 @@ const isMarkdown = computed(() => {
 
 const renderedMarkdown = computed(() => {
   if (!isMarkdown.value) return ''
-  return renderMarkdown(viewer.activeTab?.text ?? '', { highlight: true, dark: true })
+  // 跟随实际主题：切深浅色时代码高亮同步重渲染
+  return renderMarkdown(viewer.activeTab?.text ?? '', { highlight: true, dark: isDark.value })
+})
+
+/** 边车转出的 HTML（docx/xlsx）：同样视为不可信内容，渲染前统一 sanitize。 */
+const sanitizedDocHtml = computed(() => {
+  const html = viewer.activeTab?.html ?? ''
+  if (!html) return ''
+  return DOMPurify.sanitize(html, {
+    ADD_ATTR: ['target', 'data-lang', 'data-viewer']
+  })
 })
 
 // 监听活动标签页变化
@@ -555,7 +567,7 @@ onMounted(() => {
 
           <div ref="terminalScrollEl" class="terminal-output-container mono">
             <div v-if="terminalOutput.length === 0" class="terminal-welcome">
-              WorkBuddy 终端控制台已就绪。在下方输入 Shell 命令并按回车执行。
+              尚搏 终端控制台已就绪。在下方输入 Shell 命令并按回车执行。
             </div>
             <div v-for="(item, idx) in terminalOutput" :key="idx" class="terminal-entry">
               <div class="entry-cmd">
@@ -609,7 +621,7 @@ onMounted(() => {
           <iframe
             :src="viewer.activeTab.url"
             class="viewer-frame"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            sandbox="allow-scripts allow-forms allow-popups"
             title="网页预览"
           />
         </div>
@@ -632,11 +644,11 @@ onMounted(() => {
           />
         </div>
 
-        <!-- 8. Word/表格等 HTML 预览 -->
+        <!-- 8. Word/表格等 HTML 预览（边车转出，先过 DOMPurify 再渲染） -->
         <div
           v-else-if="viewer.activeTab.kind === 'doc'"
           class="viewer-doc"
-          v-html="viewer.activeTab.html"
+          v-html="sanitizedDocHtml"
         />
 
         <!-- 9. 文件文本 / 代码 / Markdown 预览 -->

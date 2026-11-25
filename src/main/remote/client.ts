@@ -38,6 +38,9 @@ export interface RemoteClientOptions {
   handlerContext: () => RemoteHandlerContext
   onStatus: (status: RemoteStatus, detail?: string) => void
   onPairingHello: (hello: PairingHello) => void
+  /** 下行加密后上报最新发送序号（service 持久化到 secrets，重启恢复水位）。
+   *  缺省为 no-op：单测不传也不影响主流程。 */
+  onSealedSeq?: (deviceId: string, seq: number) => void
 }
 
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -395,6 +398,8 @@ export class RemoteClient {
     const ws = this.ws
     if (!session || !ws || ws.readyState !== WebSocket.OPEN) return
     const frame = session.cipher.seal(JSON.stringify(payload))
+    // 上报新发送序号：service 落盘，重启后从水位继续而不归零
+    this.opts.onSealedSeq?.(session.deviceId, session.cipher.getSendSeq())
     const bytes = Buffer.from(JSON.stringify(frame), 'utf8')
     if (bytes.length > MAX_FRAME_BYTES) {
       log.warn('[remote] 下行帧超限，已丢弃')

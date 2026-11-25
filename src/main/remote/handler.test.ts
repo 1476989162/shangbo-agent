@@ -91,8 +91,14 @@ vi.mock('./subagent' in {} ? './subagent' : '../agent/subagent', () => ({
   SPAWN_TOOL_NAME: 'spawn_subagent'
 }))
 
+const { imageCleanup } = vi.hoisted(() => ({ imageCleanup: vi.fn() }))
 vi.mock('../storage/images', () => ({
-  deleteImageFile: async () => {}
+  deleteImageFile: async () => {},
+  deleteConversationImages: (...args: unknown[]) => imageCleanup(...args)
+}))
+
+vi.mock('electron-log/main', () => ({
+  default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 const req = (op: string, params: unknown, id = 'req-1') => ({ id, kind: 'req', op, params })
@@ -155,5 +161,150 @@ describe('远程 handler (remote/handler)', () => {
       req('approve', { runId: 'nope', toolUseId: 't', approved: true, paramHash: 'x' })
     )
     expect(res.ok).toBe(false)
+  })
+})
+
+describe('read-only 策略与远程审批收紧 (Ticket 2)', () => {
+  beforeEach(() => {
+    conversations.clear()
+    inserted = []
+    seq = 0
+    conversations.set('c1', { id: 'c1', title: '会话1' })
+    imageCleanup.mockClear()
+  })
+
+  it('read-only 拒绝 createConversation/deleteConversation/setLeaf/abort，与 send 同等对待', async () => {
+    const ops: Array<[string, unknown]> = [
+      ['createConversation', {}],
+      ['deleteConversation', { conversationId: 'c1' }],
+      ['setLeaf', { conversationId: 'c1', leafId: 'm1' }],
+      ['abort', { runId: 'r1' }]
+    ]
+    for (const [op, params] of ops) {
+      const res = await handleRemoteRequest(req(op, params), { approvalPolicy: 'read-only' })
+      expect(res.ok, `${op} 应被 read-only 拒绝`).toBe(false)
+      expect(res.error).toContain('只读')
+    }
+  })
+
+  it('deleteConversation 同步调用 deleteConversationImages 清理会话图片', async () => {
+    const res = await handleRemoteRequest(req('deleteConversation', { conversationId: 'c1' }))
+    expect(res.ok).toBe(true)
+    expect(imageCleanup).toHaveBeenCalledWith('c1')
+    // 会话本体也被删
+    expect(conversations.has('c1')).toBe(false)
+  })
+
+  it('confirm-high 仅拦截远程批准，远程拒绝（approved=false）照常放行', async () => {
+    const rt = agentRuntime as unknown as {
+      listPendingApprovals: () => Array<{
+        runId: string
+        toolUseId: string
+        toolName: string
+        severity: string
+      }>
+      decideWithHash: (runId: string, toolUseId: string, approved: boolean, hash: string) => boolean
+    }
+    const original = rt.listPendingApprovals
+    rt.listPendingApprovals = () => [
+      { runId: 'r1', toolUseId: 't1', toolName: 'run_command', severity: 'high' }
+    ]
+    const decided: Array<[boolean, string]> = []
+    rt.decideWithHash = (runId, toolUseId, approved, hash) => {
+      decided.push([approved, hash])
+      return true
+    }
+    try {
+      // 批准：confirm-high 拦截
+      const approve = await handleRemoteRequest(
+        req('approve', { runId: 'r1', toolUseId: 't1', approved: true, paramHash: 'h1' }),
+        { approvalPolicy: 'confirm-high' }
+      )
+      expect(approve.ok).toBe(false)
+      expect(approve.error).toContain('远程批准')
+      expect(decided).toEqual([])
+
+      // 拒绝：必须放行到底层 decideWithHash
+      const reject = await handleRemoteRequest(
+        req('approve', { runId: 'r1', toolUseId: 't1', approved: false, paramHash: 'h1' }),
+        { approvalPolicy: 'confirm-high' }
+      )
+      expect(reject.ok).toBe(true)
+      expect(decided).toEqual([[false, 'h1']])
+    } finally {
+      rt.listPendingApprovals = original
+    }
+  })
+
+  it('高危清单补齐：multi_patch_file/desktop_click_ref/*_ask/spawn_subagent/task_create 全部拒绝远程批准', async () => {
+    const rt = agentRuntime as unknown as {
+      listPendingApprovals: () => Array<{
+        runId: string
+        toolUseId: string
+        toolName: string
+        severity: string
+      }>
+      decideWithHash: () => boolean
+    }
+    const original = rt.listPendingApprovals
+    const highRiskTools = [
+      'multi_patch_file',
+      'desktop_click_ref',
+      'qoder_ask',
+      'codex_ask',
+      'claude_ask',
+      'opencode_ask',
+      'spawn_subagent',
+      'task_create'
+    ]
+    let currentTool = ''
+    rt.listPendingApprovals = () => [
+      { runId: 'r1', toolUseId: 't1', toolName: currentTool, severity: 'high' }
+    ]
+    rt.decideWithHash = () => {
+      throw new Error('高危工具不应到达 decideWithHash')
+    }
+    try {
+      for (const tool of highRiskTools) {
+        currentTool = tool
+        const res = await handleRemoteRequest(
+          req('approve', { runId: 'r1', toolUseId: 't1', approved: true, paramHash: 'h' }),
+          { approvalPolicy: 'confirm-high' }
+        )
+        expect(res.ok, `${tool} 应拒绝远程批准`).toBe(false)
+        expect(res.error, `${tool} 的拒绝理由应指向桌面确认`).toContain('桌面')
+      }
+    } finally {
+      rt.listPendingApprovals = original
+    }
+  })
+
+  it('severity=critical 一律拒绝远程批准，无论工具名多无害', async () => {
+    const rt = agentRuntime as unknown as {
+      listPendingApprovals: () => Array<{
+        runId: string
+        toolUseId: string
+        toolName: string
+        severity: string
+      }>
+      decideWithHash: () => boolean
+    }
+    const original = rt.listPendingApprovals
+    rt.listPendingApprovals = () => [
+      { runId: 'r1', toolUseId: 't1', toolName: 'read_file', severity: 'critical' }
+    ]
+    rt.decideWithHash = () => {
+      throw new Error('critical 不应到达 decideWithHash')
+    }
+    try {
+      const res = await handleRemoteRequest(
+        req('approve', { runId: 'r1', toolUseId: 't1', approved: true, paramHash: 'h' }),
+        { approvalPolicy: 'confirm-high' }
+      )
+      expect(res.ok).toBe(false)
+      expect(res.error).toContain('硬红线')
+    } finally {
+      rt.listPendingApprovals = original
+    }
   })
 })

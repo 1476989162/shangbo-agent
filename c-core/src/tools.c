@@ -22,32 +22,26 @@
 #define MAX_SEARCH_FILES 5000
 #define MAX_SEARCH_FILE_BYTES 512000
 
-static wchar_t *utf8_wide(const char *text) {
+/* Windows-only conversion helpers: no callers exist in non-Windows branches,
+   keeping empty stubs only triggers gcc -Wunused-function. */
 #ifdef _WIN32
+static wchar_t *utf8_wide(const char *text) {
     if (!text) return NULL;
     int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
     if (n <= 0) return NULL;
     wchar_t *out = (wchar_t *)calloc((size_t)n, sizeof(wchar_t));
     if (out) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, out, n);
     return out;
-#else
-    (void)text;
-    return NULL;
-#endif
 }
 
 static char *wide_utf8(const wchar_t *text) {
-#ifdef _WIN32
     int n = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
     if (n <= 0) return NULL;
     char *out = (char *)calloc((size_t)n, 1);
     if (out) WideCharToMultiByte(CP_UTF8, 0, text, -1, out, n, NULL, NULL);
     return out;
-#else
-    (void)text;
-    return NULL;
-#endif
 }
+#endif
 
 static FILE *open_file_utf8(const char *path, const char *mode) {
 #ifdef _WIN32

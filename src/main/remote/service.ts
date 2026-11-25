@@ -28,6 +28,8 @@ const K_DEVICE_PUBLIC = 'remote.devicePublic'
 const K_DEVICE_TOKEN = 'remote.deviceToken'
 const SESSION_PREFIX = 'remote.session.'
 const PHONE_TOKEN_PREFIX = 'remote.phoneToken.'
+/** 每设备发送序号持久化前缀：重启后恢复水位，防手机重发旧序号被判重放 */
+const SEND_SEQ_PREFIX = 'remote.sendSeq.'
 
 export interface PairingInfo {
   /** 二维码内容（手机扫码）：可直接打开 PWA 的配对链接 */
@@ -175,6 +177,14 @@ class RemoteService {
           return { cipher, deviceId: this.currentDeviceId }
         },
         handlerContext: () => this.handlerContext(),
+        // 下行加密后把最新序号落 secrets：重启恢复水位，防手机端旧序号重放误判
+        onSealedSeq: (deviceId, seq) => {
+          try {
+            setSecret(SEND_SEQ_PREFIX + deviceId, String(seq))
+          } catch (error) {
+            log.warn('[remote] 发送序号持久化失败', error)
+          }
+        },
         onStatus: (s, d) => this.emit(s, d ?? ''),
         onPairingHello: (hello) => {
           // 只暂存，需人工确认：设置页出现确认按钮前手机一直显示等待桌面确认。
@@ -228,7 +238,9 @@ class RemoteService {
     return ensureIdentity()
   }
 
-  /** 重启后内存会话丢失：按最近配对设备从 secrets 恢复，会话不断必须重新配对。 */
+  /** 重启后内存会话丢失：按最近配对设备从 secrets 恢复，会话不断必须重新配对。
+   *  同时恢复每设备的发送序号水位：序号归零会让手机端新帧被判重放，
+   *  连续解密失败触发 MAX_DECRYPT_FAILURES 封禁（手机刷新自封的另一半根因）。 */
   private ensureSessionLoaded(): void {
     if (this.currentDeviceId && this.sessions.has(this.currentDeviceId)) return
     try {
@@ -243,11 +255,20 @@ class RemoteService {
         try {
           const key = Buffer.from(keyB64, 'base64url')
           if (key.length !== 32) continue
-          this.sessions.set(d.id, new SessionCipher(key))
+          const cipher = new SessionCipher(key)
+          // 恢复上次发送水位，不从 0 重发（重放误判源）
+          const savedSeq = Number(getSecret(SEND_SEQ_PREFIX + d.id))
+          if (Number.isInteger(savedSeq) && savedSeq > 0) cipher.setSendSeq(savedSeq)
+          this.sessions.set(d.id, cipher)
           if (!this.currentDeviceId) this.currentDeviceId = d.id
-        } catch {}
+        } catch (error) {
+          // 单设备恢复失败不阻断其他设备，但留诊断线索
+          log.warn(`[remote] 会话 ${d.id} 恢复失败`, error)
+        }
       }
-    } catch {}
+    } catch (error) {
+      log.warn('[remote] 会话恢复异常', error)
+    }
   }
 
   /** 配对完成：手机经中转控制面提交 X25519 公钥，桌面派生会话密钥并落库。 */

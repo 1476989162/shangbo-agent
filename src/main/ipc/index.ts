@@ -1,3 +1,4 @@
+import { extname } from 'node:path'
 import fs from 'node:fs'
 import log from 'electron-log/main'
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
@@ -511,7 +512,22 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.appOpenPath, async (_event, targetPath: unknown) => {
-    const p = z.string().min(1).parse(targetPath)
+    // 收紧：UNC 路径（\\server\share）指向网内任意主机，渲染层被注入时可用它探测内网；
+    // 高危可执行类型直接拒，只放行文档/媒体/压缩包等。
+    const p = z.string().min(1).max(1000).parse(targetPath)
+    if (process.platform === 'win32' && /^\\\\/i.test(p)) {
+      log.warn(`[ipc] app:openPath 拒绝 UNC 路径：${p}`)
+      return '已拒绝：不允许打开 UNC 网络路径。'
+    }
+    const ext = extname(p).slice(1).toLowerCase()
+    const EXECUTABLE_EXTS = new Set([
+      'exe', 'bat', 'cmd', 'com', 'scr', 'pif', 'msi', 'msp', 'mst',
+      'ps1', 'psm1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh', 'hta', 'cpl', 'jar', 'lnk'
+    ])
+    if (EXECUTABLE_EXTS.has(ext)) {
+      log.warn(`[ipc] app:openPath 拒绝可执行类型：${p}`)
+      return `已拒绝：不允许用系统默认程序打开 .${ext} 可执行文件。`
+    }
     return shell.openPath(p)
   })
 
@@ -579,21 +595,37 @@ export function registerIpcHandlers(): void {
     const raw = await fsPromises.readFile(filePaths[0], 'utf-8')
     const parsed = JSON.parse(raw)
     if (parsed.settings && typeof parsed.settings === 'object') {
+      // 与 settings:set 同源校验：含 knownToolNames，防导入伪造的自动批准名单
       for (const [k, v] of Object.entries(parsed.settings)) {
         try {
-          const val = parseSettingValue(k, v)
+          const val = parseSettingValue(k, v, {
+            knownToolNames: toolRegistry.all().map((tool) => tool.name)
+          })
           setSetting(k, val)
-        } catch {}
+        } catch (error) {
+          // 单键非法不阻断整体导入，但要留诊断线索（静默 catch 是红线）
+          log.warn(`[ipc] configImport 拒收设置键 ${k}`, error)
+        }
       }
     }
     if (Array.isArray(parsed.lessons)) {
+      // lessons 同样是不可信导入：标题/内容必须是有限字符串，超量拒收
+      const LessonSchema = z.object({ title: z.string().min(1).max(500), content: z.string().min(1).max(20_000) })
+      let imported = 0
       for (const item of parsed.lessons) {
-        if (item && item.title && item.content) {
-          try {
-            autonomousStore.upsertLesson(item)
-          } catch {}
+        const lesson = LessonSchema.safeParse(item)
+        if (!lesson.success) {
+          log.warn('[ipc] configImport 拒收非法 lesson 条目')
+          continue
+        }
+        try {
+          autonomousStore.upsertLesson(lesson.data)
+          imported++
+        } catch (error) {
+          log.warn('[ipc] configImport lesson 写入失败', error)
         }
       }
+      log.info(`[ipc] configImport 导入 lessons ${imported} 条`)
     }
     return { ok: true, message: '配置与经验库已恢复' }
   })

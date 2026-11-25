@@ -94,4 +94,37 @@ describe('设置写入白名单 (parseSettingValue)', () => {
     expect(() => parseSettingValue('remote.accessKey', 123)).toThrow()
     expect(() => parseSettingValue('remote.accessKey', 'x'.repeat(201))).toThrow()
   })
+
+  it('agent.toolConcurrency：1–16 整数可写，越界与非整数被拒', () => {
+    expect(parseSettingValue('agent.toolConcurrency', 8)).toBe(8)
+    expect(parseSettingValue('agent.toolConcurrency', 1)).toBe(1)
+    expect(parseSettingValue('agent.toolConcurrency', 16)).toBe(16)
+    expect(() => parseSettingValue('agent.toolConcurrency', 0)).toThrow('1–16')
+    expect(() => parseSettingValue('agent.toolConcurrency', 17)).toThrow('1–16')
+    expect(() => parseSettingValue('agent.toolConcurrency', 4.5)).toThrow()
+    expect(() => parseSettingValue('agent.toolConcurrency', '8')).toThrow()
+  })
+
+  it('布尔开关三键：布尔可写，字符串/数字被拒', () => {
+    for (const key of ['agent.proactive.enabled', 'agent.proactive.strictSkip', 'agent.tasks.wakeMetaOnDone']) {
+      expect(parseSettingValue(key, true), key).toBe(true)
+      expect(parseSettingValue(key, false), key).toBe(false)
+      expect(() => parseSettingValue(key, 'true'), key).toThrow()
+      expect(() => parseSettingValue(key, 1), key).toThrow()
+    }
+  })
+
+  it('providers.reasoningPatterns：字符串数组可写，超长/超量/非数组被拒', () => {
+    expect(parseSettingValue('providers.reasoningPatterns', ['high', 'medium'])).toEqual([
+      'high',
+      'medium'
+    ])
+    expect(parseSettingValue('providers.reasoningPatterns', [])).toEqual([])
+    expect(() => parseSettingValue('providers.reasoningPatterns', 'high')).toThrow()
+    expect(() => parseSettingValue('providers.reasoningPatterns', [123])).toThrow()
+    expect(() => parseSettingValue('providers.reasoningPatterns', ['x'.repeat(201)])).toThrow()
+    expect(() =>
+      parseSettingValue('providers.reasoningPatterns', Array.from({ length: 101 }, () => 'p'))
+    ).toThrow()
+  })
 })

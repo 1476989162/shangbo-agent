@@ -21,9 +21,11 @@ extraResources:
   - from: c-core/bin
     to: c-core/bin
     filter:
-      - '**/*.exe'
+      # 只带运行所需产物：内核引擎本体与依赖 DLL。test_runner.exe 是开发期测试器，
+      # 之前的 '**/*' 会把它连同 obj 中间产物一起打进安装包，白白膨胀体积。
+      - 'shangbo_agent.exe'
+      - 'shangbo_agent'
       - '**/*.dll'
-      - '**/*'
 
 # better-sqlite3 是原生模块，交给 electron-builder 重建到 Electron 的 ABI
 npmRebuild: true

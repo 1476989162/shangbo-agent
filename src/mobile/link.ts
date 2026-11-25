@@ -29,6 +29,31 @@ const MAX_FRAME_BYTES = 1024 * 1024
 const BASE_BACKOFF_MS = 2000
 const MAX_BACKOFF_MS = 60000
 
+/** sendSeq 按 phoneToken 持久化（localStorage）：
+ *  刷新/重启后序号归零，桌面 SessionCipher 会把新帧判成重放并累计
+ *  解密失败，5 次即触发 MAX_DECRYPT_FAILURES 封禁 10 分钟——这是手机刷新自封的根因。
+ *  持久化后序号单调递增，重连继续从上次水位往上发。 */
+const SEQ_STORAGE_PREFIX = 'shangbo.remote.sendSeq.'
+
+function loadStoredSeq(phoneToken: string): number {
+  try {
+    const raw = window.localStorage.getItem(SEQ_STORAGE_PREFIX + phoneToken)
+    const n = typeof raw === 'string' ? Number(raw) : NaN
+    return Number.isInteger(n) && n >= 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+function storeSeq(phoneToken: string, seq: number): void {
+  try {
+    window.localStorage.setItem(SEQ_STORAGE_PREFIX + phoneToken, String(seq))
+  } catch {
+    // localStorage 不可用（隐私模式等）：不阻断发送，只是失去跨刷新持久性
+    console.warn('[link] sendSeq 持久化失败，刷新后需重新配对或等待桌面解封')
+  }
+}
+
 export class MobileLink {
   private ws: WebSocket | null = null
   private cipherKey: Uint8Array | null = null
@@ -43,6 +68,8 @@ export class MobileLink {
   >()
   private reqSeq = 0
   private pairAcknowledged = false
+  /** 重连退避定时器：disconnect 时必须清掉，防「已断开却还在重连」 */
+  private reconnectTimer: number | null = null
 
   /** 配对是否已获桌面确认：App 用它决定显示已配对还是等待确认。 */
   wasPairAcknowledged(): boolean {
@@ -66,6 +93,8 @@ export class MobileLink {
     const raw = await b64urlDecodeAsync(this.creds.sessionKeyB64)
     this.cipherKey = raw
     this.stopped = false
+    // 恢复持久化的发送序号：不从 0 重发，避免桌面判重放/解密失败自封
+    this.sendSeq = loadStoredSeq(this.creds.phoneToken)
     const ready = new Promise<void>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.joinWaiter = null
@@ -79,6 +108,17 @@ export class MobileLink {
 
   disconnect(): void {
     this.stopped = true
+    // 清掉还在排队的重连定时器：否则 disconnect 后 setTimeout 仍会拉起新连接
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    // join 等待者一并终结，调用方不至于挂到超时
+    if (this.joinWaiter) {
+      clearTimeout(this.joinWaiter.timer)
+      this.joinWaiter.reject(new Error('已手动断开'))
+      this.joinWaiter = null
+    }
     try {
       this.ws?.close()
     } catch {}
@@ -137,7 +177,11 @@ export class MobileLink {
       this.setStatus('reconnecting')
       const delay = this.backoffMs
       this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS)
-      window.setTimeout(() => this.loop(), delay)
+      // 记下定时器句柄：disconnect() 时清除，避免手动断开后仍自动重连
+      this.reconnectTimer = window.setTimeout(() => {
+        this.reconnectTimer = null
+        this.loop()
+      }, delay)
     }
     ws.onerror = () => {
       try {
@@ -194,7 +238,10 @@ export class MobileLink {
           if (msg.ok) p.resolve(msg.data)
           else p.reject(new Error(msg.error || '请求失败'))
         }
-      } catch {}
+      } catch (error) {
+        // 控制面回包解析失败不再静默：具体帧内容进日志，现场可诊断
+        console.warn('[link] 控制面消息解析失败', error, typeof data === 'string' ? data.slice(0, 200) : '')
+      }
       return
     }
     // 业务密文帧
@@ -212,13 +259,18 @@ export class MobileLink {
       } else if (msg.kind === 'push') {
         this.onPush?.(msg.event)
       }
-    } catch {}
+    } catch (error) {
+      // 解密/解析失败不再静默：桌面侧重放计数与封禁能从这里找到对应现场
+      console.warn('[link] 业务帧解密或解析失败', error instanceof Error ? error.message : String(error))
+    }
   }
 
   private async sealFrame(plaintext: string): Promise<ArrayBuffer> {
     if (!this.cipherKey) throw new Error('未配对')
     const seq = this.sendSeq++
     if (seq > 0xffffffff) throw new Error('序号耗尽请重新配对')
+    // 序号只进不退：立即落盘，刷新后从新水位继续
+    storeSeq(this.creds.phoneToken, this.sendSeq)
     // nonce 布局必须与桌面 SessionCipher.seal 完全一致：12B 随机 + hi/be32 + lo/be32 + 4 零字节
     const rand12 = new Uint8Array(12)
     crypto.getRandomValues(rand12)

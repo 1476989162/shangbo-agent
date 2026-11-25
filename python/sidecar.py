@@ -75,24 +75,30 @@ def parse_document(path: str) -> dict:
                     count += len(rows)
         return {"html": "".join(parts) or "<p>（空文档）</p>", "truncated": truncated}
 
-    if ext in (".xlsx", ".xls", ".csv"):
+    if ext == ".csv":
+        # CSV 不依赖 openpyxl：没装第三方库也能预览，避免「缺一个库整块不可用」。
+        import csv
+
+        rows: list[list[str]] = []
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for i, row in enumerate(csv.reader(f)):
+                if i >= 500:
+                    truncated = True
+                    break
+                rows.append(row[:50])
+        sheets = [("CSV", rows)]
+    elif ext == ".xls":
+        # openpyxl 只支持 .xlsx；.xls 是旧二进制格式，明确报可读错误而不是晦涩的解码异常。
+        raise ValueError(
+            "暂不支持旧版 .xls（Excel 97-2003 二进制格式），请在 Excel 中另存为 .xlsx 后再预览。"
+        )
+    elif ext == ".xlsx":
         try:
             import openpyxl
         except ImportError:
             raise ValueError("缺少 openpyxl，请执行 pip install openpyxl")
-        if ext == ".csv":
-            import csv
-
-            rows: list[list[str]] = []
-            with open(path, newline="", encoding="utf-8-sig") as f:
-                for i, row in enumerate(csv.reader(f)):
-                    if i >= 500:
-                        truncated = True
-                        break
-                    rows.append(row[:50])
-            sheets = [("CSV", rows)]
-        else:
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
             sheets = []
             for ws in wb.worksheets[:10]:
                 rows = []
@@ -100,27 +106,30 @@ def parse_document(path: str) -> dict:
                     if i >= 500:
                         truncated = True
                         break
-                    rows.append([(("" if v is None else str(v))[:200] for v in list(row)[:50]])
+                    rows.append(["" if v is None else str(v)[:200] for v in list(row)[:50]])
                 sheets.append((ws.title, rows))
             if len(wb.worksheets) > 10:
                 truncated = True
-        parts = []
-        for title, rows in sheets:
-            parts.append(f"<h3>{html_lib.escape(str(title))}</h3>")
-            if not rows:
-                parts.append("<p>（空表）</p>")
-                continue
-            parts.append(
-                "<table>"
-                + "".join(
-                    "<tr>" + "".join(f"<td>{html_lib.escape(c)}</td>" for c in r) + "</tr>"
-                    for r in rows
-                )
-                + "</table>"
+        finally:
+            # Windows 上不显式 close 会锁死文件句柄，用户在 Excel 里打开/另存会直接报「文件被占用」。
+            wb.close()
+    else:
+        raise ValueError(f"不支持的文档类型: {ext}")
+    parts = []
+    for title, rows in sheets:
+        parts.append(f"<h3>{html_lib.escape(str(title))}</h3>")
+        if not rows:
+            parts.append("<p>（空表）</p>")
+            continue
+        parts.append(
+            "<table>"
+            + "".join(
+                "<tr>" + "".join(f"<td>{html_lib.escape(c)}</td>" for c in r) + "</tr>"
+                for r in rows
             )
-        return {"html": "".join(parts), "truncated": truncated}
-
-    raise ValueError(f"不支持的文档类型: {ext}")
+            + "</table>"
+        )
+    return {"html": "".join(parts), "truncated": truncated}
 
 
 def main() -> None:

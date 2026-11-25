@@ -51,30 +51,7 @@ function chachaBlock(key: Uint8Array, nonce12: Uint8Array, counter: number): Uin
 }
 
 function poly1305Mac(msg: Uint8Array, key32: Uint8Array): Uint8Array {
-  const r = new Uint32Array(5)
-  const h = new Uint32Array(5)
-  const pad = new Uint32Array(5)
-  r[0] = (key32[0] | (key32[1] << 8) | (key32[2] << 16) | (key32[3] << 24)) & 0x3ffffff
-  r[1] = ((key32[3] >> 2) | (key32[4] << 6) | (key32[5] << 14) | (key32[6] << 22)) & 0x3ffff03
-  r[2] = ((key32[6] >> 4) | (key32[7] << 4) | (key32[8] << 12) | (key32[9] << 20)) & 0x3ffc0ff
-  r[3] = ((key32[9] >> 6) | (key32[10] << 2) | (key32[11] << 10) | (key32[12] << 18)) & 0x3f03fff
-  r[4] = ((key32[12] >> 8) | (key32[13] << 0) | (key32[14] << 8) | (key32[15] << 16)) & 0x00fffff
-  for (let i = 0; i < 5; i++) {
-    const v =
-      i === 0
-        ? (key32[16] | (key32[17] << 8) | (key32[18] << 16) | (key32[19] << 24)) >>> 0
-        : i === 1
-          ? (key32[20] | (key32[21] << 8) | (key32[22] << 16) | (key32[23] << 24)) >>> 0
-          : i === 2
-            ? (key32[24] | (key32[25] << 8) | (key32[26] << 16) | (key32[27] << 24)) >>> 0
-            : i === 3
-              ? (key32[28] | (key32[29] << 8) | (key32[30] << 16) | (key32[31] << 24)) >>> 0
-              : 0
-    pad[i] = v
-  }
-  void pad
-  const s = [key32[16], key32[17], key32[18], key32[19], key32[20], key32[21], key32[22], key32[23], key32[24], key32[25], key32[26], key32[27], key32[28], key32[29], key32[30], key32[31]]
-  void s
+  // （原先 r/h/pad/s 的死分配从未参与 BigInt 运算，已清理）
   // 简化实现：用 130 位整数运算（BigInt）保证正确性，消息短性能可接受
   const P = (1n << 130n) - 5n
   let rBig = 0n
@@ -86,8 +63,6 @@ function poly1305Mac(msg: Uint8Array, key32: Uint8Array): Uint8Array {
     for (let i = 15; i >= 0; i--) v = (v << 8n) | BigInt(key32[16 + i])
     return v
   })()
-  const clamp = (v: bigint): bigint => v
-  void clamp
   for (let off = 0; off < msg.length; off += 16) {
     const block = msg.subarray(off, Math.min(off + 16, msg.length))
     let n = 0n

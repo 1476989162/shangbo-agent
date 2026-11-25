@@ -21,6 +21,23 @@ static const char *strcasestr_local(const char *haystack, const char *needle) {
     return NULL;
 }
 
+/** Ticket 2：中文注入词不再裸命中。
+ *  「泄露/窃取/外发」后 80 字节内出现敏感目标（密钥/口令/密码/api key/secrets.json）才算 HIGH；
+ *  动作词之前的敏感目标不算（防「确保用户密码不明文存储，防止窃取」误报）。
+ *  与 TS 侧 injectionDetector.ts 的单向窗口正则保持同一语义。 */
+static int cn_injection_pair(const char *text, const char *action) {
+    const char *targets[] = {"密钥", "口令", "密码", "api_key", "api-key", "api key", "secrets.json", NULL};
+    const char *hit = strcasestr_local(text, action);
+    if (!hit) return 0;
+    /* 动作词之后 80 字节窗口内找敏感目标（UTF-8 按字节计数，80B ≈ 26 个汉字，窗口足够） */
+    for (const char *p = hit; *p && (p - hit) < 80; ++p) {
+        for (int i = 0; targets[i]; ++i) {
+            size_t len = strlen(targets[i]);
+            if (strlen(p) >= len && strncmp(p, targets[i], len) == 0) return 1;
+        }
+    }
+    return 0;
+}
 const char *injection_level_to_string(InjectionLevel level) {
     switch (level) {
         case INJECTION_NONE: return "none";
@@ -57,7 +74,7 @@ InjectionFinding scan_injection_rules(const char *text) {
         strcasestr_local(text, "忽略上述") ||
         strcasestr_local(text, "忽略所有") ||
         strcasestr_local(text, "忽略全部") ||
-        strcasestr_local(text, "system prompt") ||
+        (strcasestr_local(text, "system prompt") && (cn_injection_pair(text, "外发") || strcasestr_local(text, "reveal") || strcasestr_local(text, "忽略"))) ||
         strcasestr_local(text, "reveal your system") ||
         strcasestr_local(text, "reveal your secret") ||
         strcasestr_local(text, "reveal your api_key") ||
@@ -65,9 +82,9 @@ InjectionFinding scan_injection_rules(const char *text) {
         strcasestr_local(text, "reveal your api key") ||
         strcasestr_local(text, "reveal your password") ||
         strcasestr_local(text, "exfiltrat") ||
-        strcasestr_local(text, "泄露") ||
-        strcasestr_local(text, "窃取") ||
-        strcasestr_local(text, "外发") ||
+        cn_injection_pair(text, "泄露") ||
+        cn_injection_pair(text, "窃取") ||
+        cn_injection_pair(text, "外发") ||
         strcasestr_local(text, "send the secrets to") ||
         strcasestr_local(text, "send secrets to") ||
         strcasestr_local(text, "send the credentials to") ||

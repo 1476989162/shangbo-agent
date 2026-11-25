@@ -9,7 +9,7 @@ const emit = defineEmits<{
 const usageDays = ref<7 | 30 | 90>(30)
 const realUsageStats = ref<UsageSummaryStats | null>(null)
 const budgetTokens = ref(32000)
-const toolConcurrency = ref(4)
+const toolConcurrency = ref(8)
 
 async function loadRealUsage(): Promise<void> {
   try {
@@ -54,7 +54,7 @@ async function saveBudgetTokens(): Promise<void> {
 }
 
 async function saveToolConcurrency(): Promise<void> {
-  const normalized = Math.max(1, Math.min(16, Math.floor(Number(toolConcurrency.value) || 4)))
+  const normalized = Math.max(1, Math.min(16, Math.floor(Number(toolConcurrency.value) || 8)))
   toolConcurrency.value = normalized
   await window.shangbo.settings.set('agent.toolConcurrency', normalized)
   emit('feedback', { ok: true, message: `已保存工具并发上限: ${normalized}` })
@@ -63,7 +63,7 @@ async function saveToolConcurrency(): Promise<void> {
 onMounted(async () => {
   const settings = await window.shangbo.settings.getAll()
   budgetTokens.value = (settings['agent.contextBudgetTokens'] as number) ?? 32000
-  toolConcurrency.value = (settings['agent.toolConcurrency'] as number) ?? 4
+  toolConcurrency.value = (settings['agent.toolConcurrency'] as number) ?? 8
   await loadRealUsage()
 })
 
@@ -243,7 +243,7 @@ watch(usageDays, () => {
         <div class="row-text">
           <span class="setting-label">只读工具并发上限</span>
           <span class="row-sub">
-            同一批读取、搜索与目录列举可并行执行；写入与命令始终串行。范围 1-16，默认 4。
+            同一批读取、搜索与目录列举可并行执行；写入与命令始终串行。范围 1-16，默认 8。
           </span>
         </div>
         <input

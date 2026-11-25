@@ -18,7 +18,7 @@
     "test:c": "powershell -ExecutionPolicy Bypass -File scripts/build-and-test-c.ps1",
     "cli:check": "node scripts/local-cli-bridge.cjs check",
     "cli:versions": "node scripts/local-cli-bridge.cjs versions",
-    "build:c": "cmd /c \"cd c-core && build.bat\"",
+    "build:c": "node scripts/build-c.mjs",
     "mobile:dev": "vite --config vite.mobile.config.ts",
     "mobile:build": "vite build --config vite.mobile.config.ts",
     "dist": "npm run build && electron-builder",
@@ -26,9 +26,6 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@capacitor/android": "^7.6.10",
-    "@capacitor/cli": "^7.6.10",
-    "@capacitor/core": "^7.6.10",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@nut-tree-fork/nut-js": "^4.2.6",
@@ -40,6 +37,9 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.0.0",

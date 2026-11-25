@@ -1,4 +1,5 @@
 import { stat, readdir, readFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { basename, extname, resolve, relative, sep } from 'node:path'
 import { shell } from 'electron'
 import { getConversation } from '../db/repo'
@@ -39,6 +40,8 @@ function mimeOf(name: string): string {
 /**
  * 会话工程目录解析 + 越界防护。
  * 无绑定 workingDir 直接拒绝；解析后必须仍在工程目录内；私有目录禁入。
+ * 最后用 realpathSync 收敛符号链接/junction：否则工程内一个 symlink
+ * 指向工程外（如 ~/.ssh）即可绕过上面的前缀检查。
  */
 export function resolveViewerPath(conversationId: string, relPath: string): { root: string; abs: string } {
   const convo = getConversation(conversationId)
@@ -48,6 +51,20 @@ export function resolveViewerPath(conversationId: string, relPath: string): { ro
   const normRoot = resolve(root)
   if (abs !== normRoot && !abs.startsWith(normRoot + sep)) {
     throw new Error('越界：只能预览当前工程目录内的文件。')
+  }
+  // 符号链接/junction 逃逸：先解析真实路径，再重验边界
+  let realAbs = abs
+  try {
+    realAbs = realpathSync(abs)
+  } catch {
+    // 路径不存在（列目录/预览前的探测）保持原样，由调用方 stat 报可读错误
+  }
+  if (realAbs !== abs) {
+    if (realAbs !== normRoot && !realAbs.startsWith(normRoot + sep)) {
+      throw new Error('越界：该路径经符号链接指向工程目录之外，已拒绝。')
+    }
+    guardPrivatePath(realAbs)
+    return { root: normRoot, abs: realAbs }
   }
   guardPrivatePath(abs)
   return { root: normRoot, abs }

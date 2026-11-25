@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises'
+import { symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -55,6 +56,31 @@ describe('右侧查看器文件通道', () => {
   it('二进制文件拒绝文本预览', async () => {
     await writeFile(join(root, 'bin.dat'), Buffer.from([0x00, 0x01, 0x02]))
     await expect(readViewerFile('conv-1', 'bin.dat')).rejects.toThrow()
+  })
+
+  it('工程内 symlink 指向工程外文件被拒（防 junction/symlink 逃逸）', async () => {
+    // 工程外放一个真实文件
+    const outside = await mkdtemp(join(tmpdir(), 'viewer-outside-'))
+    try {
+      await writeFile(join(outside, 'secret.txt'), 'top secret', 'utf8')
+      // 工程内建 symlink 指向它：resolve 后前缀合法，但 realpath 逃逸
+      const linkPath = join(root, 'leak-link.txt')
+      await symlink(join(outside, 'secret.txt'), linkPath)
+      await expect(readViewerFile('conv-1', 'leak-link.txt')).rejects.toThrow('越界')
+      // 目录级 junction 同样拒
+      const dirLink = join(root, 'leak-dir')
+      await symlink(outside, dirLink, 'dir')
+      await expect(readViewerFile('conv-1', 'leak-dir/secret.txt')).rejects.toThrow('越界')
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('工程内普通嵌套路径不受 realpath 误伤', async () => {
+    await mkdir(join(root, 'sub'), { recursive: true })
+    await writeFile(join(root, 'sub', 'ok.txt'), 'fine', 'utf8')
+    const file = await readViewerFile('conv-1', 'sub/ok.txt')
+    expect(file.text).toContain('fine')
   })
 
   it('用完清理', async () => {

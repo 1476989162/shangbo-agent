@@ -128,4 +128,27 @@ describe('桌面待确认配对队列', () => {
     const frame = probe.seal('重启后第一帧')
     expect(svc.sessions.get(deviceId)!.open(frame)).toBe('重启后第一帧')
   })
+
+  it('重启后发送序号从持久化水位继续，而不是归零重发（手机刷新自封根因）', async () => {
+    remoteService.ensureDeviceKeys()
+    remoteService.handlePairingHello('我的手机2', phonePub(), 'tok-seq')
+    const { deviceId } = await remoteService.confirmPendingPairing('tok-seq')
+    const svc = remoteService as unknown as {
+      sessions: Map<string, SessionCipher>
+      currentDeviceId: string | null
+      ensureSessionLoaded(): void
+    }
+    // 模拟已发到序号 42（若干轮对话后崩溃/重启）
+    secretStore.set(`remote.sendSeq.${deviceId}`, '42')
+    svc.sessions.clear()
+    svc.currentDeviceId = null
+    svc.ensureSessionLoaded()
+    const restored = svc.sessions.get(deviceId)
+    expect(restored).toBeTruthy()
+    expect(restored!.getSendSeq()).toBe(42)
+    // 下一帧序号必须 > 42：归零会让手机端把新帧判成重放并累计解密失败封禁
+    const next = restored!.seal('重启后第一帧')
+    expect(next.seq).toBe(42)
+    expect(restored!.getSendSeq()).toBe(43)
+  })
 })

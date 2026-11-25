@@ -1,5 +1,6 @@
 import { BrowserWindow, app, protocol, session, shell } from 'electron'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import log from 'electron-log/main'
 import { IMAGE_PROTOCOL } from '../../shared/imageUrl'
 
@@ -116,10 +117,14 @@ export function createMainWindow(): BrowserWindow {
 
   const devServerUrl = process.env['ELECTRON_RENDERER_URL']
 
-  // 禁止渲染层导航到本地页面之外的位置（file:// 加载时 'self' 就是本地文件）
+  // 禁止渲染层导航到应用自身页面之外的位置。
+  // 打包态收敛到本应用 renderer 的 index.html：旧版放行任意 file://，
+  // 被注入的渲染层能导航到磁盘上任意 HTML（file:// 上下文比应用页更裸）。
+  const appIndexUrl = app.isPackaged
+    ? pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+    : devServerUrl
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const allowed = app.isPackaged ? 'file://' : devServerUrl
-    if (!allowed || !url.startsWith(allowed)) {
+    if (!appIndexUrl || !url.startsWith(appIndexUrl)) {
       event.preventDefault()
       log.warn(`[window] 已拦截渲染层导航：${url}`)
       safeOpenExternal(url)

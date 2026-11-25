@@ -23,9 +23,16 @@ const HIGH_PATTERNS: RegExp[] = [
   /ignore\s+(all\s+)?previous\s+instructions/i,
   /忽略\s*(之前|以前|上面|上述|所有|全部).*指令/,
   /disregard\s+(all\s+)?(prior|previous|above)\s+instructions/i,
-  /system\s+prompt/i,
+  // system prompt 本身是普通技术名词：只在伴随外发/揭示/违背词时才算 HIGH，
+  // 否则「system prompt 配置说明」这类文档标题会整句误报
+  /system\s+prompt[\s\S]{0,80}(泄露|窃取|外发|reveal|ignore|忽略|绕过)/i,
+  /(泄露|窃取|外发|reveal|ignore|忽略|绕过)[\s\S]{0,80}system\s+prompt/i,
   /reveal\s+(your\s+)?(system|secret|api[\s_-]?key|password)/i,
-  /泄露|窃取|外发.*(密钥|口令|密码|secrets?\.json|api[\s_-]?key)/i,
+  // 分组括号是语义关键：要求「泄露/窃取/外发」与「敏感目标」动作词在前、敏感目标在其后 80 字内，
+  // 否则「防止内存泄露」「防止窃取」这类防护性描述会整句命中误报 INJECTION_HIGH
+  /(?:泄露|窃取|外发).{0,80}(密钥|口令|密码|secrets?\.json|api[\s_-]?key)/i,
+  // 反向写法（目标在前）会把「确保用户密码不以明文存储，防止窃取风险」误报成 HIGH，故不采纳
+
   /exfiltrat/i,
   /send\s+(the\s+)?(secrets?|credentials?|api[\s_-]?key)\s+to/i,
   /(?:rm\s+-rf\s+\/|format\s+[a-z]:|del\s+\/s[^\n]*c:\\\*|drop\s+database|truncate\s+table)/i
