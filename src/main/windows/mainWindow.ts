@@ -124,7 +124,20 @@ export function createMainWindow(): BrowserWindow {
     ? pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
     : devServerUrl
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!appIndexUrl || !url.startsWith(appIndexUrl)) {
+    // 前缀比对可被同前缀 URL 绕过，严格比对：
+    // - 开发态：origin 必须完全等于 devServerUrl 的 origin（vite 同源页面都合法）
+    // - 打包态：只允许应用自身 index.html（含 #hash 与 ?query 两个内页形态）
+    let allowed = false
+    if (app.isPackaged) {
+      allowed = url === appIndexUrl || url.startsWith(appIndexUrl + '#') || url.startsWith(appIndexUrl + '?')
+    } else if (appIndexUrl) {
+      try {
+        allowed = new URL(url).origin === new URL(appIndexUrl).origin
+      } catch {
+        allowed = false
+      }
+    }
+    if (!allowed) {
       event.preventDefault()
       log.warn(`[window] 已拦截渲染层导航：${url}`)
       safeOpenExternal(url)

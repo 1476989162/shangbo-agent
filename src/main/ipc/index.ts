@@ -130,21 +130,23 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.conversationList, () => repo.listConversations())
 
+  const ConversationCreateSchema = z.union([
+    z.string().min(1).max(300),
+    z.object({
+      title: z.string().min(1).max(300).optional(),
+      workingDir: z.string().max(1000).nullable().optional(),
+      projectId: z.string().max(200).nullable().optional(),
+      mode: z.enum(['auto', 'chat', 'builder', 'wish']).nullable().optional()
+    })
+  ])
+
   ipcMain.handle(
     IPC.conversationCreate,
-    (
-      _event,
-      input:
-        | string
-        | {
-            title?: string
-            workingDir?: string | null
-            projectId?: string | null
-            mode?: 'auto' | 'chat' | 'builder' | 'wish' | null
-          }
-        | undefined
-    ) => {
-      let workingDir = typeof input === 'object' ? (input?.workingDir ?? null) : null
+    (_event, inputRaw: unknown) => {
+      // 渲染层不可信：input 未过校验前连 typeof 分支都不能信
+      const input = ConversationCreateSchema.nullish().parse(inputRaw) ?? {}
+      const workingDir0 = typeof input === 'object' ? (input.workingDir ?? null) : null
+      let workingDir = workingDir0
       if (!workingDir) {
         const coworkPath = getSetting<string>('cowork.filesPath', '')
         if (coworkPath && fs.existsSync(coworkPath)) {
@@ -155,20 +157,23 @@ export function registerIpcHandlers(): void {
         return repo.createConversation({ title: input, workingDir })
       }
       return repo.createConversation({
-        title: input?.title ?? '新对话',
+        title: input.title ?? '新对话',
         workingDir,
-        projectId: input?.projectId ?? null,
-        mode: input?.mode ?? null
+        projectId: input.projectId ?? null,
+        mode: input.mode ?? null
       })
     }
   )
 
-  ipcMain.handle(IPC.conversationRename, (_event, id: string, title: string) => {
+  ipcMain.handle(IPC.conversationRename, (_event, idRaw: unknown, titleRaw: unknown) => {
+    const id = z.string().min(1).max(100).parse(idRaw)
+    const title = z.string().min(1).max(500).parse(titleRaw)
     repo.updateConversation(id, { title: title.trim() || '新对话' })
     return repo.getConversation(id)
   })
 
-  ipcMain.handle(IPC.conversationDelete, async (_event, id: string) => {
+  ipcMain.handle(IPC.conversationDelete, async (_event, idRaw: unknown) => {
+    const id = z.string().min(1).max(100).parse(idRaw)
     agentRuntime.abortConversation(id)
     repo.deleteConversation(id)
     // 方案 A：会话没了，图片目录同步删掉，不在磁盘上留垃圾
@@ -176,18 +181,24 @@ export function registerIpcHandlers(): void {
     return true
   })
 
-  ipcMain.handle(IPC.conversationMessages, (_event, conversationId: string) => ({
-    messages: repo.listMessages(conversationId),
-    activeLeafId: repo.getActiveLeaf(conversationId)
-  }))
+  ipcMain.handle(IPC.conversationMessages, (_event, conversationIdRaw: unknown) => {
+    const conversationId = z.string().min(1).max(100).parse(conversationIdRaw)
+    return {
+      messages: repo.listMessages(conversationId),
+      activeLeafId: repo.getActiveLeaf(conversationId)
+    }
+  })
 
-  ipcMain.handle(IPC.conversationSetLeaf, (_event, conversationId: string, leafId: string) => {
+  ipcMain.handle(IPC.conversationSetLeaf, (_event, conversationIdRaw: unknown, leafIdRaw: unknown) => {
+    const conversationId = z.string().min(1).max(100).parse(conversationIdRaw)
+    const leafId = z.string().min(1).max(100).parse(leafIdRaw)
     repo.setActiveLeaf(conversationId, leafId)
     return true
   })
 
-  ipcMain.handle(IPC.conversationSetWorkingDir, (_event, conversationId: string, dir: unknown) => {
-    if (dir !== null && typeof dir !== 'string') throw new Error('目录必须是字符串或 null')
+  ipcMain.handle(IPC.conversationSetWorkingDir, (_event, conversationIdRaw: unknown, dirRaw: unknown) => {
+    const conversationId = z.string().min(1).max(100).parse(conversationIdRaw)
+    const dir = z.string().max(1000).nullable().parse(dirRaw)
     repo.updateConversation(conversationId, { workingDir: dir })
     return repo.getConversation(conversationId)
   })
@@ -199,8 +210,8 @@ export function registerIpcHandlers(): void {
     return repo.getConversation(id)
   })
 
-  ipcMain.handle(IPC.conversationExport, (_event, conversationId: string) =>
-    exportConversation(conversationId)
+  ipcMain.handle(IPC.conversationExport, (_event, conversationIdRaw: unknown) =>
+    exportConversation(z.string().min(1).max(100).parse(conversationIdRaw))
   )
 
   /* 对话 ---------------------------------------------------------- */
@@ -227,7 +238,8 @@ export function registerIpcHandlers(): void {
     )
   })
 
-  ipcMain.handle(IPC.chatAbort, (_event, runId: string) => {
+  ipcMain.handle(IPC.chatAbort, (_event, runIdRaw: unknown) => {
+    const runId = z.string().min(1).max(100).parse(runIdRaw)
     agentRuntime.abort(runId)
     return true
   })
@@ -257,8 +269,8 @@ export function registerIpcHandlers(): void {
     return agentRuntime.conversationRuntimeState(id)
   })
 
-  ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageId: string) =>
-    agentRuntime.regenerate(assistantMessageId, agentRuntime.withBus(() => {}))
+  ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageIdRaw: unknown) =>
+    agentRuntime.regenerate(z.string().min(1).max(100).parse(assistantMessageIdRaw), agentRuntime.withBus(() => {}))
   )
 
   /* 供应商 -------------------------------------------------------- */
@@ -269,7 +281,8 @@ export function registerIpcHandlers(): void {
     upsertProvider(ProviderInputSchema.parse(input) as ProviderInput)
   )
 
-  ipcMain.handle(IPC.providerDelete, (_event, id: string) => {
+  ipcMain.handle(IPC.providerDelete, (_event, idRaw: unknown) => {
+    const id = z.string().min(1).max(200).parse(idRaw)
     deleteProvider(id)
     return true
   })
@@ -307,7 +320,8 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  ipcMain.handle(IPC.providerTest, async (_event, id: string) => {
+  ipcMain.handle(IPC.providerTest, async (_event, idRaw: unknown) => {
+    const id = z.string().min(1).max(200).parse(idRaw)
     const provider = getProvider(id)
     if (!provider) return { ok: false, latencyMs: 0, message: '供应商不存在' }
     try {
@@ -378,8 +392,9 @@ export function registerIpcHandlers(): void {
 
   /* Token 用量真实统计 -------------------------------------------- */
 
-  ipcMain.handle(IPC.usageGetStats, (_event, days: unknown) => {
-    const numDays = typeof days === 'number' ? days : 30
+  ipcMain.handle(IPC.usageGetStats, (_event, daysRaw: unknown) => {
+    // 类型兜底换 zod：非数字/越界直接拒，不再静默回落 30
+    const numDays = z.number().int().min(1).max(365).parse(daysRaw)
     return repo.getUsageStats(numDays)
   })
 
@@ -515,7 +530,7 @@ export function registerIpcHandlers(): void {
     // 收紧：UNC 路径（\\server\share）指向网内任意主机，渲染层被注入时可用它探测内网；
     // 高危可执行类型直接拒，只放行文档/媒体/压缩包等。
     const p = z.string().min(1).max(1000).parse(targetPath)
-    if (process.platform === 'win32' && /^\\\\/i.test(p)) {
+    if (process.platform === 'win32' && /^(?:\\\\|\/\/)/.test(p)) {
       log.warn(`[ipc] app:openPath 拒绝 UNC 路径：${p}`)
       return '已拒绝：不允许打开 UNC 网络路径。'
     }
@@ -738,7 +753,9 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.remoteIdentity, () => remoteService.getIdentityInfo())
 
-  ipcMain.handle(IPC.remoteRevoke, async (_event, id: string) => remoteService.revokeDevice(id))
+  ipcMain.handle(IPC.remoteRevoke, async (_event, idRaw: unknown) =>
+    remoteService.revokeDevice(z.string().min(1).max(100).parse(idRaw))
+  )
 
   ipcMain.handle(IPC.remoteDisconnect, () => {
     remoteService.disconnectAll()

@@ -299,6 +299,9 @@ class RemoteService {
       device = addPairedDevice(deviceName, phonePubB64)
     }
     setSecret(SESSION_PREFIX + device.id, sessionKey.toString('base64url'))
+    // 新会话从 0 重新计数：旧设备残留的序号水位对新密钥无意义，
+    // 若不重置，恢复时会把序号抬到旧水位而手机端从 0 发 → 必判重放封禁
+    setSecret(SEND_SEQ_PREFIX + device.id, '0')
     setSecret(SESSION_PREFIX + device.id + '.phoneToken', phoneToken)
     setSecret(tokenSecret, device.id)
     this.sessions.set(device.id, new SessionCipher(sessionKey))
@@ -419,6 +422,8 @@ class RemoteService {
       }
       deleteSecret(SESSION_PREFIX + id)
       deleteSecret(SESSION_PREFIX + id + '.phoneToken')
+      // 序号水位一并清理：重新配对会重置，残留旧值只会误导恢复逻辑
+      deleteSecret(SEND_SEQ_PREFIX + id)
       if (token) deleteSecret(PHONE_TOKEN_PREFIX + token)
       this.sessions.delete(id)
       if (this.currentDeviceId === id) this.currentDeviceId = null

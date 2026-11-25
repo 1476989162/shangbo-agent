@@ -104,8 +104,10 @@ export async function handleRemoteRequest(
         agentRuntime.abortConversation(p.conversationId)
         repo.deleteConversation(p.conversationId)
         // 会话删了但图片还在磁盘：同步清理会话图片目录，避免孤儿文件永久占盘
+        // deleteConversationImages 是 async：不 await 会在响应已回之后才报错，
+        // 且进程退出竞态可能截断未完成的清理。
         try {
-          deleteConversationImages(p.conversationId)
+          await deleteConversationImages(p.conversationId)
         } catch (error) {
           // 删除失败不阻断会话删除，但要留可查的审计线索，不静默吞
           log.warn('[remote] deleteConversationImages 失败', error)
@@ -152,14 +154,18 @@ export async function handleRemoteRequest(
       }
       case 'approve': {
         const p = params as { runId: string; toolUseId: string; approved: boolean; paramHash: string }
+        // critical 是硬红线（永久禁止类）：不受策略影响。
+        // 即使默认 allow-all 也一律拒绝远程批准，只允许远程拒绝。
+        const pendingAll = agentRuntime.listPendingApprovals().find(
+          (a) => a.runId === p.runId && a.toolUseId === p.toolUseId
+        )
+        if (pendingAll?.severity === 'critical' && p.approved === true) {
+          return { ok: false, error: '硬红线操作必须回本机桌面确认，远程批准已被拒绝' }
+        }
         if (ctx.approvalPolicy === 'confirm-high') {
           const pending = agentRuntime.listPendingApprovals().find(
             (a) => a.runId === p.runId && a.toolUseId === p.toolUseId
           )
-          // critical 是硬红线（永久禁止类），任何远程批准一律拒绝
-          if (pending && pending.severity === 'critical' && p.approved === true) {
-            return { ok: false, error: '硬红线操作必须回本机桌面确认，远程批准已被拒绝' }
-          }
           // 只拦「远程批准」：拒绝是安全的（少做事不越权），手机必须能远程拒绝
           if (pending && p.approved === true && isHighRiskToolName(pending.toolName)) {
             return { ok: false, error: '高危操作需回桌面确认，远程批准已被策略拒绝' }

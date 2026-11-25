@@ -307,4 +307,51 @@ describe('read-only 策略与远程审批收紧 (Ticket 2)', () => {
       rt.listPendingApprovals = original
     }
   })
+
+  it('allow-all 默认策略下 severity=critical 同样拒绝远程批准', async () => {
+    const rt = agentRuntime as unknown as {
+      listPendingApprovals: () => Array<{
+        runId: string
+        toolUseId: string
+        toolName: string
+        severity: string
+      }>
+      decideWithHash: (runId: string, toolUseId: string, approved: boolean, paramHash: string) => boolean
+    }
+    const original = rt.listPendingApprovals
+    rt.listPendingApprovals = () => [
+      { runId: 'r2', toolUseId: 't2', toolName: 'run_command', severity: 'critical' }
+    ]
+    rt.decideWithHash = (runId: string, _toolUseId: string, approved: boolean) => {
+      // 只允许远程拒绝到达底层：批准必须在上层就被硬红线拦下
+      void runId
+      if (approved) throw new Error('critical 在 allow-all 下也不应到达 decideWithHash（批准）')
+      return true
+    }
+    try {
+      // 默认 allow-all（不传 approvalPolicy）也必须拒绝硬红线的远程批准
+      const res = await handleRemoteRequest(
+        req('approve', { runId: 'r2', toolUseId: 't2', approved: true, paramHash: 'h' })
+      )
+      expect(res.ok).toBe(false)
+      expect(res.error).toContain('硬红线')
+
+      // 显式 allow-all 同样拒绝
+      const explicit = await handleRemoteRequest(
+        req('approve', { runId: 'r2', toolUseId: 't2', approved: true, paramHash: 'h' }),
+        { approvalPolicy: 'allow-all' }
+      )
+      expect(explicit.ok).toBe(false)
+      expect(explicit.error).toContain('硬红线')
+
+      // 远程拒绝 critical 仍然放行（少做事不越权）
+      const reject = await handleRemoteRequest(
+        req('approve', { runId: 'r2', toolUseId: 't2', approved: false, paramHash: 'h' }),
+        { approvalPolicy: 'allow-all' }
+      )
+      expect(reject.ok).toBe(true)
+    } finally {
+      rt.listPendingApprovals = original
+    }
+  })
 })

@@ -52,22 +52,29 @@ export function resolveViewerPath(conversationId: string, relPath: string): { ro
   if (abs !== normRoot && !abs.startsWith(normRoot + sep)) {
     throw new Error('越界：只能预览当前工程目录内的文件。')
   }
-  // 符号链接/junction 逃逸：先解析真实路径，再重验边界
+  // 工程根本身也可能是符号链接/junction：两侧都收敛到真实路径再比边界，
+  // 否则 root 是链接时所有真实子文件的 realpath 都会落在「链接目标」下而被误杀
+  let realRoot = normRoot
+  try {
+    realRoot = realpathSync(normRoot)
+  } catch {
+    // 目录不存在时回退 normRoot，由调用方报可读错误
+  }
   let realAbs = abs
   try {
     realAbs = realpathSync(abs)
   } catch {
     // 路径不存在（列目录/预览前的探测）保持原样，由调用方 stat 报可读错误
   }
-  if (realAbs !== abs) {
-    if (realAbs !== normRoot && !realAbs.startsWith(normRoot + sep)) {
+  if (realAbs !== abs || realRoot !== normRoot) {
+    if (realAbs !== realRoot && !realAbs.startsWith(realRoot + sep)) {
       throw new Error('越界：该路径经符号链接指向工程目录之外，已拒绝。')
     }
     guardPrivatePath(realAbs)
-    return { root: normRoot, abs: realAbs }
+    return { root: realRoot, abs: realAbs }
   }
   guardPrivatePath(abs)
-  return { root: normRoot, abs }
+  return { root: realRoot, abs }
 }
 
 export interface ViewerFile {

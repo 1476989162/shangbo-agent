@@ -22,19 +22,30 @@ static const char *strcasestr_local(const char *haystack, const char *needle) {
 }
 
 /** Ticket 2：中文注入词不再裸命中。
- *  「泄露/窃取/外发」后 80 字节内出现敏感目标（密钥/口令/密码/api key/secrets.json）才算 HIGH；
- *  动作词之前的敏感目标不算（防「确保用户密码不明文存储，防止窃取」误报）。
- *  与 TS 侧 injectionDetector.ts 的单向窗口正则保持同一语义。 */
+ *  遍历文本中每一个「泄露/窃取/外发」命中点（首词诱饵无法绕过），
+ *  在每个命中点后 80 字节窗口内做大小写不敏感比对（大写 API_KEY 也命中）。
+ *  与 TS 侧正则的 /i 无敌性能对齐。 */
+/* 大小写不敏感前缀比较（MSVC 无 strncasecmp，自写跨平台版；ASCII 部分用 tolower，中文 UTF-8 字节自然相等） */
+static int prefix_ci_eq(const char *p, const char *target, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        if (tolower((unsigned char)p[i]) != tolower((unsigned char)target[i])) return 0;
+    }
+    return 1;
+}
+
 static int cn_injection_pair(const char *text, const char *action) {
     const char *targets[] = {"密钥", "口令", "密码", "api_key", "api-key", "api key", "secrets.json", NULL};
-    const char *hit = strcasestr_local(text, action);
-    if (!hit) return 0;
-    /* 动作词之后 80 字节窗口内找敏感目标（UTF-8 按字节计数，80B ≈ 26 个汉字，窗口足够） */
-    for (const char *p = hit; *p && (p - hit) < 80; ++p) {
-        for (int i = 0; targets[i]; ++i) {
-            size_t len = strlen(targets[i]);
-            if (strlen(p) >= len && strncmp(p, targets[i], len) == 0) return 1;
+    size_t action_len = strlen(action);
+    const char *cursor = text;
+    while ((cursor = strcasestr_local(cursor, action)) != NULL) {
+        /* 本次命中点后 80 字节窗口内找目标（UTF-8 按字节计，80B ≈ 26 个汉字） */
+        for (const char *p = cursor; *p && (p - cursor) < 80; ++p) {
+            for (int i = 0; targets[i]; ++i) {
+                size_t len = strlen(targets[i]);
+                if (strlen(p) >= len && prefix_ci_eq(p, targets[i], len)) return 1;
+            }
         }
+        cursor += action_len; /* 跳过当前命中，继续找下一个动作词位置 */
     }
     return 0;
 }

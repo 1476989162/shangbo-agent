@@ -76,6 +76,25 @@ describe('右侧查看器文件通道', () => {
     }
   })
 
+  it('工程根本身是 symlink 时，其内部真实文件不被误杀', async () => {
+    // 真实目录（存放实际文件）+ 一个 symlink 作为会话 workingDir
+    const real = await mkdtemp(join(tmpdir(), 'viewer-real-'))
+    const linkRoot = await mkdtemp(join(tmpdir(), 'viewer-link-'))
+    try {
+      await writeFile(join(real, 'ok.txt'), 'fine', 'utf8')
+      const linkedRoot = join(linkRoot, 'linked-project')
+      await symlink(real, linkedRoot, 'dir')
+      // 会话改绑到 symlink 工程
+      convoDirs.set('conv-link', linkedRoot)
+      // 工程内普通文件：realpath 后落在真实目录下，但 realRoot 同样收敛到真实目录 → 不误杀
+      const file = await readViewerFile('conv-link', 'ok.txt')
+      expect(file.text).toContain('fine')
+    } finally {
+      await rm(real, { recursive: true, force: true })
+      await rm(linkRoot, { recursive: true, force: true })
+    }
+  })
+
   it('工程内普通嵌套路径不受 realpath 误伤', async () => {
     await mkdir(join(root, 'sub'), { recursive: true })
     await writeFile(join(root, 'sub', 'ok.txt'), 'fine', 'utf8')
