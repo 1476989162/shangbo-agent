@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { normalizeIncomingDelta } from './modelRuntime'
 
 describe('Boost 修复深度专项验证', () => {
@@ -6,13 +6,11 @@ describe('Boost 修复深度专项验证', () => {
     it('跨分块切割标签 (<th + ink>) 不会泄露到 text_delta', () => {
       const textEvents: string[] = []
       const reasoningEvents: string[] = []
-      const blocks: any[] = []
 
       // 模拟 agentLoop.ts 中 createStreamChunkProcessor 逻辑
       let inThinkTag = false
       let tagBuffer = ''
       let textStreamSnapshot = ''
-      let reasoningStreamSnapshot = ''
 
       const emitText = (text: string) => {
         if (!text) return

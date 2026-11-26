@@ -72,12 +72,13 @@ function pickMatches(text: string, patterns: RegExp[], cap = 4): string[] {
   for (const p of patterns) {
     // 全局匹配找所有命中片段
     const g = new RegExp(p.source, p.flags.includes('g') ? p.flags : p.flags + 'g')
-    let m: RegExpExecArray | null
+    let m: RegExpExecArray | null = g.exec(text)
     let guard = 0
-    while ((m = g.exec(text)) !== null && guard++ < 8) {
+    while (m !== null && guard++ < 8) {
       const hit = m[0].trim()
       if (hit && !out.includes(hit)) out.push(hit)
       if (out.length >= cap) break
+      m = g.exec(text)
     }
     if (out.length >= cap) break
   }

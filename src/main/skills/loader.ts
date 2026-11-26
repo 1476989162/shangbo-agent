@@ -1,3 +1,4 @@
+import type { Dirent } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import log from 'electron-log/main'
@@ -46,7 +47,7 @@ function parseFrontmatter(text: string): { name: string; description: string } {
 /** 扫描单个技能包根目录：顶层 SKILL.md + 每个子目录的 SKILL.md。 */
 export async function scanSkillPack(root: string): Promise<SkillPack | null> {
   const normRoot = resolve(root)
-  let entries
+  let entries: Dirent[]
   try {
     entries = await readdir(normRoot, { withFileTypes: true })
   } catch {

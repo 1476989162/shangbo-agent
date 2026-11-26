@@ -262,7 +262,7 @@ function maybeWakeMeta(task: DelegatedTaskRecord, state: DelegatedState, report:
           parentMessageId: parentLeaf,
           content: `【后台分身汇报】${task.title}（${state}）\n${report.slice(0, 1_500)}\n请用一两句话向用户汇报结果，不要重新派发任务。`
         },
-        agentRuntime.withBus(() => {})
+        agentRuntime.withBus(() => undefined)
       )
     } catch {
       // 唤醒失败不影响任务结果，Meta 仍可主动调 task_status
@@ -416,7 +416,7 @@ export function startTask(input: StartTaskInput): StartTaskResult {
           priority: 'task',
           preemptible: true
         },
-        agentRuntime.withBus(() => {})
+        agentRuntime.withBus(() => undefined)
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -452,7 +452,7 @@ export function sendInstruction(taskId: string, instruction: string): DelegatedT
           priority: 'task',
           preemptible: true
         },
-        agentRuntime.withBus(() => {})
+        agentRuntime.withBus(() => undefined)
       )
     } catch (error) {
       patchTask(taskId, {

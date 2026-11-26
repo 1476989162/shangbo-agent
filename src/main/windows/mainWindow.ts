@@ -1,4 +1,4 @@
-import { BrowserWindow, app, protocol, session, shell } from 'electron'
+import { BrowserWindow, app, session, shell } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import log from 'electron-log/main'

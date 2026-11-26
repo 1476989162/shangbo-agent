@@ -3,7 +3,6 @@ import type { AutonomyLevel } from '../../shared/types'
 import {
   analyzeCmdCommand,
   classifyDestructiveCommand,
-  commandStaysInsideWorkspace,
   isPathInsideResolved,
   touchesPrivateData
 } from './commandGuard'

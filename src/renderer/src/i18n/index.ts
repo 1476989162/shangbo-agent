@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 
 export type SupportedLanguage = 'zh-CN' | 'zh-TW' | 'en-US' | 'ja-JP'
 

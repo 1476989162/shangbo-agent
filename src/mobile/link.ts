@@ -121,14 +121,14 @@ export class MobileLink {
     }
     try {
       this.ws?.close()
-    } catch {}
+    } catch { /* 断开时 socket 已死则 close 抛错属预期，忽略，照常清理 */ }
     this.ws = null
   }
 
   private setStatus(s: string, d?: string): void {
     try {
       this.onStatus?.(s, d)
-    } catch {}
+    } catch { /* 状态回调由调用方提供，抛错不影响连接主流程 */ }
   }
 
   private loop(): void {
@@ -186,7 +186,7 @@ export class MobileLink {
     ws.onerror = () => {
       try {
         ws.close()
-      } catch {}
+      } catch { /* error 后 socket 常已半死，close 抛错属预期，忽略 */ }
     }
   }
 

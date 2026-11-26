@@ -104,7 +104,6 @@ export const useChatStore = defineStore('chat', () => {
   // 早期用单个 activeRunId，导致切到别的会话就看不到「正在运行」，
   // 而且任何一个会话在跑都会锁死全局输入框。
   const runsByConversation = ref<Record<string, ConversationRun>>({})
-  const streamingMessageId = ref<string | null>(null)
   const approval = ref<ApprovalRequest | null>(null)
   const lastError = ref<string | null>(null)
   const switchNotice = ref<SwitchNotice | null>(null)

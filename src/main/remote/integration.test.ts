@@ -188,7 +188,7 @@ function ctl(ws: WebSocket, op: string, extra: Record<string, unknown> = {}): Pr
           if (msg.ok) resolve(msg.data)
           else reject(new Error(msg.error || '失败'))
         }
-      } catch {}
+      } catch { /* 非 JSON 帧/未就绪回包忽略，继续等目标 id */ }
     }
     ws.on('message', onMsg)
     ws.send(JSON.stringify({ id, op, ...extra }))

@@ -1,13 +1,13 @@
 import { createReadStream } from 'node:fs';
 import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import type { Dirent } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import {
   guardPrivatePath,
   resolveUserPath,
   truncate,
-  type ToolContext,
   type ToolDefinition
 } from './core';
 
@@ -53,7 +53,7 @@ export const listDirectory: ToolDefinition = {
     const { path } = z.object({ path: z.string().min(1) }).parse(input)
     const target = resolveUserPath(context, path)
     guardPrivatePath(target)
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await readdir(target, { withFileTypes: true })
     } catch (e) {
@@ -330,7 +330,7 @@ export const searchFiles: ToolDefinition = {
     const stack: string[] = [root]
     while (stack.length > 0 && results.length < limit && scanned < 5000) {
       const dir = stack.pop()!
-      let entries
+      let entries: Dirent[]
       try {
         entries = await readdir(dir, { withFileTypes: true })
       } catch {
@@ -365,7 +365,7 @@ export const searchFiles: ToolDefinition = {
           results.push(full)
           continue
         }
-        let buffer
+        let buffer: Buffer
         try {
           const info = await stat(full)
           if (info.size > 512_000) continue

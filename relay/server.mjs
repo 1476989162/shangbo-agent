@@ -9,8 +9,7 @@ import { RelayState, RateLimiter, MAX_FRAME_BYTES, HEARTBEAT_MS } from './state.
 import {
   parseAllowedDesktops,
   verifyIdentitySignature,
-  canonicalize,
-  identityFingerprint
+  canonicalize
 } from './identity.mjs'
 
 /**
@@ -220,7 +219,7 @@ wss.on('connection', (ws, req) => {
   // ws 层错误（握手后异常断开、ECONNRESET 等）不监听会作为 unhandled 'error'
   // 直接把中转进程打掉
   ws.on('error', () => {
-    try { ws.close() } catch {}
+    try { ws.close() } catch { /* error 后 socket 常已半死，close 抛错属预期，忽略 */ }
   })
 
   ws.on('message', (data, isBinary) => {
@@ -360,7 +359,7 @@ wss.on('connection', (ws, req) => {
           // 且旧连接 close 时会无条件删掉新登记的 socket
           const previous = phoneSockets.get(phoneToken)
           if (previous && previous !== ws && previous.readyState <= 1) {
-            try { previous.close(1000, 'replaced') } catch {}
+            try { previous.close(1000, 'replaced') } catch { /* 旧连接已死时 close 抛错属预期，忽略 */ }
           }
           phoneSockets.set(phoneToken, ws)
           reply(true, { roomId: room.roomId, pendingApprovals: [] })
@@ -418,7 +417,7 @@ wss.on('connection', (ws, req) => {
         const sock = phoneSockets.get(msg.phoneToken)
         try {
           sock?.close(1008, 'revoked by desktop')
-        } catch {}
+        } catch { /* 被吊销端已断开时 close 抛错属预期，忽略 */ }
         phoneSockets.delete(msg.phoneToken)
         reply(ok, null, ok ? undefined : 'unknown phone')
         return

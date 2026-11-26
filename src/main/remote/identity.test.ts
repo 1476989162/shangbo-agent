@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { generateKeyPairSync, sign, verify, createPublicKey } from 'node:crypto'
+import { verify, createPublicKey } from 'node:crypto'
 
 /**
  * 中转身份密钥：证明"这台桌面就是我"。

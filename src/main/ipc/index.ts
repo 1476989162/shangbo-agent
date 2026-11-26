@@ -234,7 +234,7 @@ export function registerIpcHandlers(): void {
       { ...parsed, images: images.length > 0 ? images : undefined },
       // 事件只走总线：withBus 会 publish，桌面桥接订阅者负责 broadcast。
       // 若这里再传 broadcast，同一事件会被发给窗口两次，导致流式文本重复。
-      agentRuntime.withBus(() => {})
+      agentRuntime.withBus(() => undefined)
     )
   })
 
@@ -270,7 +270,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.chatRegenerate, (_event, assistantMessageIdRaw: unknown) =>
-    agentRuntime.regenerate(z.string().min(1).max(100).parse(assistantMessageIdRaw), agentRuntime.withBus(() => {}))
+    agentRuntime.regenerate(z.string().min(1).max(100).parse(assistantMessageIdRaw), agentRuntime.withBus(() => undefined))
   )
 
   /* 供应商 -------------------------------------------------------- */

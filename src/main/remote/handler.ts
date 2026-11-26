@@ -143,7 +143,7 @@ export async function handleRemoteRequest(
           // 订阅者（桌面窗口/远程推送）从总线收到事件。
           data: agentRuntime.send(
             { conversationId: p.conversationId, parentMessageId: p.parentMessageId, content: p.content },
-            agentRuntime.withBus(() => {})
+            agentRuntime.withBus(() => undefined)
           )
         }
       }
@@ -177,7 +177,7 @@ export async function handleRemoteRequest(
       }
       case 'regenerate': {
         const p = params as { assistantMessageId: string }
-        return { ok: true, data: agentRuntime.regenerate(p.assistantMessageId, agentRuntime.withBus(() => {})) }
+        return { ok: true, data: agentRuntime.regenerate(p.assistantMessageId, agentRuntime.withBus(() => undefined)) }
       }
       case 'cancelQueued': {
         const p = params as { conversationId: string; userMessageId: string }

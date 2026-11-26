@@ -6,7 +6,6 @@ import {
   guardPrivatePath,
   resolveUserPath,
   truncate,
-  type ToolContext,
   type ToolDefinition
 } from './core';
 
@@ -384,7 +383,8 @@ export const claudeStatus: ToolDefinition = {
  * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
  */
 function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*m/g, '')
+  const ESC = String.fromCharCode(27)
+  return s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '')
 }
 
 async function runOpencodeCli(

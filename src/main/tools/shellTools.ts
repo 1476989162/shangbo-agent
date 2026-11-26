@@ -10,7 +10,6 @@ import {
   resolveUserPath,
   safeUserDataPath,
   truncate,
-  type ToolContext,
   type ToolDefinition
 } from './core';
 

@@ -268,10 +268,11 @@ export class McpClient {
 
   private onData(chunk: string): void {
     this.buffer += chunk
-    let index: number
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
+    let index = this.buffer.indexOf('\n')
+    while (index >= 0) {
       const line = this.buffer.slice(0, index).trim()
       this.buffer = this.buffer.slice(index + 1)
+      index = this.buffer.indexOf('\n')
       if (!line) continue
       let msg: Record<string, unknown>
       try {

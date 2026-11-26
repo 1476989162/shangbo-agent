@@ -150,7 +150,7 @@ export class RemoteClient {
     const openTimer = setTimeout(() => {
       try {
         ws.terminate()
-      } catch {}
+      } catch { /* 超时/已断开时 terminate 抛错属预期，忽略 */ }
     }, CONNECT_TIMEOUT_MS)
 
     ws.on('open', () => {
@@ -189,7 +189,7 @@ export class RemoteClient {
   private closeSocket(code: number, reason: string): void {
     try {
       this.ws?.close(code, reason)
-    } catch {}
+    } catch { /* socket 已死时 close 抛错属预期，忽略，照常清理 */ }
     this.ws = null
   }
 

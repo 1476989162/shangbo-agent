@@ -75,8 +75,8 @@ export class HttpMcpClient {
   }
 
   /** HTTP 无常驻进程：与 stdio 同接口，空实现。 */
-  async stop(): Promise<void> {}
-  stopSync(): void {}
+  async stop(): Promise<void> { /* 无后台进程可停，保持接口对称即可 */ }
+  stopSync(): void { /* 同上 */ }
 
   private async request(
     method: string,

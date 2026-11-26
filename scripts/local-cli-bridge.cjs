@@ -31,13 +31,6 @@ const ENTRY_EXE = {
   opencode: 'node_modules\\opencode-ai\\bin\\opencode.exe',
 };
 
-const CANDIDATES = {
-  codex: NPM_DIR ? [`${NPM_DIR}\\codex.cmd`] : [],
-  claude: NPM_DIR ? [`${NPM_DIR}\\claude.cmd`] : [],
-  qoder: ['C:\\Program Files\\Qoder IDE\\bin\\qoder.cmd', NPM_DIR ? `${NPM_DIR}\\qoder.cmd` : null].filter(Boolean),
-  opencode: NPM_DIR ? [`${NPM_DIR}\\opencode.cmd`] : [],
-};
-
 /** Ticket 3：无 shell 解析。
  * 优先级：① NPM_DIR 下 shim 存在 → node.exe + ENTRY_JS[name] 直调；
  *        ② shim 缺失但 ENTRY_JS 存在 → 同样 node + js；

@@ -15,7 +15,7 @@ import {
   type SnapshotData
 } from '../computer/agentDesktop';
 import { screenLane } from '../computer/screenLane';
-import { describeError, truncate, type ToolDefinition, type ToolResult } from './core';
+import { truncate, type ToolDefinition, type ToolResult } from './core';
 
 /** 最近一次截图的尺寸：点击坐标按截图像素给，本层换算到物理像素。 */
 let lastShot: Screenshot | null = null
@@ -116,8 +116,6 @@ export const computerScroll: ToolDefinition = {
 /* 桌面适配层：无障碍树优先（agent-desktop），截图 + 像素作为兜底           */
 /* ------------------------------------------------------------------ */
 
-/** 最近一次 desktop_snapshot 的元信息，用于校验 ref 是否属于当前快照。 */
-let lastDesktopSnapshot: { snapshotId: string; app?: string; windowId?: string } | null = null
 
 export const desktopSnapshot: ToolDefinition = {
   name: 'desktop_snapshot',
@@ -178,9 +176,6 @@ export const desktopSnapshot: ToolDefinition = {
       }
     }
     const data = (run.envelope?.data ?? {}) as SnapshotData
-    if (data.snapshot_id) {
-      lastDesktopSnapshot = { snapshotId: data.snapshot_id, app: data.app, windowId: data.window?.id }
-    }
     const body = renderSnapshot(data)
     return {
       content: truncate(

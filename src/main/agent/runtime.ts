@@ -9,7 +9,7 @@ import { getSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
 import { clearTodoItems, getTodoItems } from '../tools/todo'
 import { eventBus, type EventSubscriber } from '../events/bus'
-import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
+import { streamWithFallback } from '../providers/gateway'
 import {
   clampSummary,
   estimateTokens,
@@ -35,9 +35,6 @@ import type {
 } from '../../shared/types'
 // 值导入（非 type）：桌面类工具判定要受 computerUse 总开关约束
 import { isDesktopTool } from '../../shared/types'
-import {
-  commandStaysInsideWorkspace
-} from './commandGuard'
 import { ApprovalBroker, type PendingApprovalSnapshot } from './approvals'
 import { isWishAutoApproved, isWishMcpAutoApproved, isWishModeActive, resolveAgentMode } from './wishMode'
 import { classifyIntent } from './intent'
@@ -425,7 +422,7 @@ export class AgentRuntime {
       if (lessons.length > 0) {
         memoryText += `【经验库】\n${lessons.map((l) => `${l.title}: ${l.content}`).join('\n')}`
       }
-    } catch {}
+    } catch { /* 经验库是 best-effort 上下文增强，加载失败只少一段记忆，不阻断 */ }
     if (memoryText) memoryTokens = estimateTokens(memoryText)
 
     let skillsTokens = 0
@@ -436,7 +433,7 @@ export class AgentRuntime {
       const routerPrompt =
         getCachedSkillRouterPrompt() ?? buildSkillRouterPrompt(await scanAllSkillPacks())
       if (routerPrompt) skillsText += routerPrompt
-    } catch {}
+    } catch { /* 技能路由是 best-effort 上下文增强，加载失败只少一段提示，不阻断 */ }
 
     const plugins = getSetting<string[]>('agent.plugins', [
       'feature-dev',
@@ -594,7 +591,7 @@ export class AgentRuntime {
       for (const item of queue) {
         try {
           repo.updateMessage(item.userMessageId, { status: 'aborted' })
-        } catch {}
+        } catch { /* 单条排队消息落库标记失败就地跳过，其余继续，不阻断取消流程 */ }
       }
       this.queues.delete(conversationId)
     }
@@ -641,7 +638,7 @@ export class AgentRuntime {
       if (queue.length === 0) this.queues.delete(conversationId)
       try {
         repo.updateMessage(item.userMessageId, { status: 'done' })
-      } catch {}
+      } catch { /* 指导送达后的落库标记失败可忽略：内存队列已摘除，界面已更新 */ }
     }
     running.emit({
       type: 'text_delta',

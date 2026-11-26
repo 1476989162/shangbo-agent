@@ -1,2 +1,2 @@
-# 提交前跑类型检查与全量测试；跳过用 git commit --no-verify
-npm run typecheck && npm test
+# 提交前跑类型检查、静态检查与全量测试；跳过用 git commit --no-verify
+npm run typecheck && npm run lint && npm test

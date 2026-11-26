@@ -205,7 +205,7 @@ describe('真实点击实测发现的回归点', () => {
     })
     const run = await runAgentDesktop(['list-windows'])
     expect(Array.isArray(run.envelope?.data)).toBe(true)
-    expect((run.envelope?.data as unknown as unknown[]).length).toBe(1)
+    expect((run.envelope?.data as unknown as unknown[])?.length).toBe(1)
   })
 
   it('CLI 只认 --window-id：绝不能拼出 --window-title', async () => {

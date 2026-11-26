@@ -201,13 +201,14 @@ export class CCoreBridge {
 
   private onStdoutChunk(chunk: string): void {
     this.stdoutBuffer += chunk
-    let newlineIdx: number
-    while ((newlineIdx = this.stdoutBuffer.indexOf('\n')) !== -1) {
+    let newlineIdx = this.stdoutBuffer.indexOf('\n')
+    while (newlineIdx !== -1) {
       const line = this.stdoutBuffer.slice(0, newlineIdx).trim()
       this.stdoutBuffer = this.stdoutBuffer.slice(newlineIdx + 1)
       if (line) {
         this.processRpcLine(line)
       }
+      newlineIdx = this.stdoutBuffer.indexOf('\n')
     }
   }
 

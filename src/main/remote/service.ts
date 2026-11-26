@@ -80,7 +80,7 @@ class RemoteService {
     for (const fn of [...this.listeners]) {
       try {
         fn(status, detail)
-      } catch {}
+      } catch { /* 单个监听器抛错不影响其余监听器，继续广播 */ }
     }
   }
 
@@ -114,7 +114,7 @@ class RemoteService {
     try {
       const raw = getSetting<string>('remote.approvalPolicy', 'allow-all')
       if (raw === 'confirm-high' || raw === 'read-only') policy = raw
-    } catch {}
+    } catch { /* 配置损坏时回退默认策略（allow-all）：调用方仍有二次确认兜底 */ }
     return { approvalPolicy: policy }
   }
 
@@ -326,7 +326,7 @@ class RemoteService {
     for (const fn of [...this.pendingListeners]) {
       try {
         fn()
-      } catch {}
+      } catch { /* 单个监听器抛错不影响其余监听器，继续广播 */ }
     }
   }
 
@@ -439,7 +439,9 @@ class RemoteService {
     try {
       const { setSetting } = require('../settings') as typeof import('../settings')
       setSetting('remote.enabled', false)
-    } catch {}
+    } catch (error) {
+      log.warn('[remote] 手动断开后状态落库失败', error)
+    }
     this.emit('off', '已手动断开')
   }
 }

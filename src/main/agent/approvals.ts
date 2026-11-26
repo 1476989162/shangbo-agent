@@ -104,7 +104,7 @@ export class ApprovalBroker {
       if (pending.conversationId !== conversationId) continue
       try {
         pending.settle(false)
-      } catch {}
+      } catch { /* 已结算的审批再次 settle 会抛错，忽略：key 照删即等价于拒绝收尾 */ }
       this.approvals.delete(key)
     }
   }

@@ -3,13 +3,12 @@ import * as repo from '../db/repo'
 import { getSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
 import { auditHardLines } from './safety'
-import { getTodoItems } from '../tools/todo'
 import { resolveFirstByteTimeoutMs, streamWithFallback, isReasoningModel as isGatewayReasoningModel } from '../providers/gateway'
-import { attachRuntimeNote, buildContext, buildSummaryTranscript, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
+import { attachRuntimeNote, buildContext, buildSummaryTranscript, estimateTokens, hydrateContextImages } from './context'
 import { resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 import { isReadOnlyToolName, normalizeToolConcurrency, runToolBatch } from './toolScheduler'
-import { SPAWN_SUBAGENT_SCHEMA, SPAWN_TOOL_NAME } from './subagent'
+import { SPAWN_SUBAGENT_SCHEMA } from './subagent'
 import { mcpManager } from '../mcp/manager'
 import type {
   AgentEvent,
@@ -36,7 +35,6 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   BUDGET_KEY,
   describeError,
-  MAX_OUTPUT_TOKENS,
   normalizeIncomingDelta,
   resolveTarget,
   SKIP_THINKING_SUFFIX
@@ -178,7 +176,8 @@ export async function findWishVerifyCommand(workingDir: string | null, triggerTe
       const pkgPath = pathMod.join(workingDir, 'package.json')
       const raw = await fsPromises.readFile(pkgPath, 'utf8')
       const pkg = JSON.parse(raw)
-      if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
+      const testScript: unknown = pkg.scripts?.test
+      if (typeof testScript === 'string' && testScript && !testScript.includes('no test specified')) {
         return 'npm test'
       }
     } catch (error) {
@@ -595,7 +594,6 @@ export async function runAgentLoop(
       }
       return await detectStuck(toolHistory, effectiveStuckLimit)
     }
-    let stoppedByGuard = false
     // 本轮发给模型的工具清单：本地读/写 + spawn + 已启用 MCP 服务的远端工具。
     // MCP 进程首次拉起可能慢（npx 拉包），之后常驻复用；单个服务起不来只跳过不炸轮。
     // Computer Use 工具只在设置开启时挂载（截图免审，其余键鼠操作逐次审批）。
@@ -658,7 +656,6 @@ export async function runAgentLoop(
         // 成本熔断：超过 maxSteps 轮请求即暂停，提示用户回复"继续"接力。
         // unlimitedSteps 打开时跳过（目标驱动，只靠打转保险丝 + 手动停止）。
         if (!unlimitedSteps && stepCount >= effectiveMaxSteps) {
-          stoppedByGuard = true
           const guardNotice = `\n\n_（已达到单轮步数上限（${effectiveMaxSteps} 步），先停下来请人看一眼，不要继续烧 Token。排除问题后回复「继续」。）_`
           appendBlock(blocks, { type: 'text', text: guardNotice })
           emit({
@@ -1012,7 +1009,6 @@ export async function runAgentLoop(
         // 保险丝：打转就地暂停，不再浪费后面的步数。
         const stuckReason = await noteToolBatch(settled)
         if (stuckReason) {
-          stoppedByGuard = true
           const guardNotice = `\n\n_（${stuckReason}本轮已暂停，排除问题后回复「继续」。）_`
           appendBlock(blocks, { type: 'text', text: guardNotice })
           emit({
@@ -1127,7 +1123,6 @@ export async function runAgentLoop(
           }
           const contStuck = await noteToolBatch(contPairs)
           if (contStuck) {
-            stoppedByGuard = true
             const guardNotice = `\n\n_（${contStuck}本轮已暂停，排除问题后回复「继续」。）_`
             appendBlock(blocks, { type: 'text', text: guardNotice })
             emit({ type: 'text_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: guardNotice })

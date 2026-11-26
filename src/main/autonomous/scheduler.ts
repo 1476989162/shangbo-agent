@@ -362,7 +362,7 @@ class AutonomousScheduler {
       lessons: store.listLessons({ projectPath: task.workingDir, limit: 12 })
     })
     this.rememberSelfPrompt(prompt)
-    const emit = agentRuntime.withBus(() => {})
+    const emit = agentRuntime.withBus(() => undefined)
     try {
       const { runId } = agentRuntime.send(
         {
@@ -490,7 +490,7 @@ class AutonomousScheduler {
             priority: 'proactive',
             preemptible: true
           },
-          agentRuntime.withBus(() => {})
+          agentRuntime.withBus(() => undefined)
         )
         store.updateRun(runRecordId, { runId, status: 'running' })
         this.activeRuns.set(conversationId, { taskId, runRecordId, conversationId })

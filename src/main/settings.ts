@@ -70,20 +70,20 @@ export function setSetting(key: string, value: unknown): void {
   // 用动态 import 避免 settings ↔ loader/store 循环依赖；失效失败不影响主写。
   try {
     if (key === 'agent.skillDirs' || key.startsWith('agent.plugins') || key.startsWith('agent.skill')) {
-      void import('./skills/loader').then((m) => m.invalidateSkillPacksCache?.()).catch(() => {})
-      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => {})
+      void import('./skills/loader').then((m) => m.invalidateSkillPacksCache?.()).catch(() => undefined)
+      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => undefined)
     }
     if (key.startsWith('agent.mcp') || key === 'agent.mcpServers') {
       void import('./mcp/manager').then((m) => {
-        try { m.mcpManager.invalidateStatusCache() } catch {}
-      }).catch(() => {})
-      void import('./agent/agentLoop').then((m) => m.invalidateMcpSchemasCache?.()).catch(() => {})
-      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => {})
+        try { m.mcpManager.invalidateStatusCache() } catch { /* 状态缓存失效失败不影响主写，下次读自动重建 */ }
+      }).catch(() => undefined)
+      void import('./agent/agentLoop').then((m) => m.invalidateMcpSchemasCache?.()).catch(() => undefined)
+      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => undefined)
     }
     if (key === 'agent.plugins' || key === 'agent.instructions' || key === 'agent.computerUse') {
-      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => {})
+      void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => undefined)
     }
-  } catch {}
+  } catch { /* 联动失效是 best-effort，主写已落库成功，不阻断 */ }
 }
 
 export function getAllSettings(): Record<string, unknown> {
