@@ -71,7 +71,15 @@ const char *safety_category_to_string(SafetyCategory category) {
     }
 }
 
-static char g_user_data_dir[1024] = {0};
+/* Ticket 3：user_data_dir 改线程局部存储（TLS）。
+ * 原先是进程级全局 + 无锁写：rpc_task_execute 的工作线程并发跑命令时互相踩踏。
+ * TLS 下每个线程（含主线程）持有自己的副本，写入只影响本线程后续检查，
+ * 读取方（touches_private_data 等）无锁直读本线程值——「每请求 SafetyContext」语义落地。 */
+#ifdef _WIN32
+static __declspec(thread) char g_user_data_dir[1024] = {0};
+#else
+static _Thread_local char g_user_data_dir[1024] = {0};
+#endif
 
 void safety_set_user_data_dir(const char *dir) {
     if (!dir) return;
@@ -671,7 +679,75 @@ static bool is_path_inside_real_workspace(const char *target_path, const char *w
 #endif
 }
 
+/* Ticket 3：检测「递归删除标志 + 目标在工作区外」的组合。
+ * 返回 true 表示该命令是对工作区之外整目录的递归/通配清空（hard 红线）。 */
+static bool is_cross_workspace_recursive_wipe(const char *cmd, const char *workspace) {
+    if (!cmd || !*cmd || !workspace || !*workspace) return false;
+    /* 删除动词（大小写不敏感：match_word_token 本身已是 strcasestr） */
+    if (!(match_word_token(cmd, "rm") || match_word_token(cmd, "rmdir") ||
+          match_word_token(cmd, "rd") || match_word_token(cmd, "del") ||
+          match_word_token(cmd, "erase") || match_word_token(cmd, "remove-item"))) return false;
+    /* 递归标志或通配符 */
+    bool has_wildcard = false;
+    for (const char *q = cmd; *q; ++q) {
+        if (*q == '*' || *q == '?') { has_wildcard = true; break; }
+    }
+    /* -Recurse 大小写不敏感（-Recurse/-recurse/-RECURSE 均命中） */
+    bool recursive = strstr(cmd, "-r") != NULL || strstr(cmd, "-R") != NULL ||
+                      strstr(cmd, "/s") != NULL || strstr(cmd, "/S") != NULL ||
+                      strcasestr_custom(cmd, "-recurse") != NULL;
+    if (!recursive && !has_wildcard) return false;
+    /* 手写 token 扫描（三处绕过修复）：
+     * ① 仅跳过 -... 长短标志与 Windows 单字母开关（如 /s /q /f /p），
+     *     绝不跳过 /etc/... 等 Unix 绝对路径；
+     * ② token 先剥离首尾成对单/双引号再做 .. 与绝对路径校验；
+     * ③ 动词比较大小写不敏感（RD /S 也拦）。 */
+    const char *verbs[] = {"rm", "rmdir", "rd", "del", "erase", "remove-item", NULL};
+    const char *c = cmd;
+    while (*c) {
+        while (*c == ' ' || *c == '\t' || *c == '\r' || *c == '\n') c++;
+        if (!*c) break;
+        const char *start = c;
+        while (*c && *c != ' ' && *c != '\t' && *c != '\r' && *c != '\n') c++;
+        size_t len = (size_t)(c - start);
+        char tok[1024];
+        if (len == 0 || len >= sizeof(tok)) continue;
+        memcpy(tok, start, len); tok[len] = '\0';
+        /* 剥离首尾成对引号："../x" → ../x，"C:\\y" → C:\\y */
+        size_t tlen = strlen(tok);
+        if (tlen >= 2 && ((tok[0] == '"' && tok[tlen - 1] == '"') ||
+                           (tok[0] == '\'' && tok[tlen - 1] == '\''))) {
+            memmove(tok, tok + 1, tlen - 2);
+            tok[tlen - 2] = '\0';
+        }
+        if (tok[0] == '\0') continue;
+        /* 动词大小写不敏感比较（RD /S 也拦，全文字符逐个 tolower 对比） */
+        bool is_verb = false;
+        for (int i = 0; verbs[i]; ++i) {
+            const char *a = tok;
+            const char *b = verbs[i];
+            while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
+            if (*a == '\0' && *b == '\0') { is_verb = true; break; }
+        }
+        if (is_verb) continue;
+        /* 标志判定：-... 全跳过；仅 Windows 单字母开关 /[a-zA-Z] 跳过， */
+        /* /etc/... 等多字符路径不跳过（交给后续绝对路径判定） */
+        if (start[0] == '-') continue;
+        if (start[0] == '/' && len == 2 &&
+            isalpha((unsigned char)tok[1])) continue;
+        /* 相对路径 .. 逃逸（剥引号后） */
+        if (strncmp(tok, "..", 2) == 0) return true;
+        /* 绝对路径且不在工作区内 → 跨工作区整目录清除 */
+        if ((isalpha((unsigned char)tok[0]) && tok[1] == ':') ||
+            tok[0] == '\\' || tok[0] == '/') {
+            if (!is_path_inside_real_workspace(tok, workspace)) return true;
+        }
+    }
+    return false;
+}
+
 SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const char *command_arg, const SafetyContext *ctx) {
+
     SafetyVerdict v;
     memset(&v, 0, sizeof(v));
     v.tier = SAFETY_TIER_AUTO;
@@ -720,6 +796,17 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
                 return hard_check;
             }
         }
+        /* Ticket 3：跨工作区递归/通配删除 → HARD（对齐 TS safety.ts 的 F:\router 补强）。
+         * 工作区绑定 G:\A 时 rd /s /q F:\router 会清空另一个项目；
+         * 仅整目录/通配形态升 hard，单文件删除与工作区内清理维持原策略不变。 */
+        if (cmd && ctx && ctx->working_directory[0] &&
+            is_cross_workspace_recursive_wipe(cmd, ctx->working_directory)) {
+            v.tier = SAFETY_TIER_HARD;
+            v.category = CAT_WORKSPACE;
+            v.auto_approvable = false;
+            snprintf(v.reason, sizeof(v.reason), "检测到递归/通配删除工作区之外的目录：可能清空其他项目，必须人工确认。");
+            return v;
+        }
         /* Autonomy level gating for normal commands */
         if (ctx && ctx->autonomy == AUTONOMY_STRICT) {
             v.tier = SAFETY_TIER_SOFT;
@@ -740,8 +827,10 @@ SafetyVerdict audit_tool_call(const char *tool_name, const char *path_arg, const
         return v;
     }
 
-    /* File write / patch tools */
-    if (strcmp(tool_name, "write_file") == 0 || strcmp(tool_name, "patch_file") == 0) {
+    /* File write / patch tools（Ticket 3：multi_patch_file 与单 patch 同级，
+     * 它是批量写盘入口，漏掉会整批绕过私有数据与工作区边界检查） */
+    if (strcmp(tool_name, "write_file") == 0 || strcmp(tool_name, "patch_file") == 0 ||
+        strcmp(tool_name, "multi_patch_file") == 0) {
         if ((path_arg && touches_private_data(path_arg)) ||
             (ctx && ctx->working_directory[0] && touches_private_data(ctx->working_directory))) {
             v.tier = SAFETY_TIER_HARD;

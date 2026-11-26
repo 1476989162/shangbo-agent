@@ -86,6 +86,8 @@ vi.mock('../db/repo', () => ({
 }))
 
 vi.mock('../providers/gateway', () => ({
+  // agentLoop 统一走网关真源判定推理模型；单测默认非推理模型
+  isReasoningModel: () => false,
   // runtime 逐轮调用它解析首字节超时，缺了会 TypeError 让整轮直接失败
   resolveFirstByteTimeoutMs: () => 180_000,
   streamWithFallback: async function* () {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { app } from 'electron'
 import { getDb } from '../db'
 import * as repo from '../db/repo'
 import { getSetting } from '../settings'
@@ -151,6 +151,35 @@ export function countActive(parentConversationId: string): number {
   return row.n
 }
 
+/**
+ * 应用启动时的孤儿分身收敛：上次进程退出前还停在 running / waiting_for_approval
+ * 的分身已无执行上下文（后台循环随旧进程一起没了），不能留在原地装忙。
+ * running → failed（执行中被中断）；waiting_for_approval → canceled（可 task_send 恢复）。
+ * 返回收敛的任务数，供启动日志记录。
+ */
+export function settleOrphanDelegatedTasks(): { failed: number; canceled: number } {
+  const db = getDb()
+  const running = db
+    .prepare(`SELECT id FROM delegated_tasks WHERE state = 'running'`)
+    .all() as { id: string }[]
+  const waiting = db
+    .prepare(`SELECT id FROM delegated_tasks WHERE state = 'waiting_for_approval'`)
+    .all() as { id: string }[]
+  for (const row of running) {
+    patchTask(row.id, {
+      state: 'failed',
+      error: '应用重启前仍在运行，已标记为失败（后台循环已随旧进程退出，可重新派发）'
+    })
+  }
+  for (const row of waiting) {
+    patchTask(row.id, {
+      state: 'canceled',
+      error: '应用重启前正等待审批，已取消等待（可用 task_send 恢复）'
+    })
+  }
+  return { failed: running.length, canceled: waiting.length }
+}
+
 function patchTask(
   id: string,
   patch: Partial<Pick<DelegatedTaskRecord, 'state' | 'lastReport' | 'error' | 'brief'>>
@@ -222,12 +251,15 @@ function publishReport(task: DelegatedTaskRecord, state: DelegatedState, report:
 function maybeWakeMeta(task: DelegatedTaskRecord, state: DelegatedState, report: string): void {
   if (!getSetting<boolean>('agent.tasks.wakeMetaOnDone', false)) return
   if (state !== 'idle' && state !== 'failed') return
+  // 挂到父对话当前活跃叶子后面，保持在主对话树上；传 null 会脱离树，
+  // 汇报消息游离在外、用户在界面上看不到上下文。
+  const parentLeaf = repo.getActiveLeaf(task.parentConversationId)
   setImmediate(() => {
     try {
       agentRuntime.send(
         {
           conversationId: task.parentConversationId,
-          parentMessageId: null,
+          parentMessageId: parentLeaf,
           content: `【后台分身汇报】${task.title}（${state}）\n${report.slice(0, 1_500)}\n请用一两句话向用户汇报结果，不要重新派发任务。`
         },
         agentRuntime.withBus(() => {})
@@ -242,6 +274,21 @@ let unsubscribe: (() => void) | null = null
 function ensureSubscribed(): void {
   if (unsubscribe) return
   unsubscribe = eventBus.subscribe((event: AgentEvent) => {
+    // 审批落地即恢复：子会话在 waiting_for_approval 期间一旦出现新的活动事件
+    //（工具调用/正文/完成），说明审批已裁决、子循环继续跑了，立即恢复 running，
+    // 不必等 10 分钟兜底超时。run_error / run_end / approval_required 走各自的分支持久化。
+    if (
+      event.type !== 'approval_required' &&
+      event.type !== 'run_error' &&
+      event.type !== 'run_end' &&
+      typeof event.conversationId === 'string'
+    ) {
+      const active = rowByChild(event.conversationId)
+      if (active && active.state === 'waiting_for_approval') {
+        patchTask(active.id, { state: 'running' })
+        publishReport(active, 'running', '审批已裁决，子任务继续执行')
+      }
+    }
     if (event.type === 'approval_required') {
       const task = rowByChild(event.conversationId)
       if (task && task.state === 'running') {
@@ -301,7 +348,9 @@ export function startTask(input: StartTaskInput): StartTaskResult {
 
   const id = randomUUID()
   const now = Date.now()
-  const root = input.workingDirectory ?? app.getPath('userData')
+  // 无工作目录时落到系统临时目录的子目录，不写用户数据目录：
+  // 分身产出是可丢弃的中间文件，塞进 userData 会污染备份与用户数据。
+  const root = input.workingDirectory ?? tmpdir()
   const workspaceDir = join(root, '.shangbo-tasks', id)
   try {
     mkdirSync(workspaceDir, { recursive: true })
@@ -384,6 +433,9 @@ export function startTask(input: StartTaskInput): StartTaskResult {
 export function sendInstruction(taskId: string, instruction: string): DelegatedTaskRecord {
   const task = rowById(taskId)
   if (!task) throw new Error(`后台分身不存在：${taskId}`)
+  // 补订阅：进程重启后事件订阅可能已失效（或从未建立），先确保再改状态，
+  // 否则后续审批/完成事件无人消费，分身状态机直接停摆。
+  ensureSubscribed()
   patchTask(taskId, {
     state: 'running',
     brief: `${task.brief}\n\n【补充指令】${instruction}`.slice(0, 20_000),

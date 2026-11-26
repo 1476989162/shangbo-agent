@@ -179,23 +179,24 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
     wchar_t *cwd = working_directory && *working_directory ? utf8_wide(working_directory) : NULL;
     wchar_t *user_command = utf8_wide(command);
     if (user_command) {
-        size_t chars = wcslen(user_command) + 48;
-        wchar_t *quoted = (wchar_t *)malloc(chars * sizeof(wchar_t));
-        if (quoted) {
-            _snwprintf(quoted, chars, L"cmd.exe /d /s /c \"%s\"", user_command);
-            DWORD length = SearchPathW(NULL, L"cmd.exe", NULL, 0, NULL, NULL);
-            if (length > 0) {
-                wchar_t *path = (wchar_t *)malloc((size_t)length * sizeof(wchar_t));
-                if (path) {
-                    SearchPathW(NULL, L"cmd.exe", NULL, length, path, NULL);
-                    size_t total = wcslen(path) + wcslen(quoted) + 4;
-                    cmd = (wchar_t *)malloc(total * sizeof(wchar_t));
-                    if (cmd) _snwprintf(cmd, total, L"\"%s\" %s", path, quoted);
-                }
+        /* Ticket 3：只做一次 cmd.exe 定位与拼接。旧版在 quoted(cmd.exe ...)
+         * 之上再套一层 "\"%s\" %s"（L185+L193 重复拼接），多余且引入转义歧义。 */
+        DWORD length = SearchPathW(NULL, L"cmd.exe", NULL, 0, NULL, NULL);
+        if (length > 0) {
+            wchar_t *path = (wchar_t *)malloc((size_t)length * sizeof(wchar_t));
+            if (path) {
+                SearchPathW(NULL, L"cmd.exe", NULL, length, path, NULL);
+                size_t total = wcslen(path) + wcslen(user_command) + 32;
+                cmd = (wchar_t *)malloc(total * sizeof(wchar_t));
+                if (cmd) _snwprintf(cmd, total, L"\"%s\" /d /s /c \"%s\"", path, user_command);
                 free(path);
+            } else {
+                /* SearchPath 缓冲分配失败也要给出 cmd 可用形态，不能静默丢命令 */
+                size_t total = wcslen(user_command) + 32;
+                cmd = (wchar_t *)malloc(total * sizeof(wchar_t));
+                if (cmd) _snwprintf(cmd, total, L"cmd.exe /d /s /c \"%s\"", user_command);
             }
         }
-        free(quoted);
     }
     free(user_command);
     if (!cmd || (working_directory && *working_directory && !cwd)) {
@@ -223,12 +224,14 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
     si.hStdError = write_pipe;
     HANDLE null_input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
         &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    si.hStdInput = null_input ? null_input : INVALID_HANDLE_VALUE;
+    /* Ticket 3：CreateFileW 失败返回 INVALID_HANDLE_VALUE 而非 NULL，
+     * 旧判定 null_input ? ... : INVALID_HANDLE_VALUE 恒走真分支，失败句柄被当合法 stdin。 */
+    si.hStdInput = (null_input != NULL && null_input != INVALID_HANDLE_VALUE) ? null_input : INVALID_HANDLE_VALUE;
     BOOL created = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, NULL, cwd, &si, &pi);
     free(cmd);
     free(cwd);
-    if (null_input) CloseHandle(null_input);
+    if (null_input != NULL && null_input != INVALID_HANDLE_VALUE) CloseHandle(null_input);
     if (!created) {
         snprintf(result.error, sizeof(result.error), "Failed to start command: %lu", GetLastError());
         goto cleanup;
@@ -262,6 +265,42 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
             snprintf(result.error, sizeof(result.error), "Command cancelled by caller; process tree terminated.");
             if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
         }
+        /* Ticket 3：排空优先。旧版每轮先固定 WaitForMultipleObjects(20ms) 再 Peek，
+         * 高吞吐子进程每 4KB 输出都白等 20ms（吞吐被人为压到 ~200KB/s）。
+         * 现在先零超时排空：读到数据立即继续排空（不进等待窗），排空后才等 20ms。 */
+        char buffer[4096];
+        bool drained_data = false;
+        DWORD avail = 0;
+        while (PeekNamedPipe(read_pipe, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+            DWORD got = 0;
+            if (!ReadFile(read_pipe, buffer, (DWORD)(avail < sizeof(buffer) ? avail : sizeof(buffer)), &got, NULL) || got == 0) break;
+            drained_data = true;
+            if (!append_raw_output(&result.output, &length, &capacity, buffer, got, max_output, &truncated)) {
+                snprintf(result.error, sizeof(result.error), "Out of memory decoding command output.");
+                if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
+                goto cleanup;
+            }
+        }
+        if (drained_data) {
+            /* 持续输出的子进程不得永不超时：先零超时检查再继续排空 */
+            if (cancel_requested && *cancel_requested) {
+                result.timed_out = true;
+                snprintf(result.error, sizeof(result.error), "Command cancelled by caller; process tree terminated.");
+                if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
+            }
+            DWORD to_check = (wait_timer == NULL && timeout_ms > 0) ? (DWORD)timeout_ms : 0;
+            DWORD elapsed = GetTickCount() - start;
+            bool timed_out_now = (wait_timer != NULL) ?
+                (WaitForSingleObject(wait_timer, 0) == WAIT_OBJECT_0) :
+                (to_check > 0 && elapsed >= to_check);
+            if (timed_out_now) {
+                result.timed_out = true;
+                if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
+                WaitForSingleObject(process, 2000);
+            }
+            if (result.timed_out) break;
+            continue;
+        } /* 刚读到数据：立刻再排空一轮，不睡 20ms */
         HANDLE waits[2] = { process, wait_timer };
         DWORD wait = wait_timer ? WaitForMultipleObjects(2, waits, FALSE, 20) : WaitForSingleObject(process, 20);
         if (wait == WAIT_FAILED) {
@@ -274,17 +313,7 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
             if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
             WaitForSingleObject(process, 2000);
         }
-        char buffer[4096];
-        DWORD available = 0;
-        while (PeekNamedPipe(read_pipe, NULL, 0, NULL, &available, NULL) && available > 0) {
-            DWORD got = 0;
-            if (!ReadFile(read_pipe, buffer, (DWORD)(available < sizeof(buffer) ? available : sizeof(buffer)), &got, NULL) || got == 0) break;
-            if (!append_raw_output(&result.output, &length, &capacity, buffer, got, max_output, &truncated)) {
-                snprintf(result.error, sizeof(result.error), "Out of memory decoding command output.");
-                if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
-                goto cleanup;
-            }
-        }
+
         if (wait == WAIT_OBJECT_0) {
             if (wait_timer) CancelWaitableTimer(wait_timer);
         }
@@ -343,7 +372,8 @@ void native_process_result_free(NativeProcessResult *result) {
 #else
 #include <errno.h>
 #include <signal.h>
-#include <sys/select.h>
+/* Ticket 3：select() → poll()：FD_SETSIZE 默认 1024，高 fd 进程会越界写 fd_set。 */
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -374,6 +404,15 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
         if (working_directory && *working_directory && chdir(working_directory) != 0) _exit(126);
         dup2(fds[1], STDOUT_FILENO);
         dup2(fds[1], STDERR_FILENO);
+        /* Ticket 3：stdin 重定向 /dev/null。旧版 stdin 继承父进程，
+         * 读交互输入的子进程会挂住整条命令管道。 */
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull != STDIN_FILENO) close(devnull);
+        } else {
+            close(STDIN_FILENO);
+        }
         close(fds[0]);
         close(fds[1]);
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
@@ -390,42 +429,70 @@ NativeProcessResult native_run_process_cancellable(const char *command, const ch
     result.output = (char *)calloc(cap, 1);
     long long start = monotonic_ms();
     bool done = false;
+    bool truncated = false;
+    /* Ticket 3：与 Windows 分支对齐的 8MiB 输出截断上限（旧版无上限可被无限输出打爆内存） */
+    const size_t max_output = 8 * 1024 * 1024;
     int status = 0;
     while (!done) {
         if (cancel_requested && *cancel_requested) {
             result.timed_out = true;
             snprintf(result.error, sizeof(result.error), "Command cancelled by caller; process tree terminated.");
             kill(-pid, SIGKILL);
+            break; /* 立即进入阻塞 waitpid，不再 poll 空转 */
         }
         if (timeout_ms > 0 && monotonic_ms() - start >= timeout_ms) {
             result.timed_out = true;
             kill(-pid, SIGKILL);
+            break; /* 立即进入阻塞 waitpid，不再 poll 空转 */
         }
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(fds[0], &readfds);
-        struct timeval tv = {0, 20000};
-        int ready = select(fds[0] + 1, &readfds, NULL, NULL, &tv);
-        if (ready > 0) {
-            char chunk[4096];
-            ssize_t got = read(fds[0], chunk, sizeof(chunk));
-            if (got > 0) {
-                if (len + (size_t)got + 1 > cap) {
-                    while (len + (size_t)got + 1 > cap) cap *= 2;
-                    char *grown = (char *)realloc(result.output, cap);
-                    if (!grown) break;
-                    result.output = grown;
-                }
-                memcpy(result.output + len, chunk, (size_t)got);
-                len += (size_t)got;
-                result.output[len] = '\0';
-            } else if (got == 0) break;
+        if (!truncated) {
+            struct pollfd pfd;
+            pfd.fd = fds[0];
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int ready = poll(&pfd, 1, 20);
+            if (ready > 0) {
+                char chunk[4096];
+                ssize_t got = read(fds[0], chunk, sizeof(chunk));
+                if (got > 0) {
+                    if (len + (size_t)got + 1 > cap) {
+                        while (len + (size_t)got + 1 > cap) cap *= 2;
+                        char *grown = (char *)realloc(result.output, cap);
+                        if (!grown) break;
+                        result.output = grown;
+                    }
+                    memcpy(result.output + len, chunk, (size_t)got);
+                    len += (size_t)got;
+                    result.output[len] = '\0';
+                    if (len >= max_output) {
+                        truncated = true;
+                        kill(-pid, SIGKILL);
+                        result.timed_out = true;
+                        snprintf(result.error, sizeof(result.error), "Command output exceeded 8 MiB limit; process tree terminated.");
+                        break; /* 直接退出读循环 → 阻塞 waitpid 回收，不再 poll 空转 */
+                    }
+                } else if (got == 0) break;
+            }
         }
         if (waitpid(pid, &status, WNOHANG) == pid) done = true;
     }
     if (!done) waitpid(pid, &status, 0);
     close(fds[0]);
     result.output_len = len;
+    if (truncated) {
+        const char *notice = "\n\n[output truncated at 8 MiB]\n";
+        size_t add = strlen(notice);
+        if (len + add + 1 > cap) {
+            char *grown = (char *)realloc(result.output, len + add + 1);
+            if (grown) { result.output = grown; cap = len + add + 1; }
+        }
+        if (len + add + 1 <= cap) {
+            memcpy(result.output + len, notice, add);
+            len += add;
+            result.output[len] = '\0';
+            result.output_len = len;
+        }
+    }
     if (WIFEXITED(status)) result.exit_code = (unsigned long)WEXITSTATUS(status);
     else result.exit_code = 1;
     if (result.timed_out && !result.error[0]) snprintf(result.error, sizeof(result.error), "Command timed out after %d ms; process tree terminated.", timeout_ms);

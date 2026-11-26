@@ -2,9 +2,10 @@ import log from 'electron-log/main'
 import * as repo from '../db/repo'
 import { getSetting } from '../settings'
 import { auditCommandSecurity, toolRegistry } from '../tools'
+import { auditHardLines } from './safety'
 import { getTodoItems } from '../tools/todo'
-import { resolveFirstByteTimeoutMs, streamWithFallback } from '../providers/gateway'
-import { buildContext, buildSummaryTranscript, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
+import { resolveFirstByteTimeoutMs, streamWithFallback, isReasoningModel as isGatewayReasoningModel } from '../providers/gateway'
+import { attachRuntimeNote, buildContext, buildSummaryTranscript, estimateTokens, hydrateContextImages, toLLMMessages } from './context'
 import { resolveEffort } from './effort'
 import { callSignature, detectStuck, type ToolRecord } from './loopGuard'
 import { isReadOnlyToolName, normalizeToolConcurrency, runToolBatch } from './toolScheduler'
@@ -46,23 +47,36 @@ export type LoopEmitter = (event: AgentEvent) => void
 /**
  * 后台记忆工作（关键路径零延迟纪律）：
  * 用户发消息 → 模型首字响应的路径上不得插入 DB 读取或模型调用，因此
- * Wiki 索引只在 setImmediate 后台异步加载，每 5 次成功回合才做一次本地规则提取。
- * 任何异常都吞掉，记忆功能故障绝不影响对话本身。
+ * Wiki 索引只在 setImmediate 后台异步加载；成功回合先攒进批量缓冲，
+ * 每 5 轮攒满一批再统一做一次本地规则提取——第 1~4 轮不再被丢弃。
+ * 记忆提取失败只记日志，绝不影响对话本身。
  */
 let successfulTurnsSinceExtraction = 0
+/** 待提取的回合（user 文本 + assistant 文本），攒满一批再统一提取。 */
+let pendingMemoryTurns: Array<{ userText: string; assistantText: string }> = []
+const MEMORY_BATCH_TURNS = 5
+
+/** 测试用：重置批量缓冲（避免跨用例串扰）。 */
+export function resetMemoryBatchForTesting(): void {
+  successfulTurnsSinceExtraction = 0
+  pendingMemoryTurns = []
+}
 
 function scheduleBackgroundMemoryWork(userText: string, assistantText: string): void {
+  pendingMemoryTurns.push({ userText, assistantText })
+  successfulTurnsSinceExtraction += 1
+  if (successfulTurnsSinceExtraction < MEMORY_BATCH_TURNS) return
+  successfulTurnsSinceExtraction = 0
+  const batch = pendingMemoryTurns
+  pendingMemoryTurns = []
   setImmediate(() => {
     void (async () => {
       try {
         const wikiRepo = await import('../memory/wikiRepo')
         if (!isWikiIndexLoaded()) wikiRepo.refreshWikiIndexCache()
-        if (successfulTurnsSinceExtraction >= 5) {
-          successfulTurnsSinceExtraction = 0
-          wikiRepo.extractWikiAndMemory(userText, assistantText)
-        }
-      } catch {
-        // 记忆提取失败不影响对话
+        wikiRepo.extractWikiAndMemoryBatch(batch)
+      } catch (error) {
+        log.warn('[agent] 后台记忆提取失败（不影响对话）', error)
       }
     })()
   })
@@ -80,24 +94,17 @@ export function invalidateMcpSchemasCache(): void {
   mcpSchemasCache = { key: '', at: 0, schemas: [] }
 }
 
-/** 推理模型白名单：默认覆盖 R1/reasoning/think/o1/muse-spark；漏模型走设置 providers.reasoningPatterns 加正则。 */
+/** 推理模型白名单：统一走网关真源判定（网关 REASONING_MODEL_PATTERNS），
+ * 这里只负责把设置里的自定义正则透传进去，不再各文件自建正则。
+ * 漏模型走设置 providers.reasoningPatterns 加正则。 */
 export function isReasoningModelForTimeout(model: string): boolean {
-  const m = (model || '').toLowerCase()
-  if (/r1|reasoning|deepseek-reasoner|think|o1|muse.*spark|r1-/i.test(m)) return true
-  // 扩展：qwen/qwq/glm 等思考模型 + 用户自定义
-  if (/qwq|qwen.*think|thinking|deepthink|r1-distill|sky.*think|glm.*think/i.test(m)) return true
   try {
     const extra = getSetting<string[]>('providers.reasoningPatterns', [])
-    if (Array.isArray(extra)) {
-      for (const pat of extra) {
-        if (typeof pat !== 'string' || !pat.trim()) continue
-        try {
-          if (new RegExp(pat, 'i').test(m)) return true
-        } catch {}
-      }
-    }
-  } catch {}
-  return false
+    const patterns = Array.isArray(extra) ? extra.filter((p) => typeof p === 'string' && p.trim()) : []
+    return isGatewayReasoningModel(model, patterns)
+  } catch {
+    return isGatewayReasoningModel(model)
+  }
 }
 
 export interface AgentLoopHooks {
@@ -126,10 +133,28 @@ export interface AgentLoopHooks {
   ): Usage | null
 }
 
-async function findWishVerifyCommand(workingDir: string | null, triggerText: string): Promise<string | null> {  const configured = getSetting<string>('agent.wish.verifyCommand', '').trim()
+/**
+ * 许愿模式自动验收命令发现器（Ticket 3 收紧）。
+ * triggerText 是用户输入也可能是上游文本，含任意字符——匹配出的命令将直接执行，
+ * 所以白名单要窄：只认字面命令与安全参数字符，任何 shell 元字符；
+ * 参数分隔用 [ \t] 而非 \s——\s 含 \r\n，会把换行后的注入段吸进候选。
+ * （; | & > < \\ $() 反引号）一律不接受，防「go test && rm -rf」式拼接。
+ */
+export async function findWishVerifyCommand(workingDir: string | null, triggerText: string): Promise<string | null> {
+  const configured = getSetting<string>('agent.wish.verifyCommand', '').trim()
   if (configured) return configured
-  const match = triggerText.match(/(npm run [a-z0-9_-]+|npm test|cargo test|pytest|go test[^\n\r]*|make test)/i)
-  if (match) return match[1]
+  // 窄白名单正则：
+  //  - npm run <安全脚本名> / npm test / cargo test / pytest / make test 字面量
+  //  - go test 只允许「包路径 + 安全标志」：[a-zA-Z0-9_/.-] 与 -count=1 类标志，
+  //    元字符集 ;|&><\\$()` 被字符类排除在 matched 段之外
+  const match = triggerText.match(
+    /(npm run [a-z0-9:_-]+|npm test|cargo test|pytest|make test|(?:go test)(?:[ \t]+[a-zA-Z0-9_/.=-]+)*)/i
+  )
+  if (match) {
+    const candidate = match[1].trim()
+    // 双保险：匹配段整体再过一遍元字符黑名单（正则演进时的纵深防御）
+    if (!/[;|&><\\$()`\r\n]/.test(candidate)) return candidate
+  }
   if (workingDir) {
     try {
       const fsPromises = await import('node:fs/promises')
@@ -140,7 +165,10 @@ async function findWishVerifyCommand(workingDir: string | null, triggerText: str
       if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
         return 'npm test'
       }
-    } catch {}
+    } catch (error) {
+      // package.json 读不到只影响候选发现，不阻断验收；留诊断线索
+      log.warn('[wish] 探测 package.json test 脚本失败', error)
+    }
   }
   return null
 }
@@ -327,7 +355,8 @@ export async function runAgentLoop(
 
     let finalStopReason = 'stop'
 
-    // 回合内不变的系统提示只拼一次，避免每步重复读设置并膨胀上下文。
+    // 回合内不变的系统提示只拼一次：保持跨步、跨轮字节稳定，是 Prompt Cache 命中的前缀基础。
+    // 动态内容（任务契约/模式指令/diff/记忆）一律下沉到运行时消息块，绝不进 system。
     const baseSystem = conversation.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT
     const customInstructions = getSetting<string>('agent.instructions', '').trim()
     const effort = getSetting<string>('agent.effort', 'high')
@@ -389,6 +418,10 @@ export async function runAgentLoop(
       }
     }
 
+    // 本轮运行时上下文：随触发词/模式变化的动态内容全部收敛到这里，
+    // 最终拼到当前 user 消息块里，不进 system——system 跨步、跨轮保持字节稳定。
+    const runtimeSections: string[] = []
+
     // 许愿闭环：把当前分支的真实 diff 作为“改动证据”注入，避免模型只凭记忆总结。
     if (
       agentMode === 'wish' &&
@@ -397,48 +430,51 @@ export async function runAgentLoop(
     ) {
       const diff = await hooks.git(['diff', '--stat'], conversation.workingDir)
       if (diff) {
-        system += `\n\n【当前工作区改动】\n${diff.slice(0, 6000)}`
+        runtimeSections.push(`【当前工作区改动】\n${diff.slice(0, 6000)}`)
       }
     }
     if (agentMode === 'builder') {
-      system += '\n\n【建造者】直接动手：改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。长耗时且可独立推进的任务改用 task_create 异步派后台分身（不阻塞聊天），之后用 task_status 查结果、task_send 追加指令。'
+      runtimeSections.push('【建造者】直接动手：改代码必须调工具落盘、一次一个文件；优先 patch_file；写完有测试就自验。独立子任务（分模块侦察、独立文件改造）可 spawn_subagent 并行派，最后由你汇总结论。长耗时且可独立推进的任务改用 task_create 异步派后台分身（不阻塞聊天），之后用 task_status 查结果、task_send 追加指令。')
     } else if (agentMode === 'chat') {
-      system += '\n\n【问答】给结论和核心片段即可，不要为了显得勤快而改文件。'
+      runtimeSections.push('【问答】给结论和核心片段即可，不要为了显得勤快而改文件。')
     } else if (agentMode === 'wish' && getSetting<boolean>('agent.wish.enabled', true)) {
       const acceptance = getSetting<string>('agent.wish.acceptance', '').trim()
       const verifyCommand = getSetting<string>('agent.wish.verifyCommand', '').trim()
       const wishAllowMcp = getSetting<boolean>('agent.wish.allowMcp', true)
-      system += [
-        '',
-        '【许愿模式】你是自动交付者，不是咨询顾问。',
-        '工作区内读写与命令无需等待用户确认；你必须自己规划、修改、运行验证、读取报错、修复并重跑，直到满足验收。',
-        '不得声称“应该可以”或把验证留给用户。没有真实验证证据就不能宣布完成。',
-        acceptance ? `默认验收标准：${acceptance}` : '',
-        verifyCommand ? `默认验收命令：${verifyCommand}` : '',
-        wishAllowMcp
-          ? '外部 MCP 工具（mcp__服务__工具）可用：浏览器自动化、抓网页、检索文档、记忆库等；它们已按服务放行，直接调用即可，不要因为“不是本地工具”而放弃。'
-          : '外部 MCP 工具已关闭：只能用工作区内的本地读写、补丁与命令工具。',
-        '最终必须输出：改动摘要、实际执行的验证命令与结果、剩余风险、回滚方式。',
-        '硬边界：只改当前工作区；不读取密钥库/会话数据库；删 .git、删库、清表、格式化磁盘一律停下来等人工确认。'
-      ]
-        .filter(Boolean)
-        .join('\n')    }
+      runtimeSections.push(
+        [
+          '【许愿模式】你是自动交付者，不是咨询顾问。',
+          '工作区内读写与命令无需等待用户确认；你必须自己规划、修改、运行验证、读取报错、修复并重跑，直到满足验收。',
+          '不得声称“应该可以”或把验证留给用户。没有真实验证证据就不能宣布完成。',
+          acceptance ? `默认验收标准：${acceptance}` : '',
+          verifyCommand ? `默认验收命令：${verifyCommand}` : '',
+          wishAllowMcp
+            ? '外部 MCP 工具（mcp__服务__工具）可用：浏览器自动化、抓网页、检索文档、记忆库等；它们已按服务放行，直接调用即可，不要因为“不是本地工具”而放弃。'
+            : '外部 MCP 工具已关闭：只能用工作区内的本地读写、补丁与命令工具。',
+          '最终必须输出：改动摘要、实际执行的验证命令与结果、剩余风险、回滚方式。',
+          '硬边界：只改当前工作区；不读取密钥库/会话数据库；删 .git、删库、清表、格式化磁盘一律停下来等人工确认。'
+        ]
+          .filter(Boolean)
+          .join('\n')
+      )
+    }
 
     // 任务契约：把自然语言压成目标/验收/提问边界，是“少问多做”的主要抓手。
     // 寒暄/极短问答不注入，避免每句“你好”都背一段契约。
+    // 下沉到运行时消息块：触发词不同则内容不同，放 system 会逐轮击穿缓存前缀。
     const substantive = triggerText.trim().length >= 8 || intent.wantsAction
     const contract = substantive
       ? buildTaskContract(triggerText, agentMode, { workingDirectory: conversation.workingDir })
       : ''
-    if (contract) system += `\n\n${contract}`
+    if (contract) runtimeSections.push(contract)
     // 需求预整理：本地规则先把一句话压成目标/约束/验收/不做/缺口默认，
     // 再发给大模型，避免模型自己猜。寒暄/极短问答内部直接返回空。
     const brief = substantive
       ? buildRequirementBrief(triggerText, agentMode, { workingDirectory: conversation.workingDir })
       : ''
-    if (brief) system += `\n\n${brief}`
+    if (brief) runtimeSections.push(brief)
     const taskPlaybook = substantive ? matchTaskPlaybook(triggerText, agentMode) : ''
-    if (taskPlaybook) system += taskPlaybook
+    if (taskPlaybook) runtimeSections.push(taskPlaybook)
 
     // 经验库对所有模式注入：无工程绑定时也加载并注入 scope === 'global' 的高频经验
     let activeLessons: import('@shared/types').Lesson[] = []
@@ -484,8 +520,9 @@ export async function runAgentLoop(
     }
 
     // 方法论注入：本轮是复查任务才给打法，平时不打扰。
+    // 下沉到运行时消息块：是否注入取决于本轮触发词，放 system 会逐轮击穿缓存。
     if (matchReviewIntent(triggerText)) {
-      system += REVIEW_PLAYBOOK
+      runtimeSections.push(REVIEW_PLAYBOOK.trim())
     }
 
     // 许愿任务要留出“改—跑—读错—再改”的空间；32k 预算常在长测试日志后把任务目标裁掉。
@@ -507,7 +544,12 @@ export async function runAgentLoop(
       readOnly,
       conversationMode: agentMode
     })
-    if (workModeDirective) system += `\n${workModeDirective}`
+    if (workModeDirective) runtimeSections.push(workModeDirective)
+    // 本轮静态运行时上下文：触发词/模式相关的动态指令全部收敛到这里，
+    // 随当前 user 消息下发；system 自此冻结，跨步、跨轮字节不变。
+    const staticRuntimeNote = runtimeSections.join('\n\n')
+    // 许愿验收失败的用户反馈：以下一轮 user 消息注入，不进 assistant 正文（不污染持久化）。
+    let pendingUserFeedback: string | null = null
     // 保险丝灵敏度：连续几次打转就停，默认 3。
     const stuckCfg = getSetting<number>('agent.stuckLimit', 3)
     const effectiveStuckLimit = typeof stuckCfg === 'number' && stuckCfg > 0 ? stuckCfg : 3
@@ -617,73 +659,79 @@ export async function runAgentLoop(
         if (!cachedPersisted) cachedPersisted = repo.getPathTo(userMessage.id)
         const persisted = cachedPersisted
         // 工具 schema 常年 8000-15000 tokens，不计入预算等于预算虚高：这里复用 try 外一次估值
-          // 轮间摘要（可选）：被裁掉的历史先换成语义摘要，避免模型直接“失忆”。
-          // 摘要由当前模型异步生成，并缓存在 conversations.summary_json。
-          const summarizeEnabled = getSetting<boolean>('agent.context.summarize', false)
-          let cachedSummary: repo.ConversationSummary | null = null
-          if (summarizeEnabled) {
-            cachedSummary = repo.getConversationSummary(conversation.id)
-            const probe = buildContext(persisted, {
-              system,
-              budgetTokens: budget,
-              extraTokens: toolSchemaTokens,
-              toolResultMaxChars: effectiveToolResultMaxChars,
-              keepRecentToolResults
-            })
-            if (probe.omittedMessages?.length && probe.omittedMessages.length > 0) {
-              const lastOmitted = probe.omittedMessages[probe.omittedMessages.length - 1]
-              if (!cachedSummary || cachedSummary.coveredMessageId !== lastOmitted.id) {
-                const transcript = buildSummaryTranscript(probe.omittedMessages)
-                if (transcript.trim()) {
-                  const text = await hooks.summarizeHistory(
-                    transcript,
-                    resolved.providerId,
-                    controller.signal
-                  )
-                  if (text) {
-                    cachedSummary = {
-                      coveredMessageId: lastOmitted.id,
-                      text,
-                      updatedAt: Date.now()
-                    }
-                    repo.setConversationSummary(conversation.id, cachedSummary)
-                  }
+        // 本轮内存消息计入预算与裁剪：超长 tool_result 不走预算会直接打爆上下文
+        const inMemory: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
+        // 轮间摘要（可选）：被裁掉的历史先换成语义摘要，避免模型直接“失忆”。
+        // 摘要由当前模型异步生成，并缓存在 conversations.summary_json。
+        const summarizeEnabled = getSetting<boolean>('agent.context.summarize', false)
+        let cachedSummary: repo.ConversationSummary | null = null
+        if (summarizeEnabled) {
+          cachedSummary = repo.getConversationSummary(conversation.id)
+        }
+        const buildStepContext = (summaryText?: string): ReturnType<typeof buildContext> =>
+          buildContext(persisted, {
+            system,
+            budgetTokens: budget,
+            extraTokens: toolSchemaTokens,
+            toolResultMaxChars: effectiveToolResultMaxChars,
+            keepRecentToolResults,
+            inMemory,
+            summary: summaryText
+          })
+        // 单次构建即带摘要参数：只有摘要被（重新）生成时才重建，避免每步调两次 buildContext
+        let context = buildStepContext(cachedSummary?.text)
+        if (summarizeEnabled && context.omittedMessages?.length && context.omittedMessages.length > 0) {
+          const lastOmitted = context.omittedMessages[context.omittedMessages.length - 1]
+          if (!cachedSummary || cachedSummary.coveredMessageId !== lastOmitted.id) {
+            const transcript = buildSummaryTranscript(context.omittedMessages)
+            if (transcript.trim()) {
+              const text = await hooks.summarizeHistory(
+                transcript,
+                resolved.providerId,
+                controller.signal
+              )
+              if (text) {
+                cachedSummary = {
+                  coveredMessageId: lastOmitted.id,
+                  text,
+                  updatedAt: Date.now()
                 }
+                repo.setConversationSummary(conversation.id, cachedSummary)
+                context = buildStepContext(text)
               }
             }
           }
-          const context = buildContext(persisted, {
-          system,
-          budgetTokens: budget,
-          extraTokens: toolSchemaTokens,
-            toolResultMaxChars: effectiveToolResultMaxChars,
-            keepRecentToolResults,
-            summary: cachedSummary?.text
-        })
+        }
         // 裁剪完成后才读图片：被裁掉的历史轮次里的图永远不进内存
         await hydrateContextImages(context)
-        // 裁剪发生时告诉模型，避免它以为看到了全部历史而编造。
         // 中途指导：用户在排队消息上点"指导当前轮"，下一轮请求即带上，不等前面的跑完
         const steering = hooks.takeSteeringNotes(conversation.id)
-        const effectiveSystem =
-          context.omittedTurns > 0 || steering.length > 0
-            ? `${system}${
-                context.omittedTurns > 0
-                  ? `\n\n（最早 ${context.omittedTurns} 轮历史已省略，如需请向用户确认。）`
-                  : ''
-              }${
-                steering.length > 0
-                  ? `\n\n【用户中途指导（必须优先遵守，后续动作按此调整）】\n${steering.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
-                  : ''
-              }`
-            : system
+        // system 已冻结：裁剪提示与中途指导下沉到当前 user 消息块，保持前缀字节稳定
+        const stepNotices: string[] = []
+        if (context.omittedTurns > 0) {
+          stepNotices.push(`（最早 ${context.omittedTurns} 轮历史已省略，如需请向用户确认。）`)
+        }
+        if (steering.length > 0) {
+          stepNotices.push(
+            `【用户中途指导（必须优先遵守，后续动作按此调整）】\n${steering.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+          )
+        }
+        const runtimeStepNote = [staticRuntimeNote, ...stepNotices].filter(Boolean).join('\n\n')
 
-        // 持久化路径 + 本轮尚未落库的累积块，拼出这次请求的完整消息序列
-        const inMemory: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
-        const messages: LLMMessage[] = attachMemoryNote(
-          [...context.messages, ...toLLMMessages(inMemory)],
+        // 持久化路径 + 本轮执行结果：inMemory 已作为参数纳入 buildContext，
+        // context.messages 是裁剪且截断后的完整本轮消息——此处绝不能再拼一份
+        // toLLMMessages(inMemory)，否则相同 tool_use_id 重复发送（供应商直接 400），
+        // 且第二份是绕过截断的原文。
+        let messages: LLMMessage[] = attachMemoryNote(
+          [...context.messages],
           memoryNote
         )
+        messages = attachRuntimeNote(messages, runtimeStepNote)
+        // 许愿验收失败的反馈以 user 角色注入下一轮（见 catch 分支），不污染 assistant 正文
+        if (pendingUserFeedback) {
+          messages = [...messages, { role: 'user', blocks: [{ type: 'text', text: pendingUserFeedback }] }]
+          pendingUserFeedback = null
+        }
 
         const toolUses: { id: string; name: string; input: unknown }[] = []
 
@@ -710,7 +758,7 @@ export async function runAgentLoop(
         for await (const chunk of streamWithFallback(
           {
             model: resolved.model,
-            system: effectiveSystem,
+            system,
             messages,
             tools: offeredSchemas,
             maxTokens: resolvedEffort.maxTokens,
@@ -808,6 +856,18 @@ export async function runAgentLoop(
           ) {
             const verifyCmd = await findWishVerifyCommand(conversation.workingDir, triggerText)
             if (verifyCmd) {
+              // Ticket 3：执行前先过硬红线与命令安全审计（triggerText 不可信，
+              // 匹配出的 verifyCmd 必须当命令重新审计；命中即拒绝执行并如实回告）
+              const hardVerdict = auditHardLines(verifyCmd)
+              const secVerdict = auditCommandSecurity(verifyCmd)
+              if (hardVerdict || secVerdict.isDangerous) {
+                const reason = hardVerdict?.reason ?? secVerdict.reason ?? '命中安全审计'
+                const auditNote = `\n\n_（验收命令 \`${verifyCmd}\` 未通过安全审计（${reason}），已拒绝自动执行。）_`
+                appendBlock(blocks, { type: 'text', text: auditNote })
+                emit({ type: 'text_delta', runId, conversationId: conversation.id, messageId: assistantMessage.id, text: auditNote })
+                wishRetryCount = maxRetries // 不再重试：审计拒绝不是测试失败
+                break
+              }
               const { exec } = await import('node:child_process')
               const { promisify } = await import('node:util')
               const execAsync = promisify(exec)
@@ -818,7 +878,9 @@ export async function runAgentLoop(
                   cwd: conversation.workingDir,
                   timeout: 45000,
                   maxBuffer: 10 * 1024 * 1024,
-                  shell
+                  shell,
+                  // 中断透传：用户点停止时验收命令一并被杀，不再不可取消
+                  signal: controller.signal
                 })
                 wishVerified = true
                 if (getSetting<boolean>('agent.wish.evolve', true)) {
@@ -828,7 +890,7 @@ export async function runAgentLoop(
                         .filter(
                           (b): b is Extract<ContentBlock, { type: 'tool_use' }> =>
                             b.type === 'tool_use' &&
-                            (b.name === 'write_file' || b.name === 'patch_file' || b.name === 'create_file')
+                            (b.name === 'write_file' || b.name === 'patch_file' || b.name === 'multi_patch_file' || b.name === 'create_file')
                         )
                         .map((b) => (b.input as any)?.path || (b.input as any)?.TargetFile || (b.input as any)?.file)
                         .filter(Boolean)
@@ -849,6 +911,8 @@ export async function runAgentLoop(
                 }
                 break
               } catch (testErr: any) {
+                // 用户主动停止：直接退出自愈重试，不误触发修复迭代
+                if (controller.signal.aborted) break
                 wishRetryCount++
                 const errOutput = (testErr.stderr || testErr.stdout || testErr.message || String(testErr)).slice(0, 4000)
                 const fixFeedback = `【许愿模式自动验收未通过（第 ${wishRetryCount}/${maxRetries} 次）】\n执行验收命令 \`${verifyCmd}\` 失败，错误输出：\n\`\`\`\n${errOutput}\n\`\`\`\n请仔细分析报错并调用工具修复，直至验收通过。`
@@ -863,7 +927,8 @@ export async function runAgentLoop(
                   messageId: assistantMessage.id,
                   text: `\n\n_（自动执行验收命令 \`${verifyCmd}\` 失败，正在进行第 ${wishRetryCount}/${maxRetries} 次自愈重试...）_`
                 })
-                appendBlock(blocks, { type: 'text', text: fixFeedback })
+                // 失败反馈以 user 角色注入下一轮：不进 assistant 正文，不污染最终持久化
+                pendingUserFeedback = fixFeedback
                 continue
               }
             }
@@ -966,15 +1031,22 @@ export async function runAgentLoop(
       if (truncatedByThinking && !controller.signal.aborted) {
         for (let attempt = 0; attempt < 2 && truncatedByThinking; attempt++) {
           const persistedNow = cachedPersisted ?? repo.getPathTo(userMessage.id)
+          const inMemoryNow: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
           const contextNow = buildContext(persistedNow, {
             system,
             budgetTokens: budget,
             extraTokens: toolSchemaTokens,
             toolResultMaxChars: effectiveToolResultMaxChars,
-            keepRecentToolResults
+            keepRecentToolResults,
+            inMemory: inMemoryNow
           })
           await hydrateContextImages(contextNow)
-          const inMemoryNow: Message[] = [{ ...assistantMessage, blocks: [...blocks], role: 'assistant' }]
+          // contextNow.messages 已含裁剪截断后的 inMemoryNow，禁止再拼第二份
+          //（同主循环：重复 tool_use_id 会 400，且绕过截断）。
+          const contMessages: LLMMessage[] = attachRuntimeNote(
+            attachMemoryNote([...contextNow.messages], memoryNote),
+            staticRuntimeNote
+          )
           const continued: { id: string; name: string; input: unknown }[] = []
           let contStop = 'stop'
           // 续写沿用实际服务模型的档位映射，避免降级后用错上限。
@@ -991,10 +1063,7 @@ export async function runAgentLoop(
             {
               model: servedModel,
               system: system + SKIP_THINKING_SUFFIX,
-              messages: attachMemoryNote(
-                [...contextNow.messages, ...toLLMMessages(inMemoryNow)],
-                memoryNote
-              ),
+              messages: contMessages,
               tools: offeredSchemas,
               maxTokens: contEffort.maxTokens,
               reasoningEffort: contEffort.reasoningEffort,
@@ -1055,7 +1124,10 @@ export async function runAgentLoop(
           }
           finalStopReason = contStop
           const gotText = blocks.some((b) => b.type === 'text' && b.text.trim().length > 0)
-          truncatedByThinking = (contStop === 'length' || contStop === 'max_tokens') && !gotText
+          // P0 修复：只要本轮续写执行了工具就必须回传，哪怕同时输出了前导正文；
+          // 否则工具结果躺在 blocks 里从未回传给模型（attempt 上限保底不死循环）。
+          truncatedByThinking =
+            ((contStop === 'length' || contStop === 'max_tokens') && !gotText) || continued.length > 0
           repo.updateMessage(assistantMessage.id, {
             blocks: [...blocks],
             usage: hooks.composeUsage(lastUsage, turnPromptTokens, turnCompletionTokens, requestCount, contStop, turnCacheReadTokens, turnCacheWriteTokens)
@@ -1151,8 +1223,8 @@ export async function runAgentLoop(
     })
 
     // 只在成功回合之后做后台记忆工作：绝不占用「用户发消息 → 首字响应」的关键路径。
+    // 计数与攒批统一收敛在 scheduleBackgroundMemoryWork 内部。
     if (status === 'done') {
-      successfulTurnsSinceExtraction += 1
       const assistantTextForMemory = blocks
         .map((b) => (b.type === 'text' ? b.text : ''))
         .join(' ')

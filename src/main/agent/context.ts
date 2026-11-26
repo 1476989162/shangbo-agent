@@ -85,14 +85,37 @@ export function estimateBlocks(blocks: ContentBlock[]): number {
 /**
  * 单条 tool_result 计入预算前的最大字符数：超长输出先截断再计，避免一条日志
  * 吞掉整轮预算。保留头尾各一半并注明省略字符数，模型需要时可再调工具分页读。
+ *
+ * 幂等：已带截断标记的内容直接返回——同一轮 buildContext 可能被调用多次
+ * （摘要探测 + 正式构建），重复截断会层层叠 note 并丢信息。
  */
 export const DEFAULT_TOOL_RESULT_MAX_CHARS = 4000
 
+/** truncateToolResult 写入的标记前缀（保留导出，兼容既有引用）。 */
+export const TOOL_RESULT_TRUNCATED_MARKER = '（工具输出过长，已截断前'
+
+/**
+ * 完整格式化标记：只有匹配“\n…（工具输出过长，已截断前 N + 后 M 字符，共省略 K 字符）\n”
+ * 全文才算本函数产出的截断 note。裸子串匹配（如大日志原文恰好含这几个字）
+ * 会让超长原文整体绕过截断——必须用完整格式校验。
+ */
+const TRUNCATED_NOTE_RE = /\n…（工具输出过长，已截断前 \d+ \+ 后 \d+ 字符，共省略 \d+ 字符）\n/
+
+/**
+ * 是否已是本函数产出的截断结果：仅当内容长度落在“上限 + 一条 note”
+ * 范围内（note 约 60 字，取 120 宽容）且完整匹配格式化标记时才跳过。
+ * 超长原文即使碰巧含有标记片段，也必须重新截断。
+ */
+export function isTruncatedToolResult(content: string, maxChars: number): boolean {
+  return content.length > maxChars && content.length <= maxChars + 120 && TRUNCATED_NOTE_RE.test(content)
+}
+
 export function truncateToolResult(content: string, maxChars = DEFAULT_TOOL_RESULT_MAX_CHARS): string {
   if (content.length <= maxChars) return content
+  if (isTruncatedToolResult(content, maxChars)) return content
   const half = Math.floor(maxChars / 2)
   const omitted = content.length - maxChars
-  return `${content.slice(0, half)}\n…（工具输出过长，已截断前 ${half} + 后 ${maxChars - half} 字符，共省略 ${omitted} 字符）\n${content.slice(content.length - (maxChars - half))}`
+  return `${content.slice(0, half)}\n…${TOOL_RESULT_TRUNCATED_MARKER} ${half} + 后 ${maxChars - half} 字符，共省略 ${omitted} 字符）\n${content.slice(content.length - (maxChars - half))}`
 }
 
 /**
@@ -180,9 +203,13 @@ export function buildContext(
     summary?: string
     /** 轮内保留最近 N 组完整工具输出，许愿长轮可传 3-4 收紧预算。 */
     keepRecentToolResults?: number
+    /** 当前轮次尚未落库的内存消息（本轮 tool_use/tool_result）：纳入预算与裁剪 */
+    inMemory?: Message[]
   }
 ): BuiltContext {
-  const turns = groupIntoTurns(path)
+  const fullPath =
+    options.inMemory && options.inMemory.length > 0 ? [...path, ...options.inMemory] : path
+  const turns = groupIntoTurns(fullPath)
   const maxChars = options.toolResultMaxChars ?? DEFAULT_TOOL_RESULT_MAX_CHARS
   const keepRecent = options.keepRecentToolResults ?? KEEP_RECENT_TOOL_RESULTS  // 工具 schema 等"历史之外但必发"的开销也要占预算，否则名义 32000 实际早超
   const summaryTokens = options.summary ? estimateTokens(options.summary) + 8 : 0
@@ -220,7 +247,11 @@ export function buildContext(
     }
   }
 
-  const messages = toLLMMessages(kept.flat())
+  // 无论是否触发整轮压缩，发往模型的超长 tool_result 一律截断。
+  // 只 clone 触及的消息/块，绝不原地改 DB 落库对象；幂等标记防重复叠加。
+  const truncatedKept = truncateKeptToolResults(kept, maxChars)
+
+  const messages = toLLMMessages(truncatedKept.flat())
   if (options.summary) {
     messages.unshift({
       role: 'user',
@@ -258,6 +289,73 @@ function estimateTurn(turn: Message[], maxChars: number): number {
  */
 export const KEEP_RECENT_TOOL_RESULTS = 6
 export const TOOL_RESULT_PREVIEW_CHARS = 200
+
+/**
+ * 对 kept 轮次中所有超长 tool_result 执行 truncateToolResult（无论是否触发整轮压缩）。
+ * 只 clone 被截断的消息与块，其余保持原引用——绝不原地修改 DB 落库对象；
+ * 依赖 truncateToolResult 的幂等标记，多次 buildContext 不会叠加截断 note。
+ */
+export function truncateKeptToolResults(turns: Message[][], maxChars: number): Message[][] {
+  return turns.map((turn) =>
+    turn.map((message) => {
+      let touched = false
+      const blocks = message.blocks.map((block) => {
+        if (
+          block.type === 'tool_result' &&
+          block.content.length > maxChars &&
+          !isTruncatedToolResult(block.content, maxChars)
+        ) {
+          touched = true
+          return { ...block, content: truncateToolResult(block.content, maxChars) }
+        }
+        return block
+      })
+      return touched ? { ...message, blocks } : message
+    })
+  )
+}
+
+/** 运行时上下文块的包围标记：与 <memory_context> 同构，便于在消息里定位与幂等。 */
+export const RUNTIME_CONTEXT_OPEN = '<runtime_context>'
+export const RUNTIME_CONTEXT_CLOSE = '</runtime_context>'
+
+/**
+ * 把“当前轮运行时上下文”（任务契约/动态指令/省略提示/中途指导等）附加到
+ * 末条 user 消息的文本块末尾（运行时 clone，幂等）。
+ * system + tools + 历史前缀保持字节稳定，只有本消息尾部是动态的，
+ * Prompt Cache 前缀命中不受影响。
+ */
+export function attachRuntimeNote(messages: LLMMessage[], note: string): LLMMessage[] {
+  if (!note) return messages
+  let index = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      index = i
+      break
+    }
+  }
+  if (index < 0) return messages
+  const target = messages[index]
+  if (target.blocks.some((b) => b.type === 'text' && b.text.includes(RUNTIME_CONTEXT_OPEN))) {
+    return messages
+  }
+
+  const body = `${RUNTIME_CONTEXT_OPEN}\n${note}\n${RUNTIME_CONTEXT_CLOSE}`
+  const blocks: ContentBlock[] = target.blocks.map((b) => ({ ...b }))
+  const textIndex = blocks.findIndex((b) => b.type === 'text')
+  if (textIndex >= 0) {
+    const block = blocks[textIndex]
+    if (block.type === 'text') {
+      blocks[textIndex] = { ...block, text: `${block.text}\n\n${body}` }
+    }
+  } else {
+    blocks.push({ type: 'text', text: body })
+  }
+
+  const next = messages.slice()
+  next[index] = { ...target, blocks }
+  return next
+}
 
 export function compressTurnToolResults(
   turn: Message[],

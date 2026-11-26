@@ -1,5 +1,16 @@
 #include "test_framework.h"
 #include "../include/safety.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <limits.h>
+#include <sys/stat.h>
+#endif
 
 TEST_CASE(test_disk_blockers_permanent) {
     SafetyVerdict v1 = audit_hard_lines("format c:");
@@ -214,6 +225,135 @@ TEST_CASE(test_tool_call_safety_audit) {
     ASSERT_FALSE(vc.auto_approvable);
 }
 
+/* Ticket 3：跨工作区递归/通配删除 → HARD；工作区内清理维持原策略。
+ * 工作区取 %TEMP%/%TMPDIR% 下的真实 ASCII 目录（必须真实存在且可 stat）：
+ * _getcwd 返回系统代码页字节，含中文时 CP_UTF8 解码失败，不能直接作工作区。 */
+static void test_make_dirs(char *ws, size_t wcap, char *outside, size_t ocap) {
+#ifdef _WIN32
+    char tmp[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof(tmp), tmp);
+    if (n == 0 || n >= sizeof(tmp)) { strcpy_s(ws, wcap, "."); strcpy_s(outside, ocap, ".."); return; }
+    _snprintf_s(ws, wcap, _TRUNCATE, "%sshangbo-wipe-ws", tmp);
+    _snprintf_s(outside, ocap, _TRUNCATE, "%sshangbo-wipe-outside", tmp);
+    CreateDirectoryA(ws, NULL);
+    CreateDirectoryA(outside, NULL);
+#else
+    const char *base = getenv("TMPDIR");
+    if (!base || !*base) base = "/tmp";
+    snprintf(ws, wcap, "%s/shangbo-wipe-ws", base);
+    snprintf(outside, ocap, "%s/shangbo-wipe-outside", base);
+    mkdir(ws, 0755);
+    mkdir(outside, 0755);
+#endif
+}
+
+TEST_CASE(test_cross_workspace_recursive_wipe) {
+    SafetyContext ctx;
+    char ws[4096], outside[4096], cmd[8192];
+    test_make_dirs(ws, sizeof(ws), outside, sizeof(outside));
+    memset(&ctx, 0, sizeof(ctx));
+    strncpy(ctx.working_directory, ws, sizeof(ctx.working_directory) - 1);
+    ctx.autonomy = AUTONOMY_BALANCED;
+
+    /* 区外真实目录 + 递归标志 → hard */
+    snprintf(cmd, sizeof(cmd), "rd /s /q %s", outside);
+    SafetyVerdict w1 = audit_tool_call("run_command", NULL, cmd, &ctx);
+    ASSERT_EQ_INT(w1.tier, SAFETY_TIER_HARD);
+    ASSERT_EQ_INT(w1.category, CAT_WORKSPACE);
+    ASSERT_FALSE(w1.auto_approvable);
+
+    /* 系统目录区外目标 → hard */
+    /* outside 目录真实存在（test_make_dirs 创建），跨平台，无硬编码 */
+    snprintf(cmd, sizeof(cmd), "rm -r %s", outside);
+    SafetyVerdict w2 = audit_tool_call("run_command", NULL, cmd, &ctx);
+    ASSERT_EQ_INT(w2.tier, SAFETY_TIER_HARD);
+
+    /* .. 相对逃逸的递归删除 → hard（纯字符串判定，不依赖文件系统） */
+    SafetyVerdict w3 = audit_tool_call("run_command", NULL, "rm -rf ../other-project", &ctx);
+    ASSERT_EQ_INT(w3.tier, SAFETY_TIER_HARD);
+
+    /* 引号包裹的 .. 逃逸也拦（剥引号后再判） */
+    SafetyVerdict w3q = audit_tool_call("run_command", NULL, "rm -rf \"../quoted-escape\"", &ctx);
+    ASSERT_EQ_INT(w3q.tier, SAFETY_TIER_HARD);
+    SafetyVerdict w3q2 = audit_tool_call("run_command", NULL, "rm -rf '../quoted-escape2'", &ctx);
+    ASSERT_EQ_INT(w3q2.tier, SAFETY_TIER_HARD);
+
+    /* 引号包裹的绝对区外路径也拦 */
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", outside);
+    SafetyVerdict w3q3 = audit_tool_call("run_command", NULL, cmd, &ctx);
+    ASSERT_EQ_INT(w3q3.tier, SAFETY_TIER_HARD);
+
+#ifndef _WIN32
+    /* Unix /tmp/... 回归：/tmp 恒存在且在任何工作区之外 */
+    SafetyVerdict wu = audit_tool_call("run_command", NULL, "rm -rf /tmp/wipe-me-test", &ctx);
+    ASSERT_EQ_INT(wu.tier, SAFETY_TIER_HARD);
+#endif
+
+    /* 工作区内子目录递归清理：维持原策略不升 hard（不因本票收紧而误伤） */
+    snprintf(cmd, sizeof(cmd), "rm -r %s/obj", ws);
+    SafetyVerdict w4 = audit_tool_call("run_command", NULL, cmd, &ctx);
+    ASSERT_TRUE(w4.tier != SAFETY_TIER_HARD);
+
+    /* 单文件删除（无递归无通配）不受影响 */
+    snprintf(cmd, sizeof(cmd), "del %s/tmp.txt", ws);
+    SafetyVerdict w5 = audit_tool_call("run_command", NULL, cmd, &ctx);
+    ASSERT_TRUE(w5.tier != SAFETY_TIER_HARD);
+    /* 清理本用例创建的 tmp 目录（空目录，直接删） */
+#ifdef _WIN32
+    RemoveDirectoryA(ws);
+    RemoveDirectoryA(outside);
+#else
+    rmdir(ws);
+    rmdir(outside);
+#endif
+}
+
+/* Ticket 3：multi_patch_file 纳入写盘工具分级 */
+TEST_CASE(test_multi_patch_file_classification) {
+    SafetyContext ctx;
+    char ws[4096], outside[4096];
+    test_make_dirs(ws, sizeof(ws), outside, sizeof(outside));
+    memset(&ctx, 0, sizeof(ctx));
+    strncpy(ctx.working_directory, ws, sizeof(ctx.working_directory) - 1);
+    ctx.autonomy = AUTONOMY_BALANCED;
+    char target[8192];
+
+    /* multi_patch_file 与 write_file 同级：工作区内 auto（相对路径，不依赖代码页） */
+    SafetyVerdict v1 = audit_tool_call("multi_patch_file", "src/tools.c", NULL, &ctx);
+    ASSERT_EQ_INT(v1.tier, SAFETY_TIER_AUTO);
+
+    /* 工作区外：soft 需确认（与 patch_file 一致） */
+    SafetyVerdict v2 = audit_tool_call("multi_patch_file", "../outside.ts", NULL, &ctx);
+    ASSERT_EQ_INT(v2.tier, SAFETY_TIER_SOFT);
+
+    /* 私有数据路径：hard（文件名匹配，与路径无关） */
+    SafetyVerdict v3 = audit_tool_call("multi_patch_file", "secrets.json", NULL, &ctx);
+    ASSERT_EQ_INT(v3.tier, SAFETY_TIER_HARD);
+    ASSERT_EQ_INT(v3.category, CAT_PRIVATE_DATA);
+
+    /* 区外绝对路径：soft（用本用例的 tmp 目录，跨平台） */
+    snprintf(target, sizeof(target), "%s/other.ts", outside);
+    SafetyVerdict v4 = audit_tool_call("multi_patch_file", target, NULL, &ctx);
+    ASSERT_EQ_INT(v4.tier, SAFETY_TIER_SOFT);
+#ifdef _WIN32
+    RemoveDirectoryA(ws);
+    RemoveDirectoryA(outside);
+#else
+    rmdir(ws);
+    rmdir(outside);
+#endif
+}
+
+/* Ticket 3-Item1 回归：rpc_task_execute 依赖的 TLS 语义：
+ * safety_set_user_data_dir 写入即生效（本线程隔离），
+ * 传空字符串即清空（任务结束必须清，否则线程复用时残留上个请求的私有目录）。 */
+TEST_CASE(test_user_data_dir_tls_set_clear) {
+    safety_set_user_data_dir("C:/Users/someone/appdata-test");
+    ASSERT_TRUE(touches_private_data("C:/Users/someone/appdata-test/config.json"));
+    safety_set_user_data_dir("");
+    ASSERT_FALSE(touches_private_data("C:/Users/someone/appdata-test/config.json"));
+}
+
 void run_safety_tests(void) {
     printf("\n=== Running Safety & Security Guard Tests ===\n");
     RUN_TEST(test_disk_blockers_permanent);
@@ -225,4 +365,7 @@ void run_safety_tests(void) {
     RUN_TEST(test_subagent_worktree_not_private_data);
     RUN_TEST(test_workspace_boundary_check);
     RUN_TEST(test_tool_call_safety_audit);
+    RUN_TEST(test_cross_workspace_recursive_wipe);
+    RUN_TEST(test_multi_patch_file_classification);
+    RUN_TEST(test_user_data_dir_tls_set_clear);
 }

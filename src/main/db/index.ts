@@ -255,8 +255,76 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_delegated_parent ON delegated_tasks(parent_conversation_id, created_at DESC);
     `
-    }
-  ]
+    },
+  {
+    // v9：消息全文检索（FTS5 trigram，支持中日韩子串）+ 索引补齐。
+    // plain_text 只存“文本/思考/工具结果正文”，JSON 字段名（type/content/toolUseId）
+    // 不进索引，从根上消除 LOWER(blocks) LIKE 误命中字段名的问题。
+    // trigram 对 >=3 字符的中英文都可子串匹配；更短的词走 LIKE 回退（见 searchOriginalMessages）。
+    version: 9,
+    sql: `
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        id UNINDEXED,
+        plain_text,
+        tokenize='trigram'
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_delegated_child ON delegated_tasks(child_conversation_id);
+      DROP TRIGGER IF EXISTS trg_messages_fts_ai;
+      CREATE TRIGGER trg_messages_fts_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, id, plain_text)
+        VALUES (
+          new.rowid,
+          new.id,
+          CASE WHEN json_valid(new.blocks) AND json_type(new.blocks) = 'array'
+            THEN COALESCE((
+              SELECT group_concat(
+                CASE json_extract(value, '$.type')
+                  WHEN 'text' THEN json_extract(value, '$.text')
+                  WHEN 'reasoning' THEN json_extract(value, '$.text')
+                  WHEN 'tool_result' THEN json_extract(value, '$.content')
+                  ELSE ''
+                END, char(10))
+              FROM json_each(new.blocks)), '')
+            ELSE new.blocks END
+        );
+      END;
+      DROP TRIGGER IF EXISTS trg_messages_fts_ad;
+      CREATE TRIGGER trg_messages_fts_ad AFTER DELETE ON messages BEGIN
+        DELETE FROM messages_fts WHERE rowid = old.rowid;
+      END;
+      DROP TRIGGER IF EXISTS trg_messages_fts_au;
+      CREATE TRIGGER trg_messages_fts_au AFTER UPDATE OF blocks ON messages BEGIN
+        UPDATE messages_fts SET plain_text = (
+          CASE WHEN json_valid(new.blocks) AND json_type(new.blocks) = 'array'
+            THEN COALESCE((
+              SELECT group_concat(
+                CASE json_extract(value, '$.type')
+                  WHEN 'text' THEN json_extract(value, '$.text')
+                  WHEN 'reasoning' THEN json_extract(value, '$.text')
+                  WHEN 'tool_result' THEN json_extract(value, '$.content')
+                  ELSE '' END, char(10))
+              FROM json_each(new.blocks)), '')
+            ELSE new.blocks END
+        ) WHERE rowid = new.rowid;
+      END;
+      INSERT INTO messages_fts(rowid, id, plain_text)
+      SELECT m.rowid, m.id,
+        CASE WHEN json_valid(m.blocks) AND json_type(m.blocks) = 'array'
+          THEN COALESCE((
+            SELECT group_concat(
+              CASE json_extract(value, '$.type')
+                WHEN 'text' THEN json_extract(value, '$.text')
+                WHEN 'reasoning' THEN json_extract(value, '$.text')
+                WHEN 'tool_result' THEN json_extract(value, '$.content')
+                ELSE '' END, char(10))
+            FROM json_each(m.blocks)), '')
+          ELSE m.blocks END
+      FROM messages AS m
+      WHERE NOT EXISTS (SELECT 1 FROM messages_fts AS f WHERE f.rowid = m.rowid);
+    `
+  }
+]
 
 function migrate(database: Database.Database): void {
   database.exec(

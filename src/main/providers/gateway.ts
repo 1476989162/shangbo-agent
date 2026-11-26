@@ -1,7 +1,7 @@
 import log from 'electron-log/main'
 import { ProviderHttpError } from './sse'
 import { modelScheduler, PreemptedError, type ScheduleSlot } from './scheduler'
-import { adapterFor, getApiKey, getProvider, listProviders, routingOrder } from './store'
+import { adapterFor, getApiKey, getProvider, listProviders, MAGPIE_BASE_URL, routingOrder } from './store'
 import type { CompletionRequest, StreamChunk } from './types'
 import type { Provider } from '../../shared/types'
 
@@ -51,12 +51,18 @@ export function resolveFirstByteTimeoutMs(configured?: unknown): number {
  * 用户显式配置优先（仍钳位 15s–600s）。
  * 漏模型两种加白：① 设置 providers.reasoningPatterns 加正则；② 调 resolve 时传 extraPatterns。
  */
+/**
+ * 推理模型统一真源（全仓唯一）：agentLoop 的超时分档与网关调度共用此判定。
+ * 漏模型加设置 providers.reasoningPatterns（extraPatterns），不要再各文件自建正则。
+ */
 const REASONING_MODEL_PATTERNS = [
   /^r1\b/i,
   /reasoning/i,
   /deepseek-reasoner/i,
   /think/i,
   /o1/i,
+  /o3/i,
+  /o4/i,
   /muse.*spark/i,
   /r1-/i,
   /qwq/i,
@@ -65,7 +71,8 @@ const REASONING_MODEL_PATTERNS = [
   /deepthink/i,
   /r1-distill/i,
   /sky.*think/i,
-  /glm.*think/i
+  /glm.*think/i,
+  /gemini/i
 ]
 const DEFAULT_MODEL_TIMEOUT_MS = 60_000
 const REASONING_MODEL_TIMEOUT_MS = 180_000
@@ -171,6 +178,21 @@ function resolveCandidates(preferredProviderId?: string | null): Provider[] {
   return routingOrder(null)
 }
 
+/**
+ * 输入规模估算（AIMD 用不到真实值时的回退）：
+ * dataUrl 是 base64 图片原文，不代表文本量级，估算时跳过，只计一个占位。
+ */
+function estimateMessagesTokens(messages: unknown): number {
+  try {
+    const text = JSON.stringify(messages, (key, value) =>
+      key === 'dataUrl' && typeof value === 'string' ? `[image:${value.length}B]` : (value as unknown)
+    )
+    return Math.max(1, Math.round(text.length / 4))
+  } catch {
+    return 1
+  }
+}
+
 export async function* streamWithFallback(
   request: CompletionRequest,
   signal: AbortSignal,
@@ -234,7 +256,16 @@ export async function* streamWithFallback(
     let attempt = 0
     // 抢占后重新入队时保持原入队时刻，避免后台任务被后来者无限插队。
     const enqueueAt = Date.now()
-    const promptTokensEstimate = Math.max(1, Math.round(JSON.stringify(request.messages).length / 4))
+    // 重试上下文里的抢占计数：每次被抢占后 +1 并透传给下一次 acquire，
+    // 新槽位继承该计数，调度器的 `< 2` 上限才能真正生效（否则每次重入都从 0 开始）。
+    let preemptionCount = 0
+    // 本机 Magpie 云代理监听 127.0.0.1，但背后是云端模型：必须按远端对待，
+    // 否则调度器按“本机引擎”把并发锁死为 1。
+    const isMagpieProxy = provider.baseUrl === MAGPIE_BASE_URL
+    const promptTokensEstimate = estimateMessagesTokens(request.messages)
+    // 本轮实际输入 token（流式 usage 上报的真实值）：AIMD 优先用它，
+    // 拿不到时才回退到上面的估算值。
+    let actualPromptTokens: number | undefined
     while (true) {
       attempt++
       // 首字节超时需要能单独拉断本次尝试，同时不干扰外层的用户取消信号，
@@ -255,10 +286,13 @@ export async function* streamWithFallback(
         slot = await modelScheduler.acquire({
           providerId: provider.id,
           baseUrl: provider.baseUrl,
+          // Magpie 云代理走 127.0.0.1 但背后是云端：显式声明非本机引擎。
+          isLocalEngine: isMagpieProxy ? false : undefined,
           priority: request.priority,
           preemptible: request.preemptible,
           signal,
-          enqueueAt
+          enqueueAt,
+          preemptionCount
         })
         httpStartedAt = Date.now()
         onPreempt = (): void => attemptController.abort(new PreemptedError())
@@ -295,11 +329,14 @@ export async function* streamWithFallback(
           }
           if (!emitted) slot?.markBodyEmitted()
           emitted = true
+          if (chunk.type === 'usage' && chunk.usage.promptTokens > 0) {
+            actualPromptTokens = Math.max(actualPromptTokens ?? 0, chunk.usage.promptTokens)
+          }
           yield chunk
         }
         modelScheduler.reportResult(provider.id, {
           durationMs: Date.now() - httpStartedAt,
-          promptTokens: promptTokensEstimate,
+          promptTokens: actualPromptTokens ?? promptTokensEstimate,
           queueDepth: modelScheduler.stats(provider.id).queued
         })
         return
@@ -307,14 +344,16 @@ export async function* streamWithFallback(
         if (signal.aborted) throw error
 
         // 为前台让路：重新入队执行，不计入失败次数、不发 retry_status、不写失败链。
+        // 抢占计数跟随进入下一次 acquire（见上），调度器的 `< 2` 上限据此生效。
         if (slot?.preempted || error instanceof PreemptedError) {
           attempt--
+          preemptionCount += 1
           continue
         }
 
         modelScheduler.reportResult(provider.id, {
           durationMs: httpStartedAt > 0 ? Date.now() - httpStartedAt : 0,
-          promptTokens: promptTokensEstimate,
+          promptTokens: actualPromptTokens ?? promptTokensEstimate,
           queueDepth: modelScheduler.stats(provider.id).queued,
           rateLimited: isRateLimit(error),
           timedOut: firstByteTimedOut

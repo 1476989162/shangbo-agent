@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  attachRuntimeNote,
   buildSummaryTranscript,
   buildContext,
   clampSummary,
@@ -7,10 +8,15 @@ import {
   estimateBlocks,
   estimateTokens,
   groupIntoTurns,
+  isTruncatedToolResult,
+  RUNTIME_CONTEXT_OPEN,
   summaryCovers,
+  TOOL_RESULT_TRUNCATED_MARKER,
+  truncateToolResult,
   turnsToSummarize,
   toLLMMessages
 } from './context'
+import type { LLMMessage } from '../providers/types'
 import type { ContentBlock, Message } from '../../shared/types'
 
 let seq = 0
@@ -423,3 +429,131 @@ describe('轮间摘要辅助 (T3)', () => {
     expect(clampSummary('长'.repeat(600)).length).toBe(400)
   })
 })
+
+describe('inMemory 纳入 buildContext 与超长 tool_result 强制截断 (Ticket 4)', () => {
+  const bigContent = 'x'.repeat(20000);
+
+  function toolUse(id: string): ContentBlock {
+    return { type: 'tool_use', id, name: 'read_file', input: { path: '/a' } }
+  }
+  function toolResult(id: string, content: string): ContentBlock {
+    return { type: 'tool_result', toolUseId: id, content, isError: false }
+  }
+
+  it('truncateToolResult 幂等：重复截断不叠加 note', () => {
+    const once = truncateToolResult(bigContent, 4000);
+    expect(once).toContain(TOOL_RESULT_TRUNCATED_MARKER);
+    expect(once.length).toBeLessThan(bigContent.length);
+    expect(truncateToolResult(once, 4000)).toBe(once);
+    expect(isTruncatedToolResult(once, 4000)).toBe(true);
+    expect(isTruncatedToolResult('short', 4000)).toBe(false);
+    // 短内容原样返回
+    expect(truncateToolResult('short', 4000)).toBe('short');
+  })
+
+  it('裸子串不能绕过截断：超长原文即使含标记片段也必须被截断', () => {
+    // 日志原文恰好含有"（工具输出过长，已截断前"几个字，但不是完整格式化 note
+    const bypass = '日志开头含有（工具输出过长，已截断前几个字' + 'z'.repeat(20000);
+    expect(isTruncatedToolResult(bypass, 4000)).toBe(false);
+    const out = truncateToolResult(bypass, 4000);
+    expect(out.length).toBeLessThan(bypass.length);
+    expect(isTruncatedToolResult(out, 4000)).toBe(true);
+    // 完整 note 但超出宽容长度（> maxChars + 120）同样不放行
+    const farBeyond = truncateToolResult('q'.repeat(20000), 4000) + '尾巴'.repeat(5000);
+    expect(isTruncatedToolResult(farBeyond, 4000)).toBe(false);
+  })
+
+  it('inMemory 计入预算：超大在途工具输出会挤掉旧轮', () => {
+    const u1 = makeMessage('user', [textBlock('aa')]);
+    const a1 = makeMessage('assistant', [textBlock('bb')]);
+    const u2 = makeMessage('user', [textBlock('cc')]);
+    const inMem = makeMessage('assistant', [toolUse('t9'), toolResult('t9', bigContent)]);
+
+    const without = buildContext([u1, a1, u2], { system: 'sys', budgetTokens: 40 });
+    expect(without.omittedTurns).toBe(0);
+
+    const withMem = buildContext([u1, a1, u2], { system: 'sys', budgetTokens: 40, inMemory: [inMem] });
+    expect(withMem.omittedTurns).toBe(1);
+  });
+
+  it('即使未触发整轮压缩，发往模型的超长 tool_result 也被截断，且不改 DB 对象', () => {
+    const u = makeMessage('user', [textBlock('hi')]);
+    const inMem = makeMessage('assistant', [toolUse('t1'), toolResult('t1', bigContent)]);
+    const original = inMem.blocks[1];
+    if (original.type !== 'tool_result') throw new Error('fixture broken');
+
+    // 预算充足：不压缩、不裁轮，但输出仍被截断
+    const result = buildContext([u], {
+      system: 'sys',
+      budgetTokens: 100_000,
+      inMemory: [inMem]
+    });
+    expect(result.compressedInTurn).not.toBe(true);
+    const toolMsgs = result.messages.filter((m) => m.role === 'tool');
+    expect(toolMsgs.length).toBe(1);
+    const outBlock = toolMsgs[0].blocks[0];
+    expect(outBlock.type === 'tool_result' && outBlock.content.length).toBeLessThan(bigContent.length);
+    expect(outBlock.type === 'tool_result' && outBlock.content.includes(TOOL_RESULT_TRUNCATED_MARKER)).toBe(true);
+    // DB 落库对象保持原样：引用不同且内容未被改写
+    expect(outBlock).not.toBe(original);
+    expect(original.content).toBe(bigContent);
+  });
+
+  it('无 inMemory 时行为与旧版一致（不传即等价）', () => {
+    const u = makeMessage('user', [textBlock('hi')]);
+    const a = makeMessage('assistant', [toolUse('t1'), toolResult('t1', bigContent)]);
+    const r1 = buildContext([u, a], { system: 'sys', budgetTokens: 100_000 });
+    const r2 = buildContext([u, a], { system: 'sys', budgetTokens: 100_000, inMemory: [] });
+    expect(JSON.stringify(r2.messages)).toBe(JSON.stringify(r1.messages));
+  });
+});
+
+describe('attachRuntimeNote 运行时上下文块 (Ticket 4)', () => {
+  const msg = (role: 'user' | 'assistant', text: string): LLMMessage => ({
+    role,
+    blocks: [{ type: 'text', text }]
+  });
+
+  it('附加到末条 user 消息，不碰历史前缀与原对象', () => {
+    const messages: LLMMessage[] = [msg('user', '第一问'), msg('assistant', '第一答'), msg('user', '当前问')];
+    const next = attachRuntimeNote(messages, '动态指令');
+    expect(next).not.toBe(messages);
+    expect(next[0]).toBe(messages[0]);
+    expect(next[1]).toBe(messages[1]);
+    const last = next[next.length - 1].blocks[0];
+    expect(last.type === 'text' && last.text.startsWith('当前问')).toBe(true);
+    expect(last.type === 'text' && last.text.includes('动态指令')).toBe(true);
+    expect(last.type === 'text' && last.text.includes(RUNTIME_CONTEXT_OPEN)).toBe(true);
+    // 原数组未被改写
+    expect((messages[2].blocks[0] as { text: string }).text).toBe('当前问');
+  });
+
+  it('空 note / 无 user 消息时原样返回', () => {
+    const messages: LLMMessage[] = [msg('user', '问')];
+    expect(attachRuntimeNote(messages, '')).toBe(messages);
+    const noUser: LLMMessage[] = [msg('assistant', '答')];
+    expect(attachRuntimeNote(noUser, 'x')).toBe(noUser);
+  });
+
+  it('幂等：重复附加不叠加', () => {
+    const messages: LLMMessage[] = [msg('user', '问')];
+    const once = attachRuntimeNote(messages, '动态指令');
+    const twice = attachRuntimeNote(once, '动态指令');
+    expect(twice).toBe(once);
+    const text = twice[twice.length - 1].blocks[0];
+    expect(text.type === 'text' && text.text.split(RUNTIME_CONTEXT_OPEN).length - 1).toBe(1);
+  });
+
+  it('末条 user 只有图片块时追加文本块', () => {
+    const messages: LLMMessage[] = [
+      msg('user', '先问'),
+      {
+        role: 'user',
+        blocks: [{ type: 'image', mimeType: 'image/png', dataUrl: 'data:image/png;base64,x' }]
+      }
+    ];
+    const next = attachRuntimeNote(messages, '动态指令');
+    expect(next[next.length - 1].blocks.length).toBe(2);
+    expect(next[0]).toBe(messages[0]);
+  });
+});

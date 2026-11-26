@@ -56,6 +56,14 @@ export function mergeUsage(
   const cacheHit = asCount(raw.prompt_cache_hit_tokens)
   const cacheMiss = asCount(raw.prompt_cache_miss_tokens)
   const explicitPrompt = asCount(raw.prompt_tokens) ?? asCount(raw.input_tokens)
+  // 标准 OpenAI 形态：prompt_tokens_details.cached_tokens（总量已含缓存部分，
+  // 只补 cacheRead 口径，不参与输入回填）。
+  const standardCached = asCount(
+    typeof raw.prompt_tokens_details === 'object' && raw.prompt_tokens_details !== null
+      ? (raw.prompt_tokens_details as Record<string, unknown>).cached_tokens
+      : undefined
+  )
+  const effectiveCacheHit = cacheHit ?? standardCached
   const derivedPrompt =
     cacheHit !== undefined || cacheMiss !== undefined
       ? (cacheHit ?? 0) + (cacheMiss ?? 0)
@@ -80,8 +88,8 @@ export function mergeUsage(
     promptTokens: pickMax(previous?.promptTokens, framePrompt) ?? 0,
     completionTokens:
       pickMax(previous?.completionTokens, asCount(raw.completion_tokens) ?? asCount(raw.output_tokens)) ?? 0,
-    ...(cacheHit !== undefined || previous?.cacheReadTokens !== undefined
-      ? { cacheReadTokens: pickMax(previous?.cacheReadTokens, cacheHit) }
+    ...(effectiveCacheHit !== undefined || previous?.cacheReadTokens !== undefined
+      ? { cacheReadTokens: pickMax(previous?.cacheReadTokens, effectiveCacheHit) }
       : {}),
     ...(cacheMiss !== undefined || previous?.cacheWriteTokens !== undefined
       ? { cacheWriteTokens: pickMax(previous?.cacheWriteTokens, cacheMiss) }
@@ -189,9 +197,12 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     }
     if (request.temperature !== undefined) body.temperature = request.temperature
     if (request.maxTokens !== undefined) body.max_tokens = request.maxTokens
-    // DeepSeek V4 与 SenseNova 吃顶层 reasoning_effort；其他模型不发送，
-    // 严格网关会对未知参数直接 400。
-    if (request.reasoningEffort !== undefined && /deepseek|sensenova/i.test(request.model)) {
+    // DeepSeek V4 与 SenseNova 吃顶层 reasoning_effort；OpenAI o1/o3/o4/gpt-5 系列
+    // 同样吃顶层 reasoning_effort（low/medium/high，effort.ts 已映射到合法值）。
+    // 其他模型不发送，严格网关会对未知参数直接 400。
+        // o1/o3/o4/gpt-5 用词边界匹配：前后必须是分隔符或串边界，避免误伤
+    // pro3 / turbo4 / audio1 等普通模型（严格网关会对未知参数直接 400）。
+    if (request.reasoningEffort !== undefined && /deepseek|sensenova|(?:^|[/:_-])(o1|o3|o4|gpt-5)(?:$|[/:._-])/i.test(request.model)) {
       body.reasoning_effort = request.reasoningEffort
     }
     if (request.tools && request.tools.length > 0) {
@@ -261,10 +272,11 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
           const acc = toolCalls.get(index) ?? { id: '', name: '', args: '' }
           if (call.id) acc.id = call.id
           if (call.function?.name) {
-            // 标准协议按分片递增拼接函数名；但部分兼容网关（某些 GLM/千问中转）
-            // 每个 chunk 都重发完整函数名，直接拼接会得到重复串。
-            // 已有名字且新名是它的后缀时视为重发，保持不变；否则按分片拼接。
-            if (acc.name && acc.name.endsWith(call.function.name)) {
+            // 只有整名完全一致才视为重发：部分兼容网关每个 chunk 重发完整函数名，
+            // 用 === 精确比对；endsWith 会把单字符增量误判为重发——
+            // 例如 acc='pres' 遇到增量 's' 时 endsWith('s') 为真，直接吞掉第二个 s，
+            // 'press_key' 会被拼成 'pres_key'。
+            if (acc.name && acc.name === call.function.name) {
               // 网关重发完整名：忽略
             } else {
               acc.name += call.function.name

@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { mergeUsage } from './openai'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mergeUsage, openAiCompatibleAdapter } from './openai'
+import type { CompletionRequest, StreamChunk } from './types'
 
 /*
  * Token 统计失真回归测试。
@@ -77,5 +78,149 @@ describe('mergeUsage 逐帧合并', () => {
     usage = mergeUsage(usage, { prompt_tokens: 300, completion_tokens: 150 })
     expect(usage.promptTokens).toBe(1000)
     expect(usage.completionTokens).toBe(200)
+  })
+
+  it('标准 prompt_tokens_details.cached_tokens 映射到 cacheRead，不参与输入回填', () => {
+    // 标准形态：prompt_tokens 已是总量（含缓存），cached_tokens 只补 cacheRead 口径
+    const usage = mergeUsage(null, {
+      prompt_tokens: 500,
+      completion_tokens: 50,
+      prompt_tokens_details: { cached_tokens: 200, audio_tokens: 0 }
+    })
+    expect(usage.promptTokens).toBe(500)
+    expect(usage.cacheReadTokens).toBe(200)
+    expect(usage.cacheWriteTokens).toBeUndefined()
+  })
+})
+
+/* ---- 工具名流式拼接（=== 精确匹配）回归 ---- */
+
+const sse = (events: unknown[]): string =>
+  events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
+
+const streamCtx = (): { baseUrl: string; apiKey: string; signal: AbortSignal } => ({
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: 'k',
+  signal: new AbortController().signal
+})
+
+function mockFetch(body: string): ReturnType<typeof vi.fn> {
+  const spy = vi.fn(async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body))
+        controller.close()
+      }
+    })
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    })
+  })
+  vi.stubGlobal('fetch', spy)
+  return spy
+}
+
+async function collect(gen: AsyncGenerator<StreamChunk>): Promise<StreamChunk[]> {
+  const chunks: StreamChunk[] = []
+  for await (const chunk of gen) chunks.push(chunk)
+  return chunks
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('openai tool_calls 流式拼接', () => {
+  const baseRequest: CompletionRequest = {
+    model: 'deepseek-chat',
+    messages: [{ role: 'user', blocks: [{ type: 'text', text: 'hi' }] }],
+    tools: [{ name: 'press_key', description: '按键', parameters: { type: 'object' } }]
+  }
+
+  it('单字符分片下发 press_key 不吞双字母（=== 而非 endsWith）', async () => {
+    // 旧 endsWith 逻辑：acc='pres' 遇到增量 's' 时误判为重发，直接吞掉第二个 s
+    const name = 'press_key'
+    const events: unknown[] = name.split('').map((ch, i) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: i === 0 ? 'call_1' : undefined, function: { name: ch } }]
+          }
+        }
+      ]
+    }))
+    events.push(
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      { usage: { prompt_tokens: 10, completion_tokens: 5 } }
+    )
+    mockFetch(sse(events))
+    const chunks = await collect(openAiCompatibleAdapter.stream(baseRequest, streamCtx()))
+    const toolUse = chunks.find((c) => c.type === 'tool_use')
+    expect(toolUse).toMatchObject({ id: 'call_1', name: 'press_key' })
+  })
+
+  it('网关整名重发时仍去重（=== 命中即跳过）', async () => {
+    const events: unknown[] = [
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_2', function: { name: 'run_command' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'run_command' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }
+    ]
+    mockFetch(sse(events))
+    const chunks = await collect(openAiCompatibleAdapter.stream(baseRequest, streamCtx()))
+    const toolUse = chunks.find((c) => c.type === 'tool_use')
+    expect(toolUse).toMatchObject({ id: 'call_2', name: 'run_command' })
+  })
+
+  it('o1/o3/gpt-5 系列下发顶层 reasoning_effort（已验证的 OpenAI 公开参数）', async () => {
+    const fetchSpy = mockFetch(
+      sse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }, { usage: { prompt_tokens: 1 } }])
+    )
+    await collect(
+      openAiCompatibleAdapter.stream(
+        { ...baseRequest, model: 'o3-mini', reasoningEffort: 'medium' },
+        { ...streamCtx(), baseUrl: 'https://api.openai.com/v1' }
+      )
+    )
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body))
+    expect(body.reasoning_effort).toBe('medium')
+  })
+
+  it('deepseek/sensenova 保持下发 reasoning_effort（既有行为锁定）', async () => {
+    const fetchSpy = mockFetch(sse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    await collect(
+      openAiCompatibleAdapter.stream(
+        { ...baseRequest, model: 'deepseek-reasoner', reasoningEffort: 'high' },
+        streamCtx()
+      )
+    )
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body))
+    expect(body.reasoning_effort).toBe('high')
+  })
+
+  it('非推理模型不发送 reasoning_effort（严格网关会 400）', async () => {
+    const fetchSpy = mockFetch(sse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    await collect(
+      openAiCompatibleAdapter.stream(
+        { ...baseRequest, model: 'qwen-plus', reasoningEffort: 'high' },
+        streamCtx()
+      )
+    )
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body))
+    expect(body).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('词边界匹配：pro3/turbo4/audio1 不触发 reasoning_effort 下发', async () => {
+    for (const model of ['pro3-turbo', 'turbo4', 'audio1-preview']) {
+      const fetchSpy = mockFetch(sse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+      await collect(
+        openAiCompatibleAdapter.stream(
+          { ...baseRequest, model, reasoningEffort: 'high' },
+          streamCtx()
+        )
+      )
+      const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body))
+      expect(body, model).not.toHaveProperty('reasoning_effort')
+    }
   })
 })

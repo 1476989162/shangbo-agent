@@ -1190,7 +1190,6 @@ export class AgentRuntime {
     }
 
     // LLM 后台复核（默认关闭）：只作提示，普通动作不能因此升级为人工确认。
-    let llmTightenReason = ''
     const runCommandText =
       call.name === 'run_command' ? String((call.input as Record<string, unknown>)?.command ?? '') : undefined
     const fast = fastClassifyAction(verdict, runCommandText)
@@ -1217,7 +1216,7 @@ export class AgentRuntime {
       }
     }
 
-    const critical = verdict.tier === 'hard' || Boolean(securityConfirmReason) || Boolean(llmTightenReason)
+    const critical = verdict.tier === 'hard' || Boolean(securityConfirmReason)
     let needsApproval: boolean
     if (critical) {
       // 硬红线：无论永久放行名单、许愿模式、自治等级如何设置，都必须人工逐次确认。
@@ -1259,7 +1258,7 @@ export class AgentRuntime {
         call,
         {
           name: tool.name,
-          approvalReason: securityConfirmReason || llmTightenReason || verdict.reason || tool.approvalReason,
+          approvalReason: securityConfirmReason || verdict.reason || tool.approvalReason,
           severity: critical ? 'critical' : 'normal',
           autoApprovable: verdict.autoApprovable
         },

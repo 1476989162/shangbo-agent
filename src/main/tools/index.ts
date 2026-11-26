@@ -1,7 +1,7 @@
 import { exec } from 'node:child_process'
-import { createReadStream, existsSync, readdirSync } from 'node:fs'
+import { createReadStream, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, open as openFile, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { app } from 'electron'
@@ -30,31 +30,83 @@ import { FocusLostError, ScreenLaneError, screenLane } from '../computer/screenL
 const execAsync = promisify(exec)
 
 /**
- * Windows 下 npm 全局 CLI 落盘都是 .cmd 包装（codex.cmd / claude.cmd / qoder.cmd / opencode.cmd）：
- * execFile 裸名直调在宿主 PATH 不全时报 spawn ENOENT，直调 .cmd 绝对路径则报 EINVAL，
- * 两条路都必须经 cmd.exe shell（2026-11-17 本机实证：裸名 ENOENT、绝对路径 EINVAL、shell 全通）。
- * 本函数按绝对路径候选逐个探测，命中返回绝对路径；兜底返回裸名但仍走 cmd.exe 自身的
- * PATH + PATHEXT 解析（与 run_command 同通道）。prompt 仍经 argv 数组传，不拼 shell 字符串。
+ * Windows 无 shell CLI 启动器（Ticket 3）：
+ * npm 全局 CLI 落盘都是 .cmd 包装，其内容是固定模板——解析 shim 拿到真实启动体
+ *   ① 同目录 node.exe + 入口 .js  ② 系统 node.exe + 入口 .js  ③ 真实 .exe
+ * 之后直接 execFile(nodeExe, [entryJs, ...args], { shell: false })，prompt 始终是 argv 元素，
+ * 从根上消除「含 & echo PWNED / %APPDATA% / \r\n 的 prompt 被 cmd.exe 二次解析」的注入面。
+ * 不再做任何 cmd 字符串转义——转义是补丁，无 shell 才是根因修复。
  */
-function resolveCliFile(name: 'codex' | 'claude' | 'qoder' | 'opencode'): {
+const CLI_NAMES = ['codex', 'claude', 'qoder', 'opencode'] as const
+type CliName = (typeof CLI_NAMES)[number]
+
+export interface ResolvedCli {
+  /** 直接 execFile 的可执行体（node.exe 或真实 .exe） */
   file: string
-  shell: 'cmd.exe' | undefined
-} {
-  if (process.platform !== 'win32') return { file: name, shell: undefined }
-  const candidates: string[] = []
-  if (name === 'qoder') candidates.push('C:\\Program Files\\Qoder IDE\\bin\\qoder.cmd')
-  // 修 opencode 时确认：postinstall 未跑时 bin 下是 479 字节占位脚本，真二进制靠 postinstall 下；
-  // 占位脚本 exit 1 会如实报错，不会再伪装成 ENOENT。
-  const npmDir = process.env.APPDATA ? `${process.env.APPDATA}\\npm` : null
-  if (npmDir) candidates.push(`${npmDir}\\${name}.cmd`)
-  for (const c of candidates) {
-    try {
-      if (existsSync(c)) return { file: c, shell: 'cmd.exe' }
-    } catch {
-      // 探测失败就试下一个，不挡裸名兜底
+  /** 真实 .exe 时不空：作为 argv[0] 前置的入口脚本 */
+  entryArg: string | null
+}
+
+function nodeExeCandidates(npmDir: string): string[] {
+  // 跨平台：Windows 找 node.exe，POSIX 找 node；npmDir 同目录优先
+  const out = [join(npmDir, 'node.exe'), join(npmDir, 'node')]
+  if (process.env.PATH) {
+    const sep = process.platform === 'win32' ? ';' : ':'
+    for (const dir of process.env.PATH.split(sep)) {
+      const trimmed = dir.trim()
+      if (trimmed) out.push(join(trimmed, 'node.exe'), join(trimmed, 'node'))
     }
   }
-  return { file: name, shell: 'cmd.exe' }
+  return out
+}
+
+/** 从 .cmd shim 内容解析真实启动体（供测试与启动器复用）。
+ *  - 真实 .exe（如 claude / opencode 的 npm shim）：直接返回 { file: exePath, entryArg: null }；
+ *  - node 入口脚本（.js / .cjs / .mjs，如 codex / qoder dispatcher）：返回 { file: nodeExe, entryArg: entryPath }；
+ *  - 找不到入口或 node 时返回 null，调用方走裸名兜底。
+ *  路径统一按正斜杠归一后再 resolve，Windows / Linux 行为一致。 */
+export function parseCmdShim(shimPath: string, npmDir: string): ResolvedCli | null {
+  let text: string
+  try {
+    text = readFileSync(shimPath, 'utf8')
+  } catch {
+    return null
+  }
+  // npm shim 模板："%dp0%\node_modules\...\bin\entry.(exe|js|cjs|mjs)"
+  const m = text.match(/node_modules[^"\r\n]+?\.(exe|js|cjs|mjs)/i)
+  if (!m) return null
+  const relEntry = m[0].replace(/\\/g, '/')
+  const entryPath = resolve(npmDir, relEntry)
+  if (!existsSync(entryPath)) return null
+  if (m[1].toLowerCase() === 'exe') {
+    return { file: entryPath, entryArg: null }
+  }
+  // 优先 shim 同目录 node，其次 PATH 中的 node
+  for (const node of nodeExeCandidates(npmDir)) {
+    if (existsSync(node)) return { file: node, entryArg: entryPath }
+  }
+  return null
+}
+
+export function resolveCliNoShell(name: CliName): ResolvedCli {
+  if (process.platform !== 'win32') return { file: name, entryArg: null }
+  const npmDir = process.env.APPDATA ? `${process.env.APPDATA}\\npm` : null
+  if (npmDir) {
+    // ① npm shim：解析出 node.exe + 入口 .js
+    const shim = `${npmDir}\\${name}.cmd`
+    if (existsSync(shim)) {
+      const parsed = parseCmdShim(shim, npmDir)
+      if (parsed) return parsed
+    }
+    // ② 真实 .exe（qoder 等独立安装位）
+    if (name === 'qoder') {
+      const qoderExe = 'C:\\Program Files\\Qoder IDE\\bin\\qoder.exe'
+      if (existsSync(qoderExe)) return { file: qoderExe, entryArg: null }
+    }
+  }
+  // ③ 兜底：系统 node（PATH 已含）直接当可执行体，名字当 argv 交给 OS PATH 解析；
+  //    仍无 shell——找不到时如实报 ENOENT，不再借 cmd.exe 兜底
+  return { file: name, entryArg: null }
 }
 
 interface CliExecOptions {
@@ -65,12 +117,15 @@ interface CliExecOptions {
   windowsHide?: boolean
 }
 
-/** execFile 的 CLI 专用包装：先解析可执行体，再透传全部 options（只追加 shell）。 */
-async function execCliFileAsync(name: 'codex' | 'claude' | 'qoder' | 'opencode', args: string[], options: CliExecOptions) {
+/** execFile 的 CLI 专用包装：无 shell 直调真实启动体，prompt 永远只是 argv 元素。 */
+async function execCliFileAsync(name: CliName, args: string[], options: CliExecOptions) {
   const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
   const execFileAsync = promisify(execFile)
-  const cli = resolveCliFile(name)
-  return execFileAsync(cli.file, args, { ...options, shell: cli.shell })
+  const cli = resolveCliNoShell(name)
+  const finalArgs = cli.entryArg ? [cli.entryArg, ...args] : args
+  // shell: false 是默认值，这里显式声明以固化契约：任何路径都不借 shell
+  return execFileAsync(cli.file, finalArgs, { ...options, shell: false })
 }
 
 /**
@@ -81,8 +136,6 @@ async function execCliFileAsync(name: 'codex' | 'claude' | 'qoder' | 'opencode',
  * 安全：prompt 经 argv 传，不拼 shell；cwd 强制走 resolveUserPath + 私有目录防护。
  */
 async function runQoderCli(args: string[], cwd: string | undefined, signal: AbortSignal): Promise<string> {
-  const { execFile } = await import('node:child_process')
-  const execFileAsync = promisify(execFile)
   try {
     const { stdout, stderr } = await execCliFileAsync('qoder', args, {
       cwd,
@@ -157,11 +210,9 @@ async function runCodexCli(
   model: string | undefined,
   signal: AbortSignal
 ): Promise<string> {
-  const { execFile } = await import('node:child_process')
   const { mkdtemp, readFile: readTmp, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
-  const execFileAsync = promisify(execFile)
   const dir = await mkdtemp(join(tmpdir(), 'shangbo-codex-'))
   const outFile = join(dir, 'last.txt')
   const args = ['exec', '--skip-git-repo-check', '-o', outFile]
@@ -239,8 +290,6 @@ const codexStatus: ToolDefinition = {
   parameters: { type: 'object', properties: {}, required: [] },
   requiresApproval: false,
   async execute(_input, context) {
-    const { execFile } = await import('node:child_process')
-    const execFileAsync = promisify(execFile)
     try {
       const [{ stdout: v }, { stdout: s }] = await Promise.all([
         execCliFileAsync('codex', ['--version'], { windowsHide: true, signal: context.signal }),
@@ -267,8 +316,6 @@ async function runClaudeCli(
   model: string | undefined,
   signal: AbortSignal
 ): Promise<string> {
-  const { execFile } = await import('node:child_process')
-  const execFileAsync = promisify(execFile)
   const args = ['-p', prompt, '--output-format', 'json']
   if (model) args.push('--model', model)
   try {
@@ -344,8 +391,6 @@ const claudeStatus: ToolDefinition = {
   parameters: { type: 'object', properties: {}, required: [] },
   requiresApproval: false,
   async execute(_input, context) {
-    const { execFile } = await import('node:child_process')
-    const execFileAsync = promisify(execFile)
     try {
       const { stdout } = await execCliFileAsync('claude', ['--version'], {
         windowsHide: true,

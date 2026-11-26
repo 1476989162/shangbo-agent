@@ -15,7 +15,8 @@ const storeMocks = vi.hoisted(() => ({
   getApiKey: vi.fn<(id: string) => string | null>(),
   adapterFor: vi.fn<(provider: Provider) => ProviderAdapter>(),
   getProvider: vi.fn<(id: string) => Provider | null>(),
-  listProviders: vi.fn<() => Provider[]>()
+  listProviders: vi.fn<() => Provider[]>(),
+  MAGPIE_BASE_URL: 'http://127.0.0.1:34254/v1'
 }))
 
 vi.mock('./store', () => ({
@@ -23,7 +24,8 @@ vi.mock('./store', () => ({
   getApiKey: storeMocks.getApiKey,
   adapterFor: storeMocks.adapterFor,
   getProvider: storeMocks.getProvider,
-  listProviders: storeMocks.listProviders
+  listProviders: storeMocks.listProviders,
+  MAGPIE_BASE_URL: storeMocks.MAGPIE_BASE_URL
 }))
 
 vi.mock('electron-log/main', () => ({

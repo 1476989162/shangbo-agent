@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isResponsesModel,
+  mapResponsesStopReason,
   normalizeSnapshotDelta,
   responsesUrl,
   toResponsesInput,
@@ -300,8 +301,7 @@ describe('Responses API Adapter', () => {
     }
   })
 
-  it('does not duplicate text when one frame carries both event aliases', async () => {
-    const sseLines = [
+  it('does not duplicate text when one frame carries both event aliases', async () => {    const sseLines = [
       'event: response.output_text.delta\n',
       'data: {"type":"response.text.delta","sequence_number":1,"delta":"同一帧"}\n\n',
       'event: response.output_text.delta\n',
@@ -337,3 +337,131 @@ describe('Responses API Adapter', () => {
     }
   })
 })
+
+describe('Responses 结束状态映射与序列号窗口 (Ticket 4)', () => {
+  it('mapResponsesStopReason：completed→stop，incomplete+max_output_tokens→max_tokens', () => {
+    expect(mapResponsesStopReason('completed', undefined)).toBe('stop');
+    expect(mapResponsesStopReason('incomplete', 'max_output_tokens')).toBe('max_tokens');
+    // 其他 incomplete 原因保持原样透传（不断言为 stop，避免误判）
+    expect(mapResponsesStopReason('incomplete', 'content_filter')).toBe('incomplete');
+    expect(mapResponsesStopReason('failed', undefined)).toBe('failed');
+    expect(mapResponsesStopReason(undefined, undefined)).toBe('stop');
+  });
+
+  it('流式 incomplete + max_output_tokens 产出 stop=max_tokens（打通自动续写）', async () => {
+    const sseLines = [
+      'event: response.output_text.delta\n',
+      'data: {"type":"response.output_text.delta","delta":"半截"}\n\n',
+      'event: response.completed\n',
+      'data: {"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":5}}}\n\n',
+      'data: [DONE]\n\n'
+    ];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const line of sseLines) controller.enqueue(encoder.encode(line));
+        controller.close();
+      }
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    try {
+      const chunks: any[] = [];
+      const req: CompletionRequest = {
+        model: 'muse-spark-1.3-contributor',
+        messages: [{ role: 'user', blocks: [{ type: 'text', text: 'hi' }] }]
+      };
+      for await (const chunk of openAiResponsesAdapter.stream(req, {
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'test-key',
+        signal: new AbortController().signal
+      })) {
+        chunks.push(chunk);
+      }
+      expect(chunks.filter((c) => c.type === 'text').map((c) => c.text).join('')).toBe('半截');
+      expect(chunks[chunks.length - 1]).toEqual({ type: 'stop', reason: 'max_tokens' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('非流式 incomplete 同样映射为 max_tokens（与流式对齐）', async () => {
+    const payload = {
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        { type: 'message', content: [{ type: 'output_text', text: '半截正文' }] }
+      ],
+      usage: { input_tokens: 8, output_tokens: 4 }
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+    try {
+      const chunks: any[] = [];
+      const req: CompletionRequest = {
+        model: 'muse-spark-1.3-contributor',
+        messages: [{ role: 'user', blocks: [{ type: 'text', text: 'hi' }] }]
+      };
+      for await (const chunk of openAiResponsesAdapter.stream(req, {
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'test-key',
+        signal: new AbortController().signal
+      })) {
+        chunks.push(chunk);
+      }
+      expect(chunks.filter((c) => c.type === 'text').map((c) => c.text).join('')).toBe('半截正文');
+      expect(chunks[chunks.length - 1]).toEqual({ type: 'stop', reason: 'max_tokens' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('单调递增 600 个序号全部通过；旧序号被逐出窗口后重放不再去重，最新仍去重', async () => {
+    const sseLines: string[] = [];
+    for (let i = 1; i <= 600; i++) {
+      sseLines.push('event: response.output_text.delta\n');
+      sseLines.push(
+        'data: {"type":"response.output_text.delta","sequence_number":' + i + ',"delta":"k' + i + ' "}\n\n'
+      );
+    }
+    // 窗口只保留最近 256 个：#1 早已被逐出，重放会再次产出；#600 仍在窗口内，重放被吞掉
+    sseLines.push('event: response.output_text.delta\n');
+    sseLines.push('data: {"type":"response.output_text.delta","sequence_number":1,"delta":"OLD"}\n\n');
+    sseLines.push('event: response.output_text.delta\n');
+    sseLines.push('data: {"type":"response.output_text.delta","sequence_number":600,"delta":"NEW"}\n\n');
+    sseLines.push('data: [DONE]\n\n');
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const line of sseLines) controller.enqueue(encoder.encode(line));
+        controller.close();
+      }
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    try {
+      const text: string[] = [];
+      const req: CompletionRequest = {
+        model: 'muse-spark-1.3-contributor',
+        messages: [{ role: 'user', blocks: [{ type: 'text', text: 'hi' }] }]
+      };
+      for await (const chunk of openAiResponsesAdapter.stream(req, {
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        apiKey: 'test-key',
+        signal: new AbortController().signal
+      })) {
+        if (chunk.type === 'text') text.push(chunk.text);
+      }
+      // 600 个单调序号全部通过（无丢字）+ 旧序号重放再次产出 + 最新序号重放被去重
+      const kTexts = text.filter((t) => /^k\d+ $/.test(t))
+      expect(kTexts.length).toBe(600);
+      expect(text).toContain('OLD');
+      expect(text).not.toContain('NEW');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

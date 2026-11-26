@@ -37,6 +37,18 @@ export interface AcquireOptions {
   signal?: AbortSignal
   /** 抢占后重新入队时保持原入队时刻，避免被后来者插队。 */
   enqueueAt?: number
+  /**
+   * 已被抢占次数（网关在重试上下文里维护并透传）。
+   * 新槽位继承该计数，tryPreempt 的 `< 2` 上限才能真正生效；
+   * 否则每次重入都从 0 开始，抢占上限形同虚设。
+   */
+  preemptionCount?: number
+  /**
+   * 显式声明是否为本机推理引擎（覆盖自动判定）。
+   * 本机 Magpie 云代理（127.0.0.1:34254，背后是云端模型）必须传 false，
+   * 否则会被误判成本地引擎、并发锁死为 1。
+   */
+  isLocalEngine?: boolean
 }
 
 export interface ScheduleSlot {
@@ -126,6 +138,8 @@ interface WorkItem {
   priority: WorkPriority
   preemptible: boolean
   enqueueAt: number
+  /** 已被抢占次数：重入 acquire 时由调用方透传，保证跨重试累积。 */
+  preemptionCount: number
   resolve: (slot: SlotImpl) => void
   reject: (error: unknown) => void
   cleanupSignal?: () => void
@@ -137,9 +151,11 @@ class SlotImpl implements ScheduleSlot {
   emitted = false
   released = false
   preempted = false
-  preemptionCount = 0
+  preemptionCount: number
 
-  constructor(readonly item: WorkItem) {}
+  constructor(readonly item: WorkItem) {
+    this.preemptionCount = item.preemptionCount
+  }
 
   get preemptSignal(): AbortSignal {
     return this.controller.signal
@@ -172,10 +188,10 @@ class ModelScheduler {
   private endpoints = new Map<string, EndpointState>()
   private nextId = 1
 
-  private endpoint(providerId: string, baseUrl?: string): EndpointState {
+  private endpoint(providerId: string, baseUrl?: string, isLocalEngine?: boolean): EndpointState {
     let state = this.endpoints.get(providerId)
     if (!state) {
-      const local = isLocalEndpoint(baseUrl)
+      const local = isLocalEngine ?? isLocalEndpoint(baseUrl)
       const hardLimit = local ? 1 : 2
       state = {
         hardLimit,
@@ -194,7 +210,7 @@ class ModelScheduler {
   }
 
   acquire(options: AcquireOptions): Promise<ScheduleSlot> {
-    const state = this.endpoint(options.providerId, options.baseUrl)
+    const state = this.endpoint(options.providerId, options.baseUrl, options.isLocalEngine)
     const priority = options.priority ?? 'chat'
     return new Promise<ScheduleSlot>((resolve, reject) => {
       if (options.signal?.aborted) {
@@ -206,6 +222,7 @@ class ModelScheduler {
         priority,
         preemptible: options.preemptible ?? false,
         enqueueAt: options.enqueueAt ?? Date.now(),
+        preemptionCount: options.preemptionCount ?? 0,
         resolve,
         reject,
         settled: false

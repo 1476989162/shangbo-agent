@@ -29,32 +29,37 @@ describe('记忆 Note（保 Prompt Cache 注入）', () => {
     expect(getWikiIndex()[0].title).toBe('Acme')
   })
 
-  it('附加到首条 user 消息文本块末尾，不修改原数组，且幂等', () => {
+  it('附加到末条（当前）user 消息文本块末尾，不修改原数组，且幂等', () => {
     const messages: LLMMessage[] = [
       { role: 'user', blocks: [{ type: 'text', text: '你好' }] },
-      { role: 'assistant', blocks: [{ type: 'text', text: '在' }] }
+      { role: 'assistant', blocks: [{ type: 'text', text: '在' }] },
+      { role: 'user', blocks: [{ type: 'text', text: '继续' }] }
     ]
     const note = buildMemoryNote({ coworkMemories: ['偏好：简明'], wikiIndex: [] })
     const next = attachMemoryNote(messages, note)
 
     expect(next).not.toBe(messages)
+    // 首条 user 消息保持原样：记忆挂在末条，不污染历史前缀
     expect(messages[0].blocks[0].type === 'text' && messages[0].blocks[0].text).toBe('你好')
-    const first = next[0].blocks[0]
-    expect(first.type === 'text' && first.text.startsWith('你好')).toBe(true)
-    expect(first.type === 'text' && first.text.includes(MEMORY_CONTEXT_OPEN)).toBe(true)
+    const last = next[next.length - 1].blocks[0]
+    expect(last.type === 'text' && last.text.startsWith('继续')).toBe(true)
+    expect(last.type === 'text' && last.text.includes(MEMORY_CONTEXT_OPEN)).toBe(true)
     expect(next[1]).toBe(messages[1])
 
     const again = attachMemoryNote(next, note)
-    const text = again[0].blocks[0]
+    const text = again[again.length - 1].blocks[0]
     expect(text.type === 'text' && text.text.split(MEMORY_CONTEXT_OPEN).length - 1).toBe(1)
   })
 
-  it('首条 user 没有文本块时追加一个文本块；空 note 直接返回原数组', () => {
+  it('末条 user 没有文本块时追加一个文本块；空 note 直接返回原数组', () => {
     const messages: LLMMessage[] = [
+      { role: 'user', blocks: [{ type: 'text', text: '先问' }] },
       { role: 'user', blocks: [{ type: 'image', mimeType: 'image/png', dataUrl: 'data:image/png;base64,x' }] }
     ]
     const next = attachMemoryNote(messages, buildMemoryNote({ lessons: ['经验'], wikiIndex: [] }))
-    expect(next[0].blocks.length).toBe(2)
+    expect(next[next.length - 1].blocks.length).toBe(2)
+    // 首条保持不动
+    expect(next[0].blocks.length).toBe(1)
     expect(attachMemoryNote(messages, '')).toBe(messages)
   })
 })

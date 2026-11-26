@@ -42,6 +42,18 @@ function parseArgs(raw: string): unknown {
 }
 
 /**
+ * Responses 结束状态 → 网关统一 stop 原因。
+ * status=completed → 'stop'；status=incomplete + incomplete_reason=max_output_tokens
+ * 必须映射为 'max_tokens'——agentLoop 靠它触发思考截断续写，否则 Responses 系模型
+ * 撞上限后永远续不上（之前直接透传原文 'incomplete'，续写分支认不出来）。
+ */
+export function mapResponsesStopReason(status: unknown, incompleteReason: unknown): string {
+  if (status === 'completed') return 'stop'
+  if (status === 'incomplete' && incompleteReason === 'max_output_tokens') return 'max_tokens'
+  return typeof status === 'string' && status ? status : 'stop'
+}
+
+/**
  * 同时兼容“真增量”和“累计快照”两种流式语义。
  *
  * - `delta` 是已输出内容的后缀：返回新增部分；
@@ -92,6 +104,19 @@ export function isResponsesModel(model: string, baseUrl?: string): boolean {
   }
   if (baseUrl?.replace(/\/+$/, '').endsWith('/responses')) return true
   return false
+}
+
+/**
+ * 序列号去重集合的有界窗口裁剪：只保留最近 256 个。
+ * Set 按插入有序，直接删掉最旧的；长连接单调流下集合不再无限增长。
+ */
+function pruneSequenceWindow(seen: Set<number>): void {
+  if (seen.size > 512) {
+    const ordered = [...seen].sort((a, b) => a - b)
+    for (let i = 0; i < ordered.length - 256; i++) {
+      seen.delete(ordered[i])
+    }
+  }
 }
 
 /**
@@ -274,7 +299,7 @@ export const openAiResponsesAdapter: ProviderAdapter = {
           }
         }
       }
-      yield { type: 'stop', reason: payload.status === 'completed' ? 'stop' : (payload.status ?? 'stop') }
+      yield { type: 'stop', reason: mapResponsesStopReason(payload.status, payload.incomplete_details?.reason) }
       return
     }
 
@@ -290,9 +315,9 @@ export const openAiResponsesAdapter: ProviderAdapter = {
     let reasoningSnapshot = ''
     /** 已经产出的完整正文，用于最终兜底。 */
     let emittedText = ''
-    /** 已处理的事件序号：重连/代理重发时同一 sequence_number 不再追加。 */
+    /** 已处理的事件序号：重连/代理重发时同一 sequence_number 不再追加。
+     * 有界窗口由下方清理逻辑维持（只保留最近 256 个）。 */
     const seenSequenceNumbers = new Set<number>()
-    let lastSequenceNumber: number | null = null
     /** 同一 sequence_number 的文本通道只能处理一次（防 payload.type 与 event.event 双写）。 */
     const emittedTextForSequence = new Set<number>()
 
@@ -321,16 +346,9 @@ export const openAiResponsesAdapter: ProviderAdapter = {
       if (sequenceNumber !== null) {
         if (seenSequenceNumbers.has(sequenceNumber)) continue
         seenSequenceNumbers.add(sequenceNumber)
-        // 防止长连接无限增长；序号单调递增时只保留最近窗口。
-        if (
-          lastSequenceNumber !== null &&
-          sequenceNumber < lastSequenceNumber &&
-          seenSequenceNumbers.size > 256
-        ) {
-          seenSequenceNumbers.clear()
-          seenSequenceNumbers.add(sequenceNumber)
-        }
-        lastSequenceNumber = sequenceNumber
+        // 有界窗口：正常单调递增流下只保留最近 256 个序号；
+        // 旧逻辑只在“乱序回退且超 256”时才清一次，单调流下集合无限增长。
+        pruneSequenceWindow(seenSequenceNumbers)
       }
       if (
         sequenceNumber !== null &&
@@ -343,7 +361,10 @@ export const openAiResponsesAdapter: ProviderAdapter = {
       // 1. 文本内容增量
       const isTextDelta = isTextDeltaEvent(eventType)
       if (isTextDelta) {
-        if (sequenceNumber !== null) emittedTextForSequence.add(sequenceNumber)
+        if (sequenceNumber !== null) {
+          emittedTextForSequence.add(sequenceNumber)
+          pruneSequenceWindow(emittedTextForSequence)
+        }
         const delta = typeof payload.delta === 'string' ? payload.delta : payload.text
         if (delta) {
           const next = normalizeSnapshotDelta(delta, textSnapshot)
@@ -461,7 +482,9 @@ export const openAiResponsesAdapter: ProviderAdapter = {
         }
         const respStatus = payload.response?.status || payload.status
         if (respStatus) {
-          stopReason = respStatus === 'completed' ? 'stop' : respStatus
+          const incompleteReason =
+            payload.response?.incomplete_details?.reason ?? payload.incomplete_details?.reason
+          stopReason = mapResponsesStopReason(respStatus, incompleteReason)
         }
       }
     }

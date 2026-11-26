@@ -145,6 +145,12 @@ function escapeLike(term: string): string {
   return term.replace(/[\\%_]/g, '\\$&')
 }
 
+function escapeFtsPhrase(term: string): string | null {
+  // FTS5 短语查询：双引号包裹，内部双引号加倍；至少含一个字母或数字才有意义
+  if (!/[\p{L}\p{N}]/u.test(term)) return null;
+  return `"${term.replace(/"/g, '""')}"`;
+}
+
 /** SQL 侧先过滤，再在内存里截取命中词前后 120 字符；单表上限 200 行，绝不拖慢主路径。 */
 export function searchOriginalMessages(queries: string[], maxRows = 200): OriginalMessageSnippet[] {
   const terms = [...new Set(
@@ -155,19 +161,42 @@ export function searchOriginalMessages(queries: string[], maxRows = 200): Origin
   )].slice(0, 24)
   if (terms.length === 0) return []
 
-  const clause = terms.map(() => `LOWER(blocks) LIKE ? ESCAPE '\\'`).join(' OR ')
-  const params = terms.map((t) => `%${escapeLike(t)}%`)
+  // FTS 短语（trigram 索引只含纯文本）+ 短词 LIKE 回退，双路 OR 召回
+  const ftsTerms: string[] = []
+  const likeTerms: string[] = []
+  for (const term of terms) {
+    const phrase = escapeFtsPhrase(term)
+    if (phrase !== null && [...term].length >= 3) ftsTerms.push(phrase)
+    else likeTerms.push(term)
+  }
+
+  const branches: string[] = []
+  const params: unknown[] = []
+  if (ftsTerms.length > 0) {
+    // MATCH 必须独占一个 UNION 分支才能作为 FTS 驱动约束：
+    // 与同表的 LIKE 直接 OR 会报 "unable to use function MATCH"
+    branches.push('SELECT rowid AS rid FROM messages_fts WHERE messages_fts MATCH ?')
+    params.push(ftsTerms.join(' OR '))
+  }
+  for (const term of likeTerms) {
+    branches.push("SELECT rowid AS rid FROM messages_fts WHERE messages_fts.plain_text LIKE ? ESCAPE '\\'")
+    params.push(`%${escapeLike(term)}%`)
+  }
+
   const rows = getDb()
     .prepare(
-      `SELECT id, conversation_id, role, blocks, created_at FROM messages
-       WHERE ${clause} ORDER BY created_at DESC LIMIT ?`
+      `SELECT m.id AS id, m.conversation_id AS conversationId, m.role AS role,
+              m.blocks AS blocks, m.created_at AS createdAt
+       FROM (${branches.join(' UNION ')}) AS hit
+       JOIN messages AS m ON m.rowid = hit.rid
+       ORDER BY m.created_at DESC LIMIT ?`
     )
     .all(...params, maxRows) as {
     id: string
-    conversation_id: string
+    conversationId: string
     role: string
     blocks: string
-    created_at: number
+    createdAt: number
   }[]
 
   const out: OriginalMessageSnippet[] = []
@@ -182,10 +211,10 @@ export function searchOriginalMessages(queries: string[], maxRows = 200): Origin
     const text = `${start > 0 ? '…' : ''}${plain.slice(start, end)}${end < plain.length ? '…' : ''}`
     out.push({
       messageId: row.id,
-      conversationId: row.conversation_id,
+      conversationId: row.conversationId,
       role: row.role,
       text,
-      createdAt: row.created_at,
+      createdAt: row.createdAt,
       matchedTerms: matched
     })
   }
@@ -244,9 +273,15 @@ export function searchKnowledge(params: WikiSearchParams): {
   }
 }
 
-/** 后台异步提取入口：从一轮对话里提结构化候选并落库，返回写入的实体数。 */
-export function extractWikiAndMemory(userText: string, assistantText: string): number {
-  const candidates = extractWikiCandidates(`${userText}\n${assistantText}`)
+/** 后台异步提取入口：提取一批攒满的回合（默认 5 轮），返回写入的实体数。 */
+export function extractWikiAndMemoryBatch(
+  turns: Array<{ userText: string; assistantText: string }>
+): number {
+  const nonEmpty = turns.filter((t) => t.userText.trim() || t.assistantText.trim())
+  if (nonEmpty.length === 0) return 0
+  const candidates = extractWikiCandidates(
+    nonEmpty.map((t) => `${t.userText}\n${t.assistantText}`.trim()).join('\n\n')
+  )
   for (const c of candidates) {
     upsertWikiPage({
       kind: c.kind,
@@ -258,4 +293,9 @@ export function extractWikiAndMemory(userText: string, assistantText: string): n
   }
   if (candidates.length > 0) refreshWikiIndexCache()
   return candidates.length
+}
+
+/** 后台异步提取入口：从一轮对话里提结构化候选并落库，返回写入的实体数。 */
+export function extractWikiAndMemory(userText: string, assistantText: string): number {
+  return extractWikiAndMemoryBatch([{ userText, assistantText }])
 }

@@ -12,10 +12,10 @@ describe('fastClassifyAction 规则通道', () => {
     expect(fastClassifyAction(verdict('hard'))?.decision).toBe('ask')
   })
 
-  it('普通命令与子目录删除不因 soft 或删除动词再弹审批', () => {
+  it('普通命令直接放行；soft 返回 null 让出给可选 LLM 复核（开关关闭时走常规链，不强制弹窗）', () => {
     expect(fastClassifyAction(verdict('auto'), 'rmdir /s /q build')?.decision).toBe('allow')
-    expect(fastClassifyAction(verdict('soft'), 'rmdir /s /q ../outside')?.decision).toBe('allow')
-    expect(fastClassifyAction(verdict('soft'), 'python -X utf8 tools\\\\probe8se.py')?.decision).toBe('allow')
+    expect(fastClassifyAction(verdict('soft'), 'rmdir /s /q ../outside')).toBeNull()
+    expect(fastClassifyAction(verdict('soft'), 'python -X utf8 tools\\\\probe8se.py')).toBeNull()
   })
 })
 

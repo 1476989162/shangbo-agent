@@ -62,21 +62,29 @@ static char *json_dup_string_val(const char *json, const char *key);
 static AutonomyLevel parse_autonomy_level(const char *str);
 static char *json_escape_to_str(const char *s);
 
-static void rpc_write_response(const char *response, void *lock) {
+static void rpc_output_lock(void *lock) {
 #ifdef _WIN32
     EnterCriticalSection((CRITICAL_SECTION *)lock);
 #else
     pthread_mutex_lock((pthread_mutex_t *)lock);
 #endif
-    if (response) {
-        fputs(response, stdout);
-        fflush(stdout);
-    }
+}
+
+static void rpc_output_unlock(void *lock) {
 #ifdef _WIN32
     LeaveCriticalSection((CRITICAL_SECTION *)lock);
 #else
     pthread_mutex_unlock((pthread_mutex_t *)lock);
 #endif
+}
+
+static void rpc_write_response(const char *response, void *lock) {
+    rpc_output_lock(lock);
+    if (response) {
+        fputs(response, stdout);
+        fflush(stdout);
+    }
+    rpc_output_unlock(lock);
 }
 
 static void rpc_task_execute(void *argument) {
@@ -93,9 +101,12 @@ static void rpc_task_execute(void *argument) {
     SafetyContext context;
     memset(&context, 0, sizeof(context));
     if (workspace) strncpy(context.working_directory, workspace, sizeof(context.working_directory) - 1);
+    /* TLS 线程副本：工作线程必须显式设置本线程副本，否则异步线程私有目录防护完全失效。 */
     if (user_data_dir && *user_data_dir) {
         strncpy(context.user_data_dir, user_data_dir, sizeof(context.user_data_dir) - 1);
         safety_set_user_data_dir(user_data_dir);
+    } else {
+        safety_set_user_data_dir("");
     }
     context.autonomy = parse_autonomy_level(autonomy);
     context.approved = approved;
@@ -104,6 +115,15 @@ static void rpc_task_execute(void *argument) {
     char *esc_tool = json_escape_to_str(tool ? tool : "run_command");
     char *esc_out = json_escape_to_str(result.output ? result.output : "");
     char *esc_err = json_escape_to_str(result.error_message);
+    if (!esc_tool || !esc_out || !esc_err) {
+        /* Ticket 3：内存分配失败也必须回 JSON 错误响应，不能静默丢帧 */
+        char oom_response[160];
+        snprintf(oom_response, sizeof(oom_response),
+                 "{\"id\":%d,\"success\":false,\"error\":\"Out of memory building response\"}\n", id);
+        rpc_write_response(oom_response, task->output_lock);
+        free(esc_tool); free(esc_out); free(esc_err);
+        esc_tool = NULL; esc_out = NULL; esc_err = NULL;
+    }
     if (esc_tool && esc_out && esc_err) {
         size_t resp_cap = strlen(esc_tool) + strlen(esc_out) + strlen(esc_err) + 128;
         char *response = (char *)malloc(resp_cap);
@@ -113,6 +133,11 @@ static void rpc_task_execute(void *argument) {
                      id, esc_tool, result.success ? "true" : "false", esc_out, esc_err);
             rpc_write_response(response, task->output_lock);
             free(response);
+        } else {
+            char oom_response[160];
+            snprintf(oom_response, sizeof(oom_response),
+                     "{\"id\":%d,\"success\":false,\"error\":\"Out of memory building response\"}\n", id);
+            rpc_write_response(oom_response, task->output_lock);
         }
     }
     free(esc_tool);
@@ -121,6 +146,8 @@ static void rpc_task_execute(void *argument) {
 
     tool_result_free(&result);
     free(tool); free(command); free(workspace); free(autonomy); free(user_data_dir);
+    /* 任务结束清空本线程 TLS 副本：线程复用时不把上个请求的私有目录带给下个任务 */
+    safety_set_user_data_dir("");
     /* The owner frees cancellation state only after joining this worker. */
     rpc_lock_tasks();
     task->completed = true;
@@ -779,6 +806,7 @@ void handle_json_rpc_line(const char *line, FILE *out) {
         bool overwrite = json_get_bool_val(line, "overwrite", true);
         bool approved = json_get_bool_val(line, "approved", false);
 
+        /* 主线程串行区：保留一次性同步（run_rpc_loop 已整体加锁，无并发写） */
         if (user_data_dir && *user_data_dir) safety_set_user_data_dir(user_data_dir);
         const char *workspace = (ws && *ws) ? ws : ".";
         ToolResult res;
@@ -1044,8 +1072,10 @@ void run_rpc_loop(void) {
             }
         }
         free(action);
+        rpc_output_lock(lock);
         handle_json_rpc_line(line, stdout);
         fflush(stdout);
+        rpc_output_unlock(lock);
         free(line);
     }
     rpc_shutdown_tasks();

@@ -224,9 +224,22 @@ export const anthropicAdapter: ProviderAdapter = {
       }
 
       if (payload.type === 'message_start') {
-        promptTokens = payload.message?.usage?.input_tokens ?? 0
-        cacheReadTokens = payload.message?.usage?.cache_read_input_tokens
-        cacheWriteTokens = payload.message?.usage?.cache_creation_input_tokens
+        // 总输入口径：input_tokens 不含缓存部分，必须加上两类缓存 token 才是完整输入规模；
+        // cacheReadTokens / cacheWriteTokens 字段保持原样，供缓存命中率统计使用。
+        const startUsage = payload.message?.usage ?? {}
+        const baseInput =
+          typeof startUsage.input_tokens === 'number' ? startUsage.input_tokens : 0
+        const startCacheRead =
+          typeof startUsage.cache_read_input_tokens === 'number'
+            ? startUsage.cache_read_input_tokens
+            : undefined
+        const startCacheWrite =
+          typeof startUsage.cache_creation_input_tokens === 'number'
+            ? startUsage.cache_creation_input_tokens
+            : undefined
+        promptTokens = baseInput + (startCacheRead ?? 0) + (startCacheWrite ?? 0)
+        cacheReadTokens = startCacheRead
+        cacheWriteTokens = startCacheWrite
         completionTokens = payload.message?.usage?.output_tokens ?? 0
         sawUsage = true
         continue

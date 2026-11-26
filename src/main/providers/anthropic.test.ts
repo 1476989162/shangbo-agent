@@ -99,7 +99,7 @@ describe('Anthropic 提示词缓存', () => {
     expect(body.system).toEqual([{ type: 'text', text: '你是助手' }])
   })
 
-  it('解析 cache_creation_input_tokens 到 cacheWriteTokens', async () => {
+  it('总输入口径明确计入两类缓存 token（字段保持独立不破坏）', async () => {
     mockFetch(
       sse([
         {
@@ -120,14 +120,30 @@ describe('Anthropic 提示词缓存', () => {
       anthropicAdapter.stream(baseRequest, ctx())
     )
     const usage = chunks.find((chunk) => chunk.type === 'usage')
+    // 总输入 = 非缓存 100 + 读缓存 40 + 写缓存 60；缓存字段原样保留
     expect(usage).toEqual({
       type: 'usage',
       usage: {
-        promptTokens: 100,
+        promptTokens: 200,
         completionTokens: 5,
         cacheReadTokens: 40,
         cacheWriteTokens: 60
       }
+    })
+  })
+
+  it('无缓存时总输入即 input_tokens', async () => {
+    mockFetch(
+      sse([
+        { type: 'message_start', message: { usage: { input_tokens: 77, output_tokens: 0 } } },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } }
+      ])
+    )
+    const chunks = await collect(anthropicAdapter.stream(baseRequest, ctx()))
+    const usage = chunks.find((chunk) => chunk.type === 'usage')
+    expect(usage).toEqual({
+      type: 'usage',
+      usage: { promptTokens: 77, completionTokens: 3 }
     })
   })
 })

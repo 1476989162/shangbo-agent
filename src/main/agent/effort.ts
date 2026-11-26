@@ -36,7 +36,9 @@ export function isSenseNova(model: string): boolean {
 }
 
 export function isOpenAIReasoning(model: string): boolean {
-  return /(o1|o3|o4|gpt-5)/i.test(model)
+  // 词边界匹配：o1/o3/o4/gpt-5 前后必须是分隔符或串边界，
+  // 避免误伤 pro3 / turbo4 / audio1 这类普通模型名。
+  return /(?:^|[/:_-])(o1|o3|o4|gpt-5)(?:$|[/:._-])/i.test(model)
 }
 
 export function isClaudeReasoning(model: string): boolean {
@@ -116,28 +118,26 @@ export function resolveEffort(model: string, effort: string): ResolvedEffort {
     }
   }
 
+  // Claude / Qwen / Gemini 注意：三家适配器当前不下发 reasoningEffort
+  // （Anthropic thinking 需要 budget_tokens 形态、Qwen/Gemini 走各自兼容字段，
+  //  未经网关验证不虚构参数）。这里只保留各档的 maxTokens 与轻提示，
+  //  reasoningEffort 保持 undefined，避免保留“算出却没人消费”的虚假配置。
   if (isClaudeReasoning(model)) {
-    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : level === 'max' ? 'max' : 'high'
     return {
-      reasoningEffort: mapped,
       maxTokens: 64_000,
       hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
     }
   }
 
   if (isQwenReasoning(model)) {
-    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : level === 'max' ? 'max' : 'high'
     return {
-      reasoningEffort: mapped,
       maxTokens: 32_768,
       hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
     }
   }
 
   if (isGeminiReasoning(model)) {
-    const mapped = level === 'minimal' || level === 'low' ? 'low' : level === 'medium' ? 'medium' : 'high'
     return {
-      reasoningEffort: mapped,
       maxTokens: 65_536,
       hint: level === 'minimal' ? '\n\n【极速】直接给核心结果。' : ''
     }

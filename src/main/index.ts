@@ -12,6 +12,7 @@ import { pythonBridge } from './py/bridge'
 import { handleImageProtocol, registerImageProtocol } from './storage/images'
 import { autonomousScheduler } from './autonomous/scheduler'
 import { settleOrphanAutonomousRuns } from './autonomous/store'
+import { settleOrphanDelegatedTasks } from './agent/taskDelegation'
 import { mcpManager } from './mcp/manager'
 import { cCoreBridge } from './agent/cCoreBridge'
 // 固定应用名，让开发态与打包态落在同一个 userData 目录。
@@ -46,6 +47,14 @@ if (!gotLock) {
     getDb()
     settleOrphanStreamingMessages()
     settleOrphanAutonomousRuns()
+    try {
+      const settled = settleOrphanDelegatedTasks()
+      if (settled.failed + settled.canceled > 0) {
+        log.info(`[app] 已收敛孤儿分身任务：${settled.failed} 个失败，${settled.canceled} 个取消`)
+      }
+    } catch (error) {
+      log.warn('[app] 孤儿分身收敛失败（不影响启动）', error)
+    }
     ensureDefaultProviders()
 
     registerIpcHandlers()

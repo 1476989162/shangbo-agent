@@ -80,6 +80,8 @@ vi.mock('../db/repo', () => ({
 }))
 
 vi.mock('../providers/gateway', () => ({
+  // agentLoop 统一走网关真源判定推理模型；单测默认非推理模型
+  isReasoningModel: () => false,
   resolveFirstByteTimeoutMs: () => 180_000,
   streamWithFallback: async function* () {
     streamCalls++

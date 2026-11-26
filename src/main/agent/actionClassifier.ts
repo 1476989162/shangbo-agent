@@ -18,14 +18,17 @@ export interface ActionReview {
   via: 'rule' | 'llm'
 }
 
-/** 快速通道：不需要 LLM 也能判的直接出结果，需要语义时返回 null 让调用方决定是否调 LLM。 */
+/** 快速通道：blocked/hard/auto 直接出结果；soft 返回 null，把决定权交给
+ * 可选的 LLM 提示性复核（runtime.ts:1203，仅开关打开时触发，不拦单，只记日志/事件）。
+ * 开关关闭时 soft 走常规审批链（v0.9.5 低打断口径：soft 本身不强制弹窗）。 */
 export function fastClassifyAction(verdict: SafetyVerdict, command?: string): ActionReview | null {
   if (verdict.tier === 'blocked') return { decision: 'block', reason: verdict.reason ?? '命中安全红线。', via: 'rule' }
   if (verdict.tier === 'hard') return { decision: 'ask', reason: verdict.reason ?? '硬红线需人工确认。', via: 'rule' }
   void command
   if (verdict.tier === 'auto') return { decision: 'allow', reason: verdict.reason ?? '常规操作由 Agent 自主决定。', via: 'rule' }
-  // soft 只表示提示，不再默认要求人工确认；LLM 失败也不能把普通动作升级为审批。
-  return { decision: 'allow', reason: verdict.reason ?? '常规操作由 Agent 自主决定。', via: 'rule' }
+  // soft 只表示提示，不直接出结果：返回 null 让调用方决定是否走 LLM 提示性复核；
+  // 开关关闭时走常规审批链（不强制弹窗），LLM 失败也不得把普通动作升级为审批。
+  return null
 }
 
 const MAX_INPUT_CHARS = 1000

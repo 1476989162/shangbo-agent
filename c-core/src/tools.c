@@ -188,12 +188,23 @@ static char *truncate_output(const char *text) {
     return out;
 }
 
+/* Ticket 3：读取上限 8 MiB——malloc 前先挡，防止超大文件把内存打爆 */
+#define MAX_READ_ENTIRE_BYTES (8 * 1024 * 1024)
+
 static char *read_entire_file(const char *path, size_t *out_size) {
     FILE *f = open_file_utf8(path, "rb");
     if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    /* 64 位长度 API：fseeko/ftello（MSVC 用 _fseeki64/_ftelli64） */
+#ifdef _WIN32
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long long sz = _ftelli64(f);
+    if (sz < 0 || _fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+#else
+    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    off_t sz = ftello(f);
+    if (sz < 0 || fseeko(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+#endif
+    if (sz > (long long)MAX_READ_ENTIRE_BYTES) { fclose(f); return NULL; }
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
     size_t got = fread(buf, 1, (size_t)sz, f);
@@ -587,6 +598,10 @@ ToolResult tool_list_directory(const char *path, int max_depth, const char *work
 #endif
 
 ToolResult tool_search_files(const char *path, const char *query, const char *workspace) {
+    /* Ticket 3：遗留 shell 通道退役。旧实现把 query/dir 拼进 findstr/grep 命令行，
+     * query 有元字符校验但 dir 没有（引号/& 可破坏命令结构），且 native_run_process
+     * 经 cmd.exe 解析。这里保留入口校验（元字符/私有数据拒绝文案不变），
+     * 校验通过后委托无 shell 的 tool_search_files_ex（原生目录遍历）。 */
     ToolResult res; memset(&res, 0, sizeof(res));
     if (!query || !*query) { snprintf(res.error_message, sizeof(res.error_message), "Search query cannot be empty."); return res; }
     if (touches_private_data(query) || (path && touches_private_data(path)) || (workspace && *workspace && touches_private_data(workspace))) {
@@ -594,28 +609,8 @@ ToolResult tool_search_files(const char *path, const char *query, const char *wo
         trim_incomplete_utf8(res.error_message);
         return res;
     }
-    const char *dir = path && *path ? path : (workspace && *workspace ? workspace : ".");
     for (const char *p = query; *p; ++p) if (strchr("&|;`$<>^%\"\n\r", *p)) { snprintf(res.error_message, sizeof(res.error_message), "Invalid search query: shell metacharacters not allowed."); return res; }
-    NativeProcessResult process;
-#ifdef _WIN32
-    char *command = (char *)malloc(strlen(dir) + strlen(query) + 80);
-    if (command) snprintf(command, strlen(dir) + strlen(query) + 80, "findstr /s /i /n \"%s\" \"%s\\*.*\" 2>nul", query, dir);
-#else
-    char *command = (char *)malloc(strlen(dir) + strlen(query) + 60);
-    if (command) snprintf(command, strlen(dir) + strlen(query) + 60, "grep -r -n -i -F \"%s\" \"%s\" 2>/dev/null", query, dir);
-#endif
-    if (!command) { snprintf(res.error_message, sizeof(res.error_message), "Out of memory."); return res; }
-    process = native_run_process(command, workspace, 60000); free(command);
-    if (!process.started) {
-        snprintf(res.error_message, sizeof(res.error_message), "%s", process.error);
-        trim_incomplete_utf8(res.error_message);
-        native_process_result_free(&process);
-        return res;
-    }
-    res.output = truncate_output(process.output ? process.output : "");
-    native_process_result_free(&process);
-    if (!res.output) { snprintf(res.error_message, sizeof(res.error_message), "Out of memory."); return res; }
-    res.output_len = strlen(res.output); res.success = true; return res;
+    return tool_search_files_ex(path, query, "", 50, workspace);
 }
 
 /* Native search: bounded directory traversal, no shell interpreter involved. */
@@ -662,6 +657,27 @@ static void search_file(SearchState *state, const char *path, const char *name, 
         if (line) { snprintf(line, n, "%s\n", path); search_result(state, line); free(line); } else state->failed = true;
         return;
     }
+    /* Ticket 3：先探文件大小（GetFileAttributesExW / stat），超大文件直接跳过。
+     * 旧版先 read_entire_file 再判 512KB——大文件已整读进内存才丢弃。 */
+    unsigned long long precheck_size = 0;
+    bool size_known = false;
+#ifdef _WIN32
+    {
+        wchar_t *wpath = utf8_wide(path);
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (wpath && GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad)) {
+            precheck_size = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            size_known = true;
+        }
+        free(wpath);
+    }
+#else
+    {
+        struct stat st;
+        if (stat(path, &st) == 0) { precheck_size = (unsigned long long)st.st_size; size_known = true; }
+    }
+#endif
+    if (size_known && precheck_size > MAX_SEARCH_FILE_BYTES) return;
     size_t size = 0; char *raw = read_entire_file(path, &size);
     if (!raw) return;
     if (size > MAX_SEARCH_FILE_BYTES || contains_nul(raw, size)) { free(raw); return; }

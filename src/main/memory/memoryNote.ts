@@ -6,8 +6,10 @@ import type { LLMMessage } from '../providers/types'
  *
  * 为什么要从 system 移出来：Anthropic / OpenAI 的 Prompt Cache 以「恒定前缀」为键，
  * 动态记忆（经验库、用户确认的背景、Wiki 索引）一旦拼进 system，任何一条新经验都会
- * 让缓存前缀整体失效。改成在运行时附加到首条 user 消息的文本块末尾后，system 与工具
+ * 让缓存前缀整体失效。改成在运行时附加到末条（当前）user 消息的文本块末尾后，system 与工具
  * 清单在跨轮次间保持恒定，缓存命中率不再被记忆更新击穿。
+ * 挂在末条而不是首条：首条 user 消息是整段历史里最容易被裁掉的一条，
+ * 挂末条才能保证记忆在长轮压缩后仍然送达模型。
  *
  * 注意：这里只在内存里 clone 消息对象，绝不改写 DB 中的原始用户消息。
  */
@@ -80,12 +82,20 @@ export function buildMemoryNote(parts: MemoryNoteParts = {}): string {
 }
 
 /**
- * 把 Note 附加到首条 user 消息的文本块末尾（运行时 clone，幂等）。
- * 若首条 user 消息没有文本块（纯图片），则追加一个文本块。
+ * 把 Note 附加到末条（当前）user 消息的文本块末尾（运行时 clone，幂等）。
+ * 挂末条不挂首条：首条 user 消息是整段历史里最先被裁掉的，挂首条会让记忆
+ * 在长轮压缩后直接消失；挂当前轮则压缩、摘要都不影响它送达。
+ * 若末条 user 消息没有文本块（纯图片），则追加一个文本块。
  */
 export function attachMemoryNote(messages: LLMMessage[], note: string): LLMMessage[] {
   if (!note) return messages
-  const index = messages.findIndex((m) => m.role === 'user')
+  let index = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      index = i
+      break
+    }
+  }
   if (index < 0) return messages
   const target = messages[index]
   if (target.blocks.some((b) => b.type === 'text' && b.text.includes(MEMORY_CONTEXT_OPEN))) {
