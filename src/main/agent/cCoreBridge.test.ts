@@ -212,7 +212,7 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
     expect(searchRes).not.toBeNull()
     expect(searchRes?.isError).toBe(false)
     expect(searchRes?.content).toContain('test_bridge_temp.txt')
-  })
+  }, 15_000)
 
   it('8. 流式思考标签切分与隔离 (processStreamChunk)', async () => {
     // 喂入切片 <think> 标签

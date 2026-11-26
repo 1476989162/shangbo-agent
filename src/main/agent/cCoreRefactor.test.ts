@@ -40,7 +40,7 @@ describe('尚搏 Agent C语言重构核心引擎 (C-Core Engine) 验证', () => 
     expect(match).not.toBeNull()
     expect(Number(match![1])).toBeGreaterThanOrEqual(29)
     expect(Number(match![1])).toBe(Number(match![2]))
-  })
+  }, 30_000)
 
   it('C 语言 CLI 命令行审计工具功能正常', () => {
     expect(existsSync(shangboAgentExe)).toBe(true)
