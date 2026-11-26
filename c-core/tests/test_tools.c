@@ -275,10 +275,11 @@ TEST_CASE(test_tool_guidance_and_nonzero_exit_and_approval) {
     tool_result_free(&l_file);
 
     /* Non-zero exit code preserves output and returns success = true */
+    /* exit 3 在 cmd /c 与 POSIX sh 下都以码 3 退出（旧写法 exit /b 3 是 cmd 专有，sh 会报码 2） */
     SafetyContext ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.autonomy = AUTONOMY_BALANCED;
-    ToolResult nz = tool_run_command("echo nonzero_detail_kept && exit /b 3", ".", &ctx);
+    ToolResult nz = tool_run_command("echo nonzero_detail_kept && exit 3", ".", &ctx);
     ASSERT_TRUE(nz.success);
     ASSERT_CONTAINS(nz.output, "--- exit code 3 ---");
     ASSERT_CONTAINS(nz.output, "nonzero_detail_kept");
