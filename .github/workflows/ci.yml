@@ -12,10 +12,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # releaseScript.test.ts 的发版门禁要读既有标签（如 v0.9.4）；
-          # 默认浅克隆不带标签会导致门禁误放行，显式拉取标签。
-          fetch-tags: true
+
+      # releaseScript.test.ts 的发版门禁要读既有标签（如 v0.9.4）；
+      # 实测 checkout 的 fetch-tags 在此次 runner 解析出的 fetch 命令里并未带上
+      # --tags（日志为证），改用显式命令拉取标签，与 checkout 版本行为解耦。
+      - name: Fetch tags for release preflight gate
+        run: git fetch --tags --force origin
 
       - uses: actions/setup-node@v4
         with:
