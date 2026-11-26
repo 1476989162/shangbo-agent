@@ -7,8 +7,10 @@ import { scanInjectionRules } from './injectionDetector'
 
 describe('尚搏 Agent C语言重构核心引擎 (C-Core Engine) 验证', () => {
   const cCoreDir = resolve(__dirname, '../../../c-core')
-  const testRunnerExe = resolve(cCoreDir, 'bin/test_runner.exe')
-  const shangboAgentExe = resolve(cCoreDir, 'bin/shangbo_agent.exe')
+  // Linux/macOS 下 make 产物无 .exe 后缀；CI 先构建再测，这里按平台解析。
+  const exeExt = process.platform === 'win32' ? '.exe' : ''
+  const testRunnerExe = resolve(cCoreDir, `bin/test_runner${exeExt}`)
+  const shangboAgentExe = resolve(cCoreDir, `bin/shangbo_agent${exeExt}`)
 
   it('C 语言核心项目结构与文件完整性', () => {
     expect(existsSync(resolve(cCoreDir, 'include/safety.h'))).toBe(true)
