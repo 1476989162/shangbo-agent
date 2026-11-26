@@ -50,18 +50,12 @@ const searchKeyword = ref('')
 
 // 电脑控制与浏览器自动化状态 (对标图 2、图 3)
 const computerUseEnabled = ref(true)
-const builtinBrowserEnabled = ref(true)
-const externalBrowserEnabled = ref(true)
 const chromeConnected = ref(true)
-const defaultBrowser = ref<'external' | 'builtin'>('external')
-const autoScreenshot = ref(true)
 
 // ========================================================
 // 协同 Cowork 模式设置状态 (对标图 4)
 // ========================================================
 const coworkFilesPath = ref('')
-const trustedFolders = ref<string[]>([])
-const showTrustedFoldersModal = ref(false)
 
 const globalInstructions = ref('')
 const showGlobalInstructionsModal = ref(false)
@@ -81,10 +75,7 @@ const showAddMemoryModal = ref(false)
 const newMemoryForm = ref({ title: '', desc: '' })
 
 // 偏好设置表单
-const userRole = ref('software')
 const customInstructions = ref('')
-const chatFont = ref('default')
-const reduceMotion = ref(false)
 const notifyOnCompletion = ref(true)
 const readOnlyReview = ref(false)
 const autonomyLevel = ref<'strict' | 'balanced' | 'trusted'>('balanced')
@@ -180,7 +171,6 @@ const wishAcceptance = ref('')
 const wishVerifyCommand = ref('')
 const wishMaxSteps = ref(120)
 const wishVerifyRetries = ref(2)
-const wishDailyRunLimit = ref(12)
 
 // 自主任务
 const autonomousEnabled = ref(false)
@@ -496,9 +486,6 @@ async function load(): Promise<void> {
     (name) => name !== 'run_command'
   )
   customInstructions.value = (settings['agent.instructions'] as string) ?? ''
-  userRole.value = (settings['agent.workRole'] as string) ?? 'software'
-  chatFont.value = (settings['agent.chatFont'] as string) ?? 'default'
-  reduceMotion.value = (settings['agent.reduceMotion'] as boolean) ?? false
   notifyOnCompletion.value = (settings['agent.notifyCompletion'] as boolean) ?? true
   readOnlyReview.value = (settings['agent.readOnly'] as boolean) ?? false
   autonomyLevel.value =
@@ -520,13 +507,8 @@ async function load(): Promise<void> {
   wishVerifyCommand.value = (settings['agent.wish.verifyCommand'] as string) ?? ''
   wishMaxSteps.value = (settings['agent.wishMaxSteps'] as number) ?? 120
   wishVerifyRetries.value = (settings['agent.wish.verifyRetries'] as number) ?? 2
-  wishDailyRunLimit.value = (settings['agent.wish.dailyRunLimit'] as number) ?? 12
   autonomousEnabled.value = (settings['agent.autonomous.enabled'] as boolean) ?? false
   computerUseEnabled.value = (settings['agent.computerUse'] as boolean) ?? true
-  builtinBrowserEnabled.value = (settings['agent.browser.builtin'] as boolean) ?? true
-  externalBrowserEnabled.value = (settings['agent.browser.external'] as boolean) ?? true
-  defaultBrowser.value = (settings['agent.browser.default'] as 'external' | 'builtin') ?? 'external'
-  autoScreenshot.value = (settings['agent.browser.autoScreenshot'] as boolean) ?? true
   projectMcpEnabled.value = (settings['agent.mcp.projectLevel'] as boolean) ?? true
   const lang = settings['ui.language'] as SupportedLanguage | undefined
   if (lang) setLanguage(lang)
@@ -534,9 +516,6 @@ async function load(): Promise<void> {
   void refreshMcp()
   if (typeof settings['cowork.filesPath'] === 'string') {
     coworkFilesPath.value = settings['cowork.filesPath'] as string
-  }
-  if (Array.isArray(settings['cowork.trustedFolders'])) {
-    trustedFolders.value = settings['cowork.trustedFolders'] as string[]
   }
   if (typeof settings['cowork.globalInstructions'] === 'string') {
     globalInstructions.value = settings['cowork.globalInstructions'] as string
@@ -571,20 +550,6 @@ async function pickCoworkFilesPath(): Promise<void> {
     await window.shangbo.settings.set('cowork.filesPath', chosen)
     feedback.value = { ok: true, message: `已将协同生成文件路径更改为：${chosen}` }
   }
-}
-
-async function addTrustedFolder(): Promise<void> {
-  const chosen = await window.shangbo.dialog.pickFolder()
-  if (chosen && !trustedFolders.value.includes(chosen)) {
-    trustedFolders.value.push(chosen)
-    await window.shangbo.settings.set('cowork.trustedFolders', [...trustedFolders.value])
-    feedback.value = { ok: true, message: `已添加受信任文件夹：${chosen}` }
-  }
-}
-
-async function removeTrustedFolder(index: number): Promise<void> {
-  trustedFolders.value.splice(index, 1)
-  await window.shangbo.settings.set('cowork.trustedFolders', [...trustedFolders.value])
 }
 
 function openEditGlobalInstructions(): void {
@@ -681,23 +646,10 @@ async function saveInstructions(): Promise<void> {
   setTimeout(() => (feedback.value = null), 2500)
 }
 
-async function saveRole(): Promise<void> {
-  await window.shangbo.settings.set('agent.workRole', userRole.value)
-}
-
-async function saveFont(): Promise<void> {
-  await window.shangbo.settings.set('agent.chatFont', chatFont.value)
-}
-
 async function onLanguageChange(): Promise<void> {
   await window.shangbo.settings.set('ui.language', currentLanguage.value)
   feedback.value = { ok: true, message: t('settings.languageDesc') }
   setTimeout(() => (feedback.value = null), 2000)
-}
-
-async function toggleMotion(val: boolean): Promise<void> {
-  reduceMotion.value = val
-  await window.shangbo.settings.set('agent.reduceMotion', val)
 }
 
 async function toggleNotify(val: boolean): Promise<void> {
@@ -731,7 +683,6 @@ async function saveWishSettings(): Promise<void> {
   await window.shangbo.settings.set('agent.wish.verifyCommand', wishVerifyCommand.value)
   await window.shangbo.settings.set('agent.wishMaxSteps', Number(wishMaxSteps.value))
   await window.shangbo.settings.set('agent.wish.verifyRetries', Number(wishVerifyRetries.value))
-  await window.shangbo.settings.set('agent.wish.dailyRunLimit', Number(wishDailyRunLimit.value))
   feedback.value = { ok: true, message: '许愿模式设置已保存' }
 }
 
@@ -780,7 +731,7 @@ function openNewTask(): void {
     maxVerifyAttempts: wishVerifyRetries.value,
     enabled: true,
     maxSteps: wishMaxSteps.value,
-    maxRunsPerDay: wishDailyRunLimit.value
+    maxRunsPerDay: 12
   }
   taskEditorOpen.value = true
 }
@@ -932,22 +883,12 @@ async function removeLesson(id: string): Promise<void> {
   await loadLessons()
 }
 
-// Code 编辑器设置
-const codeFontFamily = ref('Consolas, Monaco, "Courier New", monospace')
-const codeFontSize = ref(13)
-const codeLineNumbers = ref(true)
-const codeWordWrap = ref(true)
+// Code 编辑器设置（仅保留被业务消费的 defaultShell，其余死设置已下线）
 const codeDefaultShell = ref('powershell.exe')
-const codeCommitTemplate = ref('feat: \n\nWhy:\n- ')
 
 async function loadCodeSettings(): Promise<void> {
   const all = await window.shangbo.settings.getAll()
-  codeFontFamily.value = (all['code.fontFamily'] as string) || 'Consolas, Monaco, "Courier New", monospace'
-  codeFontSize.value = (all['code.fontSize'] as number) || 13
-  codeLineNumbers.value = all['code.lineNumbers'] !== false
-  codeWordWrap.value = all['code.wordWrap'] !== false
   codeDefaultShell.value = (all['code.defaultShell'] as string) || 'powershell.exe'
-  codeCommitTemplate.value = (all['code.commitTemplate'] as string) || 'feat: \n\nWhy:\n- '
 }
 
 async function saveCodeSetting(key: string, val: any): Promise<void> {
@@ -1533,25 +1474,6 @@ async function toggleComputerUse(): Promise<void> {
   }
   setTimeout(() => (feedback.value = null), 2000)
 }
-
-async function toggleBuiltinBrowser(): Promise<void> {
-  builtinBrowserEnabled.value = !builtinBrowserEnabled.value
-  await window.shangbo.settings.set('agent.browser.builtin', builtinBrowserEnabled.value)
-}
-
-async function toggleExternalBrowser(): Promise<void> {
-  externalBrowserEnabled.value = !externalBrowserEnabled.value
-  await window.shangbo.settings.set('agent.browser.external', externalBrowserEnabled.value)
-}
-
-async function saveDefaultBrowser(): Promise<void> {
-  await window.shangbo.settings.set('agent.browser.default', defaultBrowser.value)
-}
-
-async function toggleAutoScreenshot(): Promise<void> {
-  autoScreenshot.value = !autoScreenshot.value
-  await window.shangbo.settings.set('agent.browser.autoScreenshot', autoScreenshot.value)
-}
 </script>
 
 <template>
@@ -1822,19 +1744,6 @@ async function toggleAutoScreenshot(): Promise<void> {
               </div>
             </div>
 
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">你的主要工作领域？</span>
-              </div>
-              <select v-model="userRole" class="select-control" @change="saveRole">
-                <option value="software">软件研发与系统架构</option>
-                <option value="fullstack">全栈开发与前端工程</option>
-                <option value="data">数据分析与算法模型</option>
-                <option value="product">产品与项目管理</option>
-                <option value="general">学术研究与通用办公</option>
-              </select>
-            </div>
-
             <div class="setting-field">
               <div class="field-head">
                 <span class="setting-label">给助手的通用系统指令 (Instructions for Agent)</span>
@@ -1905,38 +1814,6 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <option value="en-US">English (US)</option>
                 <option value="ja-JP">日本語 (Japanese)</option>
               </select>
-            </div>
-
-            <div class="setting-row">
-              <span class="setting-label">对话字体</span>
-              <select v-model="chatFont" class="select-control" @change="saveFont">
-                <option value="default">系统默认无衬线字体</option>
-                <option value="mono">等宽代码字体 (JetBrains Mono)</option>
-                <option value="serif">经典衬线阅读体 (Serif)</option>
-              </select>
-            </div>
-
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">界面动效 (Motion)</span>
-                <span class="row-sub">减弱流式输出与界面元素的过渡动画</span>
-              </div>
-              <div class="segmented-control">
-                <button
-                  class="seg-btn text-seg"
-                  :class="{ active: !reduceMotion }"
-                  @click="toggleMotion(false)"
-                >
-                  跟随系统
-                </button>
-                <button
-                  class="seg-btn text-seg"
-                  :class="{ active: reduceMotion }"
-                  @click="toggleMotion(true)"
-                >
-                  减弱动画
-                </button>
-              </div>
             </div>
           </div>
 
@@ -2278,17 +2155,6 @@ async function toggleAutoScreenshot(): Promise<void> {
                   type="number"
                   min="0"
                   max="10"
-                  @blur="saveWishSettings"
-                />
-              </label>
-              <label class="wish-field">
-                <span class="field-label">每个任务每日运行上限</span>
-                <input
-                  v-model.number="wishDailyRunLimit"
-                  class="submodal-input"
-                  type="number"
-                  min="1"
-                  max="100"
                   @blur="saveWishSettings"
                 />
               </label>
@@ -3134,21 +3000,6 @@ async function toggleAutoScreenshot(): Promise<void> {
 
             <div class="browser-card-item">
               <div class="row-text">
-                <span class="card-main-title">允许 AI 控制内置浏览器</span>
-                <span class="card-desc">允许 AI 助手在内置浏览器中自动执行网页浏览任务</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  type="checkbox"
-                  :checked="builtinBrowserEnabled"
-                  @change="toggleBuiltinBrowser"
-                />
-                <span class="switch-slider" />
-              </label>
-            </div>
-
-            <div class="browser-card-item">
-              <div class="row-text">
                 <span class="card-main-title">浏览器数据</span>
                 <span class="card-desc">内置浏览器中的站点数据（如 Cookies、本地存储等）</span>
               </div>
@@ -3162,21 +3013,6 @@ async function toggleAutoScreenshot(): Promise<void> {
           <div class="browser-group-block">
             <div class="group-title-row">
               <span class="browser-group-name">外部浏览器</span>
-            </div>
-
-            <div class="browser-card-item">
-              <div class="row-text">
-                <span class="card-main-title">允许 AI 控制外部浏览器</span>
-                <span class="card-desc">开启后，AI 助手可以使用外部 Chrome 浏览器执行网页浏览任务</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  type="checkbox"
-                  :checked="externalBrowserEnabled"
-                  @change="toggleExternalBrowser"
-                />
-                <span class="switch-slider" />
-              </label>
             </div>
 
             <div class="browser-card-item chrome-conn-item">
@@ -3194,39 +3030,6 @@ async function toggleAutoScreenshot(): Promise<void> {
                 <span :class="chromePortConnected ? 'status-green-dot' : 'status-dot-off'">{{ chromePortConnected ? '●' : '○' }}</span>
                 <span>{{ checkingChromePort ? '检测中…' : chromePortConnected ? '已连接 ▾' : '未连接 ▾' }}</span>
               </div>
-            </div>
-          </div>
-
-          <!-- 第三组：通用 -->
-          <div class="browser-group-block">
-            <div class="group-title-row">
-              <span class="browser-group-name">通用</span>
-            </div>
-
-            <div class="browser-card-item">
-              <div class="row-text">
-                <span class="card-main-title">AI 任务默认浏览器</span>
-                <span class="card-desc">选择 AI 助手执行 Browser Use 任务时默认使用的浏览器</span>
-              </div>
-              <select v-model="defaultBrowser" class="browser-select-control" @change="saveDefaultBrowser">
-                <option value="external">外部浏览器 (Chrome CDP)</option>
-                <option value="builtin">内置浏览器 (Electron Chromium)</option>
-              </select>
-            </div>
-
-            <div class="browser-card-item">
-              <div class="row-text">
-                <span class="card-main-title">自动截图</span>
-                <span class="card-desc">浏览器操作后自动截取屏幕截图，仅用于展示，不消耗 Token</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  type="checkbox"
-                  :checked="autoScreenshot"
-                  @change="toggleAutoScreenshot"
-                />
-                <span class="switch-slider" />
-              </label>
             </div>
           </div>
         </section>
@@ -3251,22 +3054,6 @@ async function toggleAutoScreenshot(): Promise<void> {
                     <path d="M2 4.5A1.5 1.5 0 013.5 3h2.8a1.5 1.5 0 011.06.44l1.2 1.2h3.94A1.5 1.5 0 0114 6.14V12.5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5v-8z" stroke="currentColor" stroke-width="1.3" />
                   </svg>
                   <span>更改 (Change)</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- 2. Trusted Cowork folders -->
-            <div class="cowork-item-block">
-              <div class="cowork-item-main">
-                <h4 class="cowork-block-title">Trusted Cowork folders (受信任协同文件夹)</h4>
-                <p class="cowork-block-desc">
-                  协同任务在读写这些受信任文件夹及其子目录时，可直接放行，无需每次打断提问。
-                  <span class="trusted-count-badge">已信任 {{ trustedFolders.length }} 个目录</span>
-                </p>
-              </div>
-              <div class="cowork-item-action">
-                <button class="btn btn-outline tiny" @click="showTrustedFoldersModal = true">
-                  <span>管理 (Manage)</span>
                 </button>
               </div>
             </div>
@@ -3476,67 +3263,7 @@ async function toggleAutoScreenshot(): Promise<void> {
         <section v-if="activeTab === 'code'" class="content-pane code-pane">
           <div class="section-block">
             <h3 class="pane-title">尚搏 Code 编辑器与环境</h3>
-            <p class="row-sub">配置工作台代码查看器、Git 提交模板以及内置终端环境。</p>
-
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">编辑器字体 (Font Family)</span>
-                <span class="row-sub">代码预览与差异比对所使用的等宽字体序列</span>
-              </div>
-              <input
-                v-model="codeFontFamily"
-                class="select-control mono"
-                style="flex: 1; max-width: 320px;"
-                placeholder="Consolas, Monaco, 'Courier New', monospace"
-                @change="saveCodeSetting('code.fontFamily', codeFontFamily)"
-              />
-            </div>
-
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">默认字体大小 (Font Size)</span>
-                <span class="row-sub">代码视窗与终端字号 (px)</span>
-              </div>
-              <input
-                v-model.number="codeFontSize"
-                type="number"
-                min="10"
-                max="24"
-                class="select-control"
-                style="width: 100px;"
-                @change="saveCodeSetting('code.fontSize', codeFontSize)"
-              />
-            </div>
-
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">显示行号 (Line Numbers)</span>
-                <span class="row-sub">在代码预览与 Diff 比对区域左侧显示代码行号</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  v-model="codeLineNumbers"
-                  type="checkbox"
-                  @change="saveCodeSetting('code.lineNumbers', codeLineNumbers)"
-                />
-                <span class="switch-slider" />
-              </label>
-            </div>
-
-            <div class="setting-row">
-              <div class="row-text">
-                <span class="setting-label">自动换行 (Word Wrap)</span>
-                <span class="row-sub">超出代码查看器边界时长行自动折行显示</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  v-model="codeWordWrap"
-                  type="checkbox"
-                  @change="saveCodeSetting('code.wordWrap', codeWordWrap)"
-                />
-                <span class="switch-slider" />
-              </label>
-            </div>
+            <p class="row-sub">配置内置终端环境。编辑器展示类设置已下线（未被业务消费）。</p>
 
             <div class="setting-row">
               <div class="row-text">
@@ -3549,20 +3276,6 @@ async function toggleAutoScreenshot(): Promise<void> {
                 style="flex: 1; max-width: 260px;"
                 placeholder="powershell.exe"
                 @change="saveCodeSetting('code.defaultShell', codeDefaultShell)"
-              />
-            </div>
-
-            <div class="setting-field" style="margin-top: 14px;">
-              <div class="field-head">
-                <span class="setting-label">Git 提交信息模板 (Commit Template)</span>
-                <span class="field-subtle">AI 在执行 /commit 或生成 Git 提交说明时的默认前缀与格式规范。</span>
-              </div>
-              <textarea
-                v-model="codeCommitTemplate"
-                class="textarea-control mono"
-                rows="4"
-                placeholder="feat: \n\nWhy:\n- "
-                @blur="saveCodeSetting('code.commitTemplate', codeCommitTemplate)"
               />
             </div>
           </div>
@@ -3614,29 +3327,6 @@ async function toggleAutoScreenshot(): Promise<void> {
             </div>
           </div>
         </section>
-
-        <!-- ========================================================
-             受信任文件夹管理弹窗
-             ======================================================== -->
-        <div v-if="showTrustedFoldersModal" class="submodal-overlay" @click.self="showTrustedFoldersModal = false">
-          <div class="submodal-card">
-            <div class="submodal-head">
-              <h4 class="submodal-title">受信任协同文件夹管理</h4>
-              <button class="btn-submodal-close" @click="showTrustedFoldersModal = false">×</button>
-            </div>
-            <p class="submodal-tip">Agent 在这些目录内创建文件、读取文件或执行命令时将无需向您弹窗确认。</p>
-            <div class="trusted-list">
-              <div v-for="(dir, idx) in trustedFolders" :key="dir" class="trusted-row">
-                <span class="trusted-dir-path text-truncate" :title="dir">📁 {{ dir }}</span>
-                <button class="btn-del-trusted" title="移除此受信任目录" @click="removeTrustedFolder(idx)">✕</button>
-              </div>
-            </div>
-            <div class="submodal-actions">
-              <button class="btn btn-primary tiny" @click="addTrustedFolder">+ 添加受信任文件夹</button>
-              <button class="btn btn-ghost tiny" @click="showTrustedFoldersModal = false">完成</button>
-            </div>
-          </div>
-        </div>
 
         <!-- ========================================================
              全局协同指令编辑弹窗

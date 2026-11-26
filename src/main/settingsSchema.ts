@@ -75,14 +75,9 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.wish.autoVerify': z.boolean(),
   'agent.wish.evolve': z.boolean(),
   'agent.wish.verifyRetries': z.number().int().min(0).max(10),
-  'agent.wish.dailyRunLimit': z.number().int().min(1).max(100),
   'agent.autonomous.enabled': z.boolean(),
   'agent.notifyCompletion': z.boolean(),
-  'agent.reduceMotion': z.boolean(),
   'cowork.useMemory': z.boolean(),
-  'agent.browser.builtin': z.boolean(),
-  'agent.browser.external': z.boolean(),
-  'agent.browser.autoScreenshot': z.boolean(),
   // 自更新：是否自动检查、发现后是否自动下载。安装永远需要用户确认。
   'app.update.check': z.boolean(),
   'app.update.autoDownload': z.boolean(),
@@ -92,10 +87,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.instructions': z.string().max(20_000, '通用指导过长'),
   'agent.effort': z.string().max(50),
   'agent.mode': z.string().max(50),
-  'agent.workRole': z.string().max(200),
   // 侧边栏协同 / 代码视图：决定系统提示的行为倾向与界面排版，不改变审批权限
   'ui.viewMode': z.enum(['cowork', 'code']),
-  'agent.chatFont': z.string().max(100),
   'app.theme': z.string().max(50),
   'chat.model': z.string().max(200),
   'chat.providerId': z.string().max(200),
@@ -107,8 +100,6 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   // 中转准入密钥：与中转侧 RELAY_ACCESS_KEY 一致，留空表示该中转不设准入
   'remote.accessKey': z.string().max(200),
   'remote.approvalPolicy': z.enum(['allow-all', 'confirm-high', 'read-only']),
-  // 枚举
-  'agent.browser.default': z.enum(['external', 'builtin']),
   // 字符串数组
   'agent.plugins': z.array(z.string().max(100)).max(50),
   // 外部技能包目录（SKILL.md 技能包根目录，最多 10 个，如 D:\foxtable\foxtablecoderv7）
@@ -117,7 +108,6 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'chat.hiddenModels': z.array(z.string().max(200)).max(1000),
   // 供应商思考模式名单：最多 100 条、每条 200 字以内
   'providers.reasoningPatterns': z.array(z.string().max(200)).max(100),
-  'cowork.trustedFolders': z.array(z.string().max(1000)).max(1000),
   // 安全相关：自动批准名单。成员必须是已知工具名（MCP 工具动态注册，
   // 以 mcp__ 前缀放行），由 parseSettingValue 按 knownToolNames 附加校验
   'tools.autoApprove': z.array(z.string().max(200)).max(200),
@@ -127,11 +117,6 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.mcp.projectLevel': z.boolean(),
   'ui.language': z.enum(['zh-CN', 'zh-TW', 'en-US', 'ja-JP']),
   'agent.worktree': z.boolean(),
-  'code.fontFamily': z.string().max(200),
-  'code.fontSize': z.number().int().min(8).max(36),
-  'code.lineNumbers': z.boolean(),
-  'code.wordWrap': z.boolean(),
-  'code.commitTemplate': z.string().max(2000),
   'code.defaultShell': z.string().max(200),
   'agent.wish.verifyCommand': z.string().max(2000),
   'agent.wish.acceptance': z.string().max(10_000)

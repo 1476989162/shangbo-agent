@@ -43,6 +43,26 @@ describe('Model Autopilot：硬件分档推荐', () => {
     const pick = recommendLocalModel(hw)
     expect(pick.model.length).toBeGreaterThan(0)
   })
+
+  it('detectHardware 绝不拿系统内存冒充 N 卡显存', () => {
+    // 显式覆盖仍生效（旧单测与手动指定走这里）
+    expect(detectHardware({ gpuTier: 'nvidia-12g', gpuMemGB: 12 }).gpuTier).toBe('nvidia-12g')
+    // 无证据时如实 cpu-only：即使本机内存很大，也不推断 N 卡档
+    const savedTier = process.env.SHANGBO_GPU_TIER
+    const savedMem = process.env.SHANGBO_GPU_MEM_GB
+    delete process.env.SHANGBO_GPU_TIER
+    delete process.env.SHANGBO_GPU_MEM_GB
+    try {
+      const hw = detectHardware()
+      if (!(process.platform === 'darwin' && process.arch === 'arm64')) {
+        expect(hw.gpuTier).toBe('cpu-only')
+        expect(hw.gpuMemGB).toBeNull()
+      }
+    } finally {
+      if (savedTier !== undefined) process.env.SHANGBO_GPU_TIER = savedTier
+      if (savedMem !== undefined) process.env.SHANGBO_GPU_MEM_GB = savedMem
+    }
+  })
 })
 
 describe('Model Autopilot：真实显存分档（Stage 5）', () => {
@@ -70,6 +90,16 @@ describe('Model Autopilot：真实显存分档（Stage 5）', () => {
     expect(assessWmiGpu('GameViewer Virtual Display Adapter', 0).discrete).toBe(false)
     expect(assessWmiGpu('Some Unknown NVIDIA Card', 4_293_918_720).gpuTier).toBe('unknown')
     expect(assessWmiGpu('NVIDIA RTX A2000', 6 * 1024 ** 3).gpuTier).toBe('nvidia-8g')
+    // Intel Arc 自带 Intel 前缀：必须是独显，不能被 `!intel` 误杀
+    const arcOverflow = assessWmiGpu('Intel(R) Arc(TM) A770 Graphics', 4_293_918_720)
+    expect(arcOverflow.discrete).toBe(true)
+    expect(arcOverflow.gpuTier).not.toBe('cpu-only')
+    expect(arcOverflow.vramNote).toBeTruthy()
+    const arcReal = assessWmiGpu('Intel(R) Arc(TM) A770 Graphics', 16 * 1024 ** 3)
+    expect(arcReal.discrete).toBe(true)
+    expect(arcReal.gpuTier).not.toBe('cpu-only')
+    // Intel 核显仍判非独显
+    expect(assessWmiGpu('Intel(R) UHD Graphics 770', 1 * 1024 ** 3).discrete).toBe(false)
   })
 
   it('/health 不存在时回退 /v1/models，不把在线引擎误报为未启动', async () => {

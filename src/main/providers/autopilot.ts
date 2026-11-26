@@ -129,7 +129,7 @@ const CPU_FALLBACK: LocalModelPick = {
  * 探测本机硬件。GPU 档位启发式：
  * - darwin arm64 → apple-silicon（totalMem 即统一内存）
  * - env SHANGBO_GPU_TIER / SHANGBO_GPU_MEM_GB 可显式指定（便于测试与用户覆盖）
- * - 否则按内存粗估：>=20GB 视作 24GB N卡档，>=10GB 视作 12GB 档，>=6GB 视作 8GB 档，其余 cpu-only
+ * - 其余一律 cpu-only；绝不拿系统内存冒充 N 卡显存（真实显存走 probeRealHardware）。
  */
 export function detectHardware(override?: Partial<HardwareInfo>): HardwareInfo {
   const memGB = totalmem() / 1024 ** 3
@@ -148,16 +148,9 @@ export function detectHardware(override?: Partial<HardwareInfo>): HardwareInfo {
   } else if (plat === 'darwin' && process.arch === 'arm64') {
     gpuTier = 'apple-silicon'
     gpuMem = Math.round(memGB)
-  } else if (memGB >= 20) {
-    gpuTier = 'nvidia-24g'
-    gpuMem = 24
-  } else if (memGB >= 10) {
-    gpuTier = 'nvidia-12g'
-    gpuMem = 12
-  } else if (memGB >= 6) {
-    gpuTier = 'nvidia-8g'
-    gpuMem = 8
   }
+  // 无启发式 N 卡推断：无 nvidia-smi / WMI 证据时如实返回 cpu-only，
+  // 绝不拿系统内存冒充显存（真实显存走 probeRealHardware）。
 
   return {
     platform: override?.platform ?? plat,
@@ -272,7 +265,12 @@ export interface WmiGpuAssessment {
  */
 export function assessWmiGpu(name: string, adapterRamBytes: number): WmiGpuAssessment {
   const gpuName = String(name || '')
-  const isDiscrete = /nvidia|geforce|rtx|radeon|\barc\b/i.test(gpuName) && !/intel/i.test(gpuName)
+  // Intel Arc 自带 "Intel" 前缀，旧写法 `含 arc && 不含 intel` 把独显误判成核显。
+  // 先显式识别 Intel Arc 为独显，其余 Intel（含 UHD / Iris Xe 核显）仍判非独显。
+  const lowerName = gpuName.toLowerCase()
+  const isIntelArc = /intel/.test(lowerName) && /\barc\b/.test(lowerName)
+  const isDiscrete =
+    isIntelArc || (/nvidia|geforce|rtx|radeon|\barc\b/i.test(gpuName) && !/intel/i.test(gpuName))
   if (!isDiscrete) {
     return { discrete: false, gpuName, gpuTier: 'cpu-only', gpuMemGB: null }
   }

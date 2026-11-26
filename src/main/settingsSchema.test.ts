@@ -42,18 +42,35 @@ describe('设置写入白名单 (parseSettingValue)', () => {
   it('结构化数组键的元素必须是对象', () => {
     expect(() => parseSettingValue('cowork.memories', ['不是对象'])).toThrow()
     expect(() => parseSettingValue('agent.mcp.servers', 'not-array')).toThrow()
-    expect(parseSettingValue('cowork.trustedFolders', ['G:\\projects'])).toEqual(['G:\\projects'])
+  })
+
+  it('Ticket 7A 下线的死设置不再可写（code.defaultShell 例外仍可写）', () => {
+    for (const key of [
+      'code.fontFamily',
+      'code.fontSize',
+      'code.lineNumbers',
+      'code.wordWrap',
+      'code.commitTemplate',
+      'agent.wish.dailyRunLimit',
+      'agent.reduceMotion',
+      'agent.chatFont',
+      'agent.workRole',
+      'agent.browser.builtin',
+      'agent.browser.external',
+      'agent.browser.autoScreenshot',
+      'agent.browser.default',
+      'cowork.trustedFolders'
+    ]) {
+      expect(SettingSchemas[key], key).toBeUndefined()
+      expect(() => parseSettingValue(key, 'x'), key).toThrow('不在设置白名单')
+    }
+    expect(parseSettingValue('code.defaultShell', 'powershell.exe')).toBe('powershell.exe')
   })
 
   it('渲染层实际使用的键都在白名单内', () => {
     // 一旦渲染层新增设置键而忘了登记白名单，这个用例会提醒补表
+    // Ticket 7A 已下线 14 个死设置：这里只保留仍被业务消费的键
     for (const key of [
-      'agent.browser.builtin',
-      'agent.browser.external',
-      'agent.browser.default',
-      'agent.browser.autoScreenshot',
-      'agent.chatFont',
-      'agent.workRole',
       'app.theme',
       'chat.hiddenModels',
       'chat.model',
@@ -61,10 +78,8 @@ describe('设置写入白名单 (parseSettingValue)', () => {
       'cowork.filesPath',
       'cowork.globalInstructions',
       'cowork.memories',
-      'cowork.trustedFolders',
       'cowork.useMemory',
       'agent.notifyCompletion',
-      'agent.reduceMotion',
       // 手机远程：中转准入密钥必须可写，否则设置页保存会抛错
       'remote.enabled',
       'remote.relayUrl',
