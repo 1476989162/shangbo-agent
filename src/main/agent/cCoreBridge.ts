@@ -301,6 +301,8 @@ export class CCoreBridge {
         clearTimeout(timer)
         this.pending.delete(id)
         this.failedCalls++
+        // 写通道已坏：同样摘掉 abort 监听，否则长生命周期 signal 上堆积。
+        signal?.removeEventListener('abort', onAbort)
         reject(err instanceof Error ? err : new Error(String(err)))
       }
     })

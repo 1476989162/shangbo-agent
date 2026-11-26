@@ -372,9 +372,29 @@ export function getDbPath(): string {
   return dbFilePath || join(app.getPath('userData'), 'shangbo-agent.db')
 }
 
+/**
+ * 关库同步钩子：由 settings.ts 注册 clearSettingsCache。
+ * 用同步回调而非 closeDatabase 内动态 import——后者是微任务，
+ * 若关库后立刻重开库并写新值，延迟执行的清理会误清下个 DB 的缓存。
+ */
+type DatabaseCloseHook = () => void
+const closeHooks: DatabaseCloseHook[] = []
+
+export function onDatabaseClose(hook: DatabaseCloseHook): void {
+  closeHooks.push(hook)
+}
+
 export function closeDatabase(): void {
   if (!db) return
   db.close()
   db = null
+  // 设置写透缓存与 DB 实例绑定（实例变化即整体失效），这里同步跑钩子做双保险。
+  for (const hook of closeHooks) {
+    try {
+      hook()
+    } catch {
+      // 清理钩子失败不影响关库
+    }
+  }
   log.info('[db] 已关闭')
 }

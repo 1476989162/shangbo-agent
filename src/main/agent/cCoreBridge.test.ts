@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { existsSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cCoreBridge } from './cCoreBridge'
+import { CCoreBridge, cCoreBridge } from './cCoreBridge'
 import { auditHardLines, classifyToolCall } from './safety'
 import { scanInjectionRules } from './injectionDetector'
 import { detectStuck } from './loopGuard'
@@ -514,4 +514,40 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
     const stuck70 = await cCoreBridge.detectStuck(history70, 70)
     expect(stuck70).toContain('重复 70 次')
   }, 20_000)
+})
+
+describe('CCoreBridge abort 监听清理（Ticket 6）', () => {
+  it('stdin 写入失败的 catch 路径同样摘掉 signal 监听', async () => {
+    const bridge = new CCoreBridge()
+    // 伪造一个写必炸的子进程句柄：走到 callRpc 的 catch 分支
+    ;(bridge as unknown as { child: unknown }).child = {
+      stdin: {
+        writable: true,
+        write: (): void => {
+          throw new Error('broken pipe')
+        }
+      }
+    }
+    bridge.ensureDaemon = (): boolean => true
+
+    const controller = new AbortController()
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener')
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener')
+    try {
+      await expect(bridge.callRpc('ping', {}, 1000, controller.signal)).rejects.toThrow(
+        'broken pipe'
+      )
+      const added = addSpy.mock.calls
+        .filter((call) => call[0] === 'abort')
+        .map((call) => call[1])
+      const removed = removeSpy.mock.calls
+        .filter((call) => call[0] === 'abort')
+        .map((call) => call[1])
+      expect(added).toHaveLength(1)
+      expect(removed).toContain(added[0])
+    } finally {
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    }
+  })
 })

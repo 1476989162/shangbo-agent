@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { Message } from '@shared/types'
 import { useChatStore } from '../stores/chat'
 import { useViewerStore } from '../stores/viewer'
+import { buildChildrenByParentId, getBranchInfo, hasAssistantReply as hasReply } from '../lib/messageIndex'
 import type { BranchInfo } from '../stores/chat'
 import { t } from '../i18n'
 import MessageItem from './MessageItem.vue'
@@ -38,26 +39,17 @@ const lastAssistantId = computed(() => {
 })
 
 /**
+ * parentId → 子消息索引：模板里每条消息都要算分支/回复态，
+ * 直接全表扫描是 O(N²)，这里一次建 Map、全 O(1) 查表。
+ */
+const childrenByParentId = computed(() => buildChildrenByParentId(store.messages))
+
+/**
  * 计算某条助手消息的分支导航信息：
  * 同一条用户消息下的所有助手回复按时间排序，当前这条位于第几个。
  */
 function branchInfo(message: Message): BranchInfo | null {
-  if (message.role !== 'assistant' || !message.parentId) return null
-  const siblings = store.messages.filter(
-    (item) => item.parentId === message.parentId && item.role === 'assistant'
-  )
-  if (siblings.length < 2) return null
-  const ordered = [...siblings].sort(
-    (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
-  )
-  const index = ordered.findIndex((item) => item.id === message.id)
-  if (index < 0) return null
-  return {
-    index: index + 1,
-    total: ordered.length,
-    prevId: index > 0 ? ordered[index - 1].id : null,
-    nextId: index < ordered.length - 1 ? ordered[index + 1].id : null
-  }
+  return getBranchInfo(message, childrenByParentId.value)
 }
 
 /** 用最后一条消息的内容长度作为滚动触发器，避免对整个消息树做深度侦听。 */
@@ -177,9 +169,7 @@ function formatRelativeTime(timestamp: number): string {
  * 「已发送、正在等回复」与「还在队列里没轮到」。
  */
 function hasAssistantReply(userMessageId: string): boolean {
-  return store.messages.some(
-    (item) => item.parentId === userMessageId && item.role === 'assistant'
-  )
+  return hasReply(userMessageId, childrenByParentId.value)
 }
 
 const suggestions = [

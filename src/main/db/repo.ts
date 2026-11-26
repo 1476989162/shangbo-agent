@@ -535,16 +535,21 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
   interface RawUsageRow {
     created_at: number
     usage: string | null
-    blocks: string | null
     usage_mode: string | null
-    working_dir: string | null
+    tool_count: number
   }
 
+  // v9 已有 idx_messages_created 覆盖时间范围过滤；tool_use 计数下推到
+  // SQLite json_each，不再把整表 blocks 拉回 JS 做全量 JSON.parse。
+  // working_dir 不再参与口径（历史旧数据按 usage_mode 落库分类），LEFT JOIN 一并去掉。
   const rows = getDb()
     .prepare(
-      `SELECT m.created_at, m.usage, m.blocks, m.usage_mode, c.working_dir
+      `SELECT m.created_at, m.usage, m.usage_mode,
+        CASE WHEN json_valid(m.blocks) AND json_type(m.blocks) = 'array'
+          THEN (SELECT COUNT(*) FROM json_each(m.blocks)
+                WHERE json_extract(value, '$.type') = 'tool_use')
+          ELSE 0 END AS tool_count
        FROM messages m
-       LEFT JOIN conversations c ON m.conversation_id = c.id
        WHERE m.created_at >= ? AND m.created_at <= ? AND m.usage IS NOT NULL`
     )
     .all(startOfDay, endTimestamp) as RawUsageRow[]
@@ -597,18 +602,8 @@ export function getUsageStats(days: number): import('../../shared/types').UsageS
       fallbackUsageRows++
     }
 
-    // 工具调用次数分析
-    let toolCount = 0
-    if (row.blocks) {
-      try {
-        const blocks = JSON.parse(row.blocks) as { type: string }[]
-        if (Array.isArray(blocks)) {
-          toolCount = blocks.filter((b) => b.type === 'tool_use').length
-        }
-      } catch {
-        // 忽略
-      }
-    }
+    // 工具调用次数由 SQL 侧 json_each 预聚合，这里直接取数，不碰 blocks。
+    const toolCount = typeof row.tool_count === 'number' ? row.tool_count : 0
 
     const d = new Date(row.created_at)
     const y = d.getFullYear()

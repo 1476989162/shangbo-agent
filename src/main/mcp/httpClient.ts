@@ -96,7 +96,10 @@ export class HttpMcpClient {
   private async post(payload: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
-    signal?.addEventListener('abort', () => controller.abort(), { once: true })
+    // 具名监听 + finally 必摘：长生命周期的外部 signal（如会话级取消源）上
+    // 挂匿名 once 监听从不清理，请求一多就堆积泄漏。
+    const onAbort = (): void => controller.abort()
+    signal?.addEventListener('abort', onAbort)
     try {
       const headers: Record<string, string> = {
         'content-type': 'application/json',
@@ -127,6 +130,7 @@ export class HttpMcpClient {
       }
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
     }
   }
 }

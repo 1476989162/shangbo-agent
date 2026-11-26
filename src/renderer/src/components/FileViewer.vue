@@ -3,7 +3,8 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import { useViewerStore, type WorkbenchTabKind } from '../stores/viewer'
 import { useChatStore } from '../stores/chat'
-import { renderMarkdown } from '../lib/markdown'
+import { renderMarkdown, highlighterReady } from '../lib/markdown'
+import { truncateGitDiff } from '../lib/diffTruncate'
 import { isDark } from '../lib/theme'
 import { t } from '../i18n'
 
@@ -71,6 +72,12 @@ function formatSize(bytes: number): string {
 const gitStatusText = ref('')
 const gitDiffText = ref('')
 const gitLoading = ref(false)
+
+/**
+ * 超大 diff 保护：行数/字符双上限截断，一次算好不再模板里反复 split。
+ * 超限时给可读提示并建议用终端看完整 diff，避免整页卡死。
+ */
+const displayedDiff = computed(() => truncateGitDiff(gitDiffText.value))
 
 async function refreshGitChanges(): Promise<void> {
   const dir = chat.activeConversation?.workingDir
@@ -296,6 +303,9 @@ const isMarkdown = computed(() => {
 
 const renderedMarkdown = computed(() => {
   if (!isMarkdown.value) return ''
+  // 高亮器异步就绪后自动补高亮：显式读取 highlighterReady 建立依赖，
+  // 与 MarkdownBlock 的 refreshKey 机制同理。
+  void highlighterReady.value
   // 跟随实际主题：切深浅色时代码高亮同步重渲染
   return renderMarkdown(viewer.activeTab?.text ?? '', { highlight: true, dark: isDark.value })
 })
@@ -551,8 +561,14 @@ onMounted(() => {
           <div class="git-diff-section">
             <div class="section-title">差异内容 (Diff)</div>
             <div v-if="!gitDiffText" class="viewer-hint">工作区干净，无未暂存的代码改动。</div>
-            <pre v-else class="git-diff-pre mono"><code><template v-for="(line, idx) in gitDiffText.split('\n')" :key="idx"><span :class="{ 'diff-add': line.startsWith('+') && !line.startsWith('+++'), 'diff-del': line.startsWith('-') && !line.startsWith('---'), 'diff-chunk': line.startsWith('@@'), 'diff-header': line.startsWith('diff ') || line.startsWith('index ') }">{{ line }}
+            <template v-else>
+              <div v-if="displayedDiff.truncated" class="viewer-hint">
+                Diff 过大（共 {{ displayedDiff.totalLines }} 行），仅显示前 {{ displayedDiff.lines.length }} 行；
+                完整内容请在终端执行 git diff 查看。
+              </div>
+              <pre class="git-diff-pre mono"><code><template v-for="(line, idx) in displayedDiff.lines" :key="idx"><span :class="{ 'diff-add': line.startsWith('+') && !line.startsWith('+++'), 'diff-del': line.startsWith('-') && !line.startsWith('---'), 'diff-chunk': line.startsWith('@@'), 'diff-header': line.startsWith('diff ') || line.startsWith('index ') }">{{ line }}
 </span></template></code></pre>
+            </template>
           </div>
         </div>
 
