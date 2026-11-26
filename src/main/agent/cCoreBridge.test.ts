@@ -292,9 +292,12 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
 
   it('13. 同一 C 守护进程接收取消并终止长命令', async () => {
     const controller = new AbortController()
+    // 被测本体是取消路径：Windows 用 ping -n 计数挂起时长命令；
+    // POSIX ping 语义不同（-n 不计数、无 >nul 设备），改用 sleep 挂起。
+    const longRunner = process.platform === 'win32' ? 'ping 127.0.0.1 -n 20 >nul' : 'sleep 20'
     const running = cCoreBridge.executeTool(
       'run_command',
-      { command: 'ping 127.0.0.1 -n 20 >nul', timeoutMs: 30_000 },
+      { command: longRunner, timeoutMs: 30_000 },
       { workingDirectory: testWorkspace, signal: controller.signal }
     )
     const started = Date.now()
@@ -321,9 +324,14 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
     expect(before?.isError).toBe(true)
     expect(before?.content).toContain('未回退')
     const controller = new AbortController()
+    // 同上：POSIX 下用 sleep 挂起，保证 abort 发生时命令仍在运行。
+    const cancellable =
+      process.platform === 'win32'
+        ? 'ping 127.0.0.1 -n 4 >nul && echo late_write > test_cancel_side_effect.txt'
+        : 'sleep 3 && echo late_write > test_cancel_side_effect.txt'
     const running = cCoreBridge.executeTool(
       'run_command',
-      { command: 'ping 127.0.0.1 -n 4 >nul && echo late_write > test_cancel_side_effect.txt', timeoutMs: 30_000 },
+      { command: cancellable, timeoutMs: 30_000 },
       { workingDirectory: testWorkspace, signal: controller.signal }
     )
     setTimeout(() => controller.abort(), 200)
@@ -395,9 +403,10 @@ describe('尚搏 Agent GUI 桌面与 C 语言内核桥接彻底打通验证 (C-C
     expect(longCnRes?.content.length).toBeGreaterThan(0)
 
     // P0-3: run_command 非零退出码保留完整输出且不标为 isError: true
+    // exit 3 在 cmd /c 与 POSIX sh 下都以码 3 退出（exit /b 是 cmd 专有）
     const nonZeroRes = await cCoreBridge.executeTool(
       'run_command',
-      { command: 'echo nonzero_output_preserved && exit /b 7', timeoutMs: 10_000 },
+      { command: 'echo nonzero_output_preserved && exit 7', timeoutMs: 10_000 },
       { workingDirectory: testWorkspace }
     )
     expect(nonZeroRes?.isError).toBe(false)
