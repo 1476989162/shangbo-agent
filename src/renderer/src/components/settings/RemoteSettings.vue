@@ -36,6 +36,7 @@ const remotePending = ref<RemotePendingPairing[]>([])
 const remotePairingBusy = ref(false)
 /** 待确认配对轮询：只在手机远程页挂载时跑，卸载即停。 */
 let remotePendingTimer: ReturnType<typeof setInterval> | null = null
+let unmounted = false
 /** 配对二维码画布：生成配对码后绘制 qrText，手机扫码直达配对页。 */
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const qrFailed = ref(false)
@@ -136,6 +137,7 @@ async function refreshRemotePending(): Promise<void> {
 }
 
 function startRemotePendingPoll(): void {
+  if (unmounted) return
   stopRemotePendingPoll()
   void refreshRemotePending()
   remotePendingTimer = setInterval(() => {
@@ -196,10 +198,12 @@ onMounted(async () => {
     /* 读不到就用默认值 */
   }
   await loadRemote()
+  if (unmounted) return
   startRemotePendingPoll()
 })
 
 onBeforeUnmount(() => {
+  unmounted = true
   stopRemotePendingPoll()
 })
 </script>
