@@ -44,25 +44,37 @@ const qrFailed = ref(false)
 async function loadRemote(): Promise<void> {
   try {
     const st = await window.shangbo.remote.status()
+    // c332ba9：status 悬挂期间卸载后 resolve，禁止再写已卸载组件并禁止后续请求。
+    if (unmounted) return
     remoteEnabled.value = st.enabled
     remoteStatusText.value = st.enabled ? `状态：${st.status}${st.detail ? `（${st.detail}）` : ''}` : '未开启'
   } catch {
+    if (unmounted) return
     remoteStatusText.value = '读取失败'
   }
   try {
-    remoteDevices.value = await window.shangbo.remote.devices()
+    const devices = await window.shangbo.remote.devices()
+    if (unmounted) return
+    remoteDevices.value = devices
     try {
-      remotePending.value = await window.shangbo.remote.pending()
+      const list = await window.shangbo.remote.pending()
+      if (unmounted) return
+      remotePending.value = list
     } catch {
+      if (unmounted) return
       remotePending.value = []
     }
   } catch {
+    if (unmounted) return
     remoteDevices.value = []
   }
   try {
     // 本机身份指纹：填到中转 RELAY_ALLOWED_DESKTOPS 后，中转只服务这一台桌面
-    remoteIdentityFp.value = (await window.shangbo.remote.identity()).fingerprint
+    const identity = await window.shangbo.remote.identity()
+    if (unmounted) return
+    remoteIdentityFp.value = identity.fingerprint
   } catch {
+    if (unmounted) return
     remoteIdentityFp.value = ''
   }
 }
@@ -129,6 +141,7 @@ async function revokeRemoteDevice(id: string): Promise<void> {
 }
 
 async function refreshRemotePending(): Promise<void> {
+  if (unmounted) return
   try {
     remotePending.value = await window.shangbo.remote.pending()
   } catch {
