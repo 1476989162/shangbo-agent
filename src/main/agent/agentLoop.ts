@@ -49,6 +49,8 @@ export type LoopEmitter = (event: AgentEvent) => void
  * 用户发消息 → 模型首字响应的路径上不得插入 DB 读取或模型调用，因此
  * Wiki 索引只在 setImmediate 后台异步加载；成功回合先攒进批量缓冲，
  * 每 5 轮攒满一批再统一做一次本地规则提取——第 1~4 轮不再被丢弃。
+ * 另：首轮即后台预热 Wiki 索引（仅索引未加载时），避免前 4 轮拿不到
+ * 已有 Wiki 上下文；预热只做索引加载，不触发提取（提取仍攒满 5 轮）。
  * 记忆提取失败只记日志，绝不影响对话本身。
  */
 let successfulTurnsSinceExtraction = 0
@@ -65,6 +67,20 @@ export function resetMemoryBatchForTesting(): void {
 function scheduleBackgroundMemoryWork(userText: string, assistantText: string): void {
   pendingMemoryTurns.push({ userText, assistantText })
   successfulTurnsSinceExtraction += 1
+  // 首轮后台预热 Wiki 索引：索引缺失时第 1 轮即 setImmediate 加载，
+  // 避免前 4 轮拿不到已有 Wiki 上下文；只预热不提取，提取仍攒满 5 轮。
+  if (successfulTurnsSinceExtraction === 1 && !isWikiIndexLoaded()) {
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const wikiRepo = await import('../memory/wikiRepo')
+          wikiRepo.refreshWikiIndexCache()
+        } catch (error) {
+          log.warn('[agent] Wiki 索引预热失败（不影响对话）', error)
+        }
+      })()
+    })
+  }
   if (successfulTurnsSinceExtraction < MEMORY_BATCH_TURNS) return
   successfulTurnsSinceExtraction = 0
   const batch = pendingMemoryTurns

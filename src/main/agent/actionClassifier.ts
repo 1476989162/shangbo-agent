@@ -18,8 +18,9 @@ export interface ActionReview {
   via: 'rule' | 'llm'
 }
 
-/** 快速通道：blocked/hard/auto 直接出结果；soft 返回 null，把决定权交给
- * 可选的 LLM 提示性复核（runtime.ts:1203，仅开关打开时触发，不拦单，只记日志/事件）。
+/** 快速通道：blocked→block 直接拒绝，hard→ask 走人工确认，auto→allow 自主决定；
+ * soft 返回 null，把决定权交给可选的 LLM 提示性复核（runtime.ts:1204，
+ * 仅开关打开时触发；LLM 判 block 且命中硬红线才拦截执行，其余只记日志继续）。
  * 开关关闭时 soft 走常规审批链（v0.9.5 低打断口径：soft 本身不强制弹窗）。 */
 export function fastClassifyAction(verdict: SafetyVerdict, command?: string): ActionReview | null {
   if (verdict.tier === 'blocked') return { decision: 'block', reason: verdict.reason ?? '命中安全红线。', via: 'rule' }

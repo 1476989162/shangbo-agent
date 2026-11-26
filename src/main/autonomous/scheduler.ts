@@ -42,6 +42,10 @@ const DEFAULT_GATE: ProactiveGate = { skip: false, notifyMode: 'normal', reason:
  */
 class AutonomousScheduler {
   private timer: ReturnType<typeof setInterval> | null = null
+  /** eventBus.subscribe 返回的退订函数：stop() 里调用，防重复 start() 叠监听。 */
+  private eventUnsubscribe: (() => void) | null = null
+  /** 8s 启动 tick 的 setTimeout 句柄：stop() 里清除，防停机后误触发。 */
+  private bootTimer: ReturnType<typeof setTimeout> | null = null
   private activeTasks = new Set<string>()
   private activeRuns = new Map<string, { taskId: string; runRecordId: string; conversationId: string }>()
   /** 已经进入验收阶段的会话：防止 message_done 与后续事件重复触发验收。 */
@@ -61,17 +65,24 @@ class AutonomousScheduler {
   start(): void {
     if (this.timer) return
     this.paused = false
-    eventBus.subscribe((event) => this.observe(event))
+    // 先保存退订函数再起定时器：重复 start() 被上面的守卫拦下，不会叠监听。
+    this.eventUnsubscribe = eventBus.subscribe((event) => this.observe(event))
     // 每 15 秒检查一次：分钟级周期足够精确，又不会频繁扫库。
     this.timer = setInterval(() => void this.tick(), 15_000)
     // 启动后先等 8 秒，避开首屏与供应商初始化。
-    setTimeout(() => void this.tick(), 8_000)
+    this.bootTimer = setTimeout(() => void this.tick(), 8_000)
     log.info('[autonomous] 调度器已启动')
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    if (this.bootTimer) clearTimeout(this.bootTimer)
+    this.bootTimer = null
+    if (this.eventUnsubscribe) {
+      this.eventUnsubscribe()
+      this.eventUnsubscribe = null
+    }
     log.info('[autonomous] 调度器已停止')
   }
 

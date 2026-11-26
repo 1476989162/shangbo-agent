@@ -1175,7 +1175,11 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function bootstrap(): Promise<void> {
+    // 事件流是渲染进程级单例（preload 用 removeAllListeners 实现）：
+    // 再次 bootstrap 前先退订，避免重复挂载叠回调；HMR/重连场景同样先走清理。
+    disposeChatListener()
     window.shangbo.chat.onEvent(handleEvent)
+    chatListenerActive = true
     await Promise.all([loadProviders(), refreshConversations()])
     try {
       const info = await window.shangbo.app.info()
@@ -1189,15 +1193,34 @@ export const useChatStore = defineStore('chat', () => {
       if (savedAutonomy) autonomy.value = savedAutonomy
       autoApproveSoft.value = (settings['agent.autoApproveSoft'] as boolean) ?? false
       worktreeEnabled.value = (settings['agent.worktree'] as boolean) ?? false
+      const savedClassifier = settings['agent.safety.actionClassifierLlm'] as boolean | undefined
+      if (typeof savedClassifier === 'boolean') actionClassifierLlm.value = savedClassifier
+      const savedInjection = settings['agent.safety.injectionLlm'] as boolean | undefined
+      if (typeof savedInjection === 'boolean') injectionLlm.value = savedInjection
       const savedHidden = settings['chat.hiddenModels'] as string[] | undefined
       if (Array.isArray(savedHidden)) hiddenModels.value = savedHidden
       const savedViewMode = settings['ui.viewMode'] as UsageMode | undefined
       if (savedViewMode === 'cowork' || savedViewMode === 'code') viewMode.value = savedViewMode
-    } catch {
-      // 忽略
+    } catch (error) {
+      console.warn('[chat] bootstrap 恢复设置失败，已用默认值继续', error)
     }
     const first = conversations.value[0]
     if (first) await openConversation(first.id)
+  }
+
+  /**
+   * 聊天事件监听的清理方法：与 bootstrap 配对。
+   * preload 的 onEvent 无退订句柄（返回 void），退订走 offEvent（removeAllListeners）。
+   */
+  let chatListenerActive = false
+  function disposeChatListener(): void {
+    if (!chatListenerActive) return
+    chatListenerActive = false
+    try {
+      window.shangbo.chat.offEvent()
+    } catch (error) {
+      console.warn('[chat] 退订事件流失败', error)
+    }
   }
 
   return {
@@ -1261,6 +1284,7 @@ export const useChatStore = defineStore('chat', () => {
     toggleProjectCollapse,
     pickFolderAndCreate,
     bootstrap,
+    disposeChatListener,
     refreshConversations,
     loadProviders,
     setTarget,

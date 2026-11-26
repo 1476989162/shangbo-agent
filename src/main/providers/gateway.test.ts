@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProviderHttpError } from './sse'
-import { setFirstByteTimeoutForTesting, streamWithFallback } from './gateway'
+import { isMagpieProxyUrl, isReasoningModel, setFirstByteTimeoutForTesting, streamWithFallback } from './gateway'
 import type { Provider } from '../../shared/types'
 import type { CompletionRequest, ProviderAdapter, StreamChunk } from './types'
 
@@ -499,5 +499,79 @@ describe('streamWithFallback', () => {
       drain(streamWithFallback(request, new AbortController().signal, 'not-exists'))
     ).rejects.toThrow(/不存在|未配置/)
     expect(storeMocks.adapterFor).not.toHaveBeenCalled()
+  })
+})
+
+describe('isReasoningModel（推理模型统一真源）', () => {
+  it.each([
+    ['o1', true],
+    ['O1', true],
+    ['gpt-o1', true],
+    ['o1-mini', true],
+    ['openai/o3-pro', true],
+    ['o4-mini-2024', true]
+  ])('%s → 推理模型', (model, expected) => {
+    expect(isReasoningModel(model)).toBe(expected)
+  })
+
+  it.each([
+    ['pro3', false],
+    ['turbo4', false],
+    ['gpt-4o', false],
+    ['o12', false],
+    ['neo1x', false]
+  ])('%s → 非推理模型（词边界不误伤）', (model, expected) => {
+    expect(isReasoningModel(model)).toBe(expected)
+  })
+
+  it.each([
+    ['gemini-2.5-flash', true],
+    ['gemini-3-pro', true],
+    ['GEMINI-2.5-PRO', true]
+  ])('%s → 推理模型（明确代际）', (model, expected) => {
+    expect(isReasoningModel(model)).toBe(expected)
+  })
+
+  it.each([
+    ['gemini-2.0-flash', false],
+    ['gemini-1.5-pro', false],
+    ['gemini-flash', false]
+  ])('%s → 非推理模型（普通 gemini 不误伤）', (model, expected) => {
+    expect(isReasoningModel(model)).toBe(expected)
+  })
+
+  it('原有白名单不受影响', () => {
+    expect(isReasoningModel('deepseek-reasoner')).toBe(true)
+    expect(isReasoningModel('muse-spark-max')).toBe(true)
+    expect(isReasoningModel('gpt-4o')).toBe(false)
+    expect(isReasoningModel('')).toBe(false)
+  })
+
+  it('设置里的自定义正则仍可加白', () => {
+    expect(isReasoningModel('my-custom-70b', ['custom-70b'])).toBe(true)
+    expect(isReasoningModel('my-custom-70b')).toBe(false)
+  })
+})
+
+describe('isMagpieProxyUrl（Magpie 云代理归一化）', () => {
+  it('标准地址识别为代理', () => {
+    expect(isMagpieProxyUrl(storeMocks.MAGPIE_BASE_URL)).toBe(true)
+  })
+
+  it('尾斜杠不影响判定', () => {
+    expect(isMagpieProxyUrl(`${storeMocks.MAGPIE_BASE_URL}/`)).toBe(true)
+    expect(isMagpieProxyUrl(`${storeMocks.MAGPIE_BASE_URL}///`)).toBe(true)
+  })
+
+  it('localhost 与 127.0.0.1 同源', () => {
+    expect(isMagpieProxyUrl('http://localhost:34254/v1')).toBe(true)
+    expect(isMagpieProxyUrl('http://localhost:34254/v1/')).toBe(true)
+  })
+
+  it('其他地址不是代理', () => {
+    expect(isMagpieProxyUrl('https://example.invalid')).toBe(false)
+    expect(isMagpieProxyUrl('http://127.0.0.1:11434/v1')).toBe(false)
+    expect(isMagpieProxyUrl(undefined)).toBe(false)
+    expect(isMagpieProxyUrl('')).toBe(false)
   })
 })

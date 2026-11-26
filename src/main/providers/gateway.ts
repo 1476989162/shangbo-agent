@@ -60,9 +60,8 @@ const REASONING_MODEL_PATTERNS = [
   /reasoning/i,
   /deepseek-reasoner/i,
   /think/i,
-  /o1/i,
-  /o3/i,
-  /o4/i,
+  // o 系列只认词边界：o1/o3/o4 独立段才算，不误伤 pro3/turbo4/o12 这类后缀数字。
+  /(?:^|[/:_-])(o1|o3|o4)(?:$|[/:._-])/i,
   /muse.*spark/i,
   /r1-/i,
   /qwq/i,
@@ -72,7 +71,8 @@ const REASONING_MODEL_PATTERNS = [
   /r1-distill/i,
   /sky.*think/i,
   /glm.*think/i,
-  /gemini/i
+  // gemini 只认明确的推理代际（2.5/3），不误伤 gemini-2.0-flash 等普通模型。
+  /gemini-(?:2\.5|3)/i
 ]
 const DEFAULT_MODEL_TIMEOUT_MS = 60_000
 const REASONING_MODEL_TIMEOUT_MS = 180_000
@@ -179,6 +179,20 @@ function resolveCandidates(preferredProviderId?: string | null): Provider[] {
 }
 
 /**
+ * baseUrl 归一化：去尾斜杠，避免配置里多写 `/` 就误判。
+ * Magpie 云代理判定：127.0.0.1 与 localhost 同源，且背后都是云端模型，按远端对待。
+ */
+function normalizeBaseUrl(baseUrl: string | undefined): string {
+  return (baseUrl || '').replace(/\/+$/, '')
+}
+
+export function isMagpieProxyUrl(baseUrl: string | undefined): boolean {
+  const normalized = normalizeBaseUrl(baseUrl)
+  const magpie = normalizeBaseUrl(MAGPIE_BASE_URL)
+  return normalized === magpie || normalized === magpie.replace('127.0.0.1', 'localhost')
+}
+
+/**
  * 输入规模估算（AIMD 用不到真实值时的回退）：
  * dataUrl 是 base64 图片原文，不代表文本量级，估算时跳过，只计一个占位。
  */
@@ -259,9 +273,10 @@ export async function* streamWithFallback(
     // 重试上下文里的抢占计数：每次被抢占后 +1 并透传给下一次 acquire，
     // 新槽位继承该计数，调度器的 `< 2` 上限才能真正生效（否则每次重入都从 0 开始）。
     let preemptionCount = 0
-    // 本机 Magpie 云代理监听 127.0.0.1，但背后是云端模型：必须按远端对待，
-    // 否则调度器按“本机引擎”把并发锁死为 1。
-    const isMagpieProxy = provider.baseUrl === MAGPIE_BASE_URL
+    // 本机 Magpie 云代理监听 127.0.0.1（或 localhost），但背后是云端模型：
+    // 必须按远端对待，否则调度器按“本机引擎”把并发锁死为 1。
+    // baseUrl 归一化后比较，容忍配置里的尾斜杠与 localhost 写法。
+    const isMagpieProxy = isMagpieProxyUrl(provider.baseUrl)
     const promptTokensEstimate = estimateMessagesTokens(request.messages)
     // 本轮实际输入 token（流式 usage 上报的真实值）：AIMD 优先用它，
     // 拿不到时才回退到上面的估算值。
