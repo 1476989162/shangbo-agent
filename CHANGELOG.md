@@ -2,6 +2,14 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.9] - 2026-11-26
+
+版本号对齐版本：package.json / cCoreBridge / C 源码（main.c、json_rpc.c）单源对齐 0.9.9，`versionDrift` / `cCoreBridge` 契约测试同步更新。
+
+### 修复
+
+- **C 内核真源码重编**：0.9.8 因沙箱限制只对既有 exe 做了等长版本串对齐；本版本在正常终端用 MSVC 从源码完整重编 `shangbo_agent.exe` / `test_runner.exe`，C 测试 56/56 通过。
+
 ## [0.9.8] - 2026-11-20
 
 对标 `simplexai-labs/linger` 的架构演进版本：打通三个悬空的纯函数内核，补齐双层记忆、主动决策、端点级调度、异步分身、真实硬件探测与桌面并发车道；同时纳入手机远程配对确认与移动端改动，以及设置页 Autopilot 可视化。

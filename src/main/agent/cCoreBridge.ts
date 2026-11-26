@@ -105,7 +105,7 @@ export class CCoreBridge {
       available: exe !== null,
       daemonRunning: this.isDaemonRunning(),
       executablePath: exe,
-      version: '0.9.8',
+      version: '0.9.9',
       engine: 'C-Core Native Engine (Shangbo Architecture)',
       metrics: {
         totalCalls: this.totalCalls,
