@@ -2,6 +2,26 @@
 
 本文件记录尚搏 Agent 每个版本的变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.10] - 2026-11-27
+
+浏览器控制真实闭环 + 电脑控制双通道自检与全局急停（Ticket 8）：此前「浏览器控制」页的「导入…」是假按钮、9222 探测不附着 MCP，「电脑控制」页无真实自检且「按 Esc 阻断」为虚假文案，本版本全部打通。
+
+### 新增
+
+- **Chrome 9222 真实闭环**：`probeChromeDetails()`（16KB 上限 + 超时保护）、`findChromeExecutable()`（分平台真实路径探测）、`launchChromeForDebugging()`（已运行幂等返回；独立 `chrome-debug-profile` 目录 + `spawn` 无 `shell:true`，5 秒轮询，spawn 异步错误如实返回）；`browser:chromeDetails` / `browser:launchChrome` 通道接通 preload 与设置页。
+- **MCP 9222 附着开关**：`browser.chromeAttach9222` 设置项；`chrome-devtools` 自动追加 `--browserUrl http://127.0.0.1:9222`（用户已填则不动，不篡改内置常量）；开关翻转立即 `stopServer` 重建旧实例；`ensureStarted` 代际号过期自杀，旧参数进程绝不复活。
+- **电脑控制双通道自检 + 全局急停**：`computer:probe` 真实探测 `agent-desktop` / `nut-js` / 急停注册态；`Ctrl+Alt+X`（macOS `Cmd+Option+X`）全局热键触发 `abortAllRuns()` 中断全部会话；设置页拆出 `BrowserSettings.vue` / `ComputerUseSettings.vue`（均带 unmounted 异步守卫）。
+
+### 修复
+
+- 删除假「导入…」按钮；浏览器数据卡片诚实说明仅清右侧预览栏站点数据。
+- 电脑控制页删除 `Esc` 误导文案，急停状态按真实注册态展示（未注册时提示用底栏「停止」按钮）。
+
+### 测试
+
+- 新增 5 组单测：`probeChromeDetails` / `launchChromeForDebugging`（含 spawn 失败）、`managerAttach`（注入/去重/代际自杀）、`runtimeAbortAll`、`BrowserSettings` / `ComputerUseSettings` 组件测试（含 unmounted 守卫）。
+- TS 102 文件 739 用例全过；`npm run typecheck`（node + web）通过；`electron-vite build` 成功。
+
 ## [0.9.9] - 2026-11-26
 
 版本号对齐版本：package.json / cCoreBridge / C 源码（main.c、json_rpc.c）单源对齐 0.9.9，`versionDrift` / `cCoreBridge` 契约测试同步更新。
