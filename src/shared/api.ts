@@ -137,6 +137,20 @@ export interface ShangboApi {
   browser: {
     clearData(): Promise<boolean>
     chromeStatus(): Promise<{ connected: boolean }>
+    chromeDetails(): Promise<{ connected: boolean; browser?: string; webSocketDebuggerUrl?: string }>
+    launchChrome(): Promise<
+      | { ok: true; alreadyRunning: true; browser?: string; message: string }
+      | { ok: true; alreadyRunning: false; profileDir: string; browser?: string }
+      | { ok: false; error: string }
+    >
+  }
+
+  computer: {
+    probe(): Promise<{
+      agentDesktop: { available: boolean; binary: string | null; reason?: string }
+      nutJs: { available: boolean; error?: string }
+      emergencyStop: { accelerator: string; displayLabel: string; registered: boolean }
+    }>
   }
 
   backup: {

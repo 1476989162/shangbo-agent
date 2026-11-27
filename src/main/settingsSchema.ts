@@ -119,7 +119,8 @@ export const SettingSchemas: Record<string, z.ZodType> = {
   'agent.worktree': z.boolean(),
   'code.defaultShell': z.string().max(200),
   'agent.wish.verifyCommand': z.string().max(2000),
-  'agent.wish.acceptance': z.string().max(10_000)
+  'agent.wish.acceptance': z.string().max(10_000),
+  'browser.chromeAttach9222': z.boolean()
 }
 
 /**

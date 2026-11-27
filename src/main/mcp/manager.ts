@@ -237,11 +237,36 @@ export function loadProjectMcpConfigs(workingDir: string): McpServerConfig[] {
   return configs
 }
 
+/**
+ * 9222 附着生效修饰：chromeAttach9222 打开时，给 chrome-devtools 补上
+ * `--browserUrl http://127.0.0.1:9222`（用户已手填任何 --browserUrl 变体则不动）。
+ * 返回新对象，不原地篡改传入配置（更不碰 BUILTIN_MCP_SERVERS 常量）。
+ */
+export function applyChromeAttachArgs(config: McpServerConfig): McpServerConfig {
+  if (config.id !== 'chrome-devtools') return config
+  let attach = false
+  try {
+    attach = getSetting<boolean>('browser.chromeAttach9222', false)
+  } catch {
+    attach = false
+  }
+  if (!attach) return config
+  const args = Array.isArray(config.args) ? config.args : []
+  const hasFlag = args.some(
+    (a) =>
+      a === '--browserUrl' ||
+      a === '--browser-url' ||
+      a.startsWith('--browserUrl=') ||
+      a.startsWith('--browser-url=')
+  )
+  if (hasFlag) return config
+  return { ...config, args: [...args, '--browserUrl', 'http://127.0.0.1:9222'] }
+}
+
 export function loadServerConfigs(workingDir?: string): McpServerConfig[] {
   const configured = getSetting<McpServerConfig[]>('agent.mcp.servers', BUILTIN_MCP_SERVERS)
   const legacy = getSetting<string[] | null>('agent.mcpServers', null)
   let effective = mergeBuiltinServers(configured)
-
   if (workingDir && getSetting<boolean>('agent.mcp.projectLevel', true)) {
     const projectConfigs = loadProjectMcpConfigs(workingDir)
     if (projectConfigs.length > 0) {
@@ -260,6 +285,7 @@ export function loadServerConfigs(workingDir?: string): McpServerConfig[] {
     // url 模式走 HTTP，不要求 command；stdio 模式仍要求 command。
     .filter((s) => s && s.id && (s.url || s.command))
     .map((s) => ({ ...s, id: slug(s.id) }))
+    .map((s) => applyChromeAttachArgs(s))
     // 开关白名单（设置页 toggles）存在时以它为准：预置 enabled:false 的服务
     //（Magpie 识图/生图）点开白名单即生效，不再被配置 enabled 盖住。
     .filter((s) => (Array.isArray(legacy) ? legacy.includes(s.id) : s.enabled))
@@ -273,6 +299,8 @@ export class McpManager {
   private live = new Map<string, LiveServer>()
   private starting = new Map<string, Promise<LiveServer | null>>()
   private lastError = new Map<string, string>()
+  /** 代际号：stop/shutdown 后递增，过期启动任务复活时自杀，绝不写入 live。 */
+  private generation = new Map<string, number>()
   /** status() 查询缓存：设置页每次打开都全量拉进程会卡顿，TTL 内直接返回快照。 */
   private statusCache: { at: number; data: Awaited<ReturnType<McpManager['statusUncached']>> } | null = null
   private static readonly STATUS_TTL_MS = 30_000
@@ -292,6 +320,26 @@ export class McpManager {
   invalidateStatusCache(): void {
     this.statusCache = null
   }
+
+  /**
+   * 停掉单个服务：清 status 缓存与错误，下次 status()/toolSchemas 以最新参数冷启动。
+   * 正在启动中的占位一并清理，避免旧参数进程继续占用端口。
+   */
+  async stopServer(serverId: string): Promise<void> {
+    this.invalidateStatusCache()
+    this.generation.set(serverId, (this.generation.get(serverId) ?? 0) + 1)
+    this.lastError.delete(serverId)
+    this.starting.delete(serverId)
+    const live = this.live.get(serverId)
+    if (live) {
+      this.live.delete(serverId)
+      try {
+        await live.client.stop()
+      } catch {
+        // 停止失败不抛：下次调用会冷启动覆盖，不能卡住设置写入流程
+      }
+    }
+  }
   private async statusUncached(): Promise<McpServerStatus[]> {
     const out: McpServerStatus[] = []
     // 关掉的服务不拉进程，直接标 disabled（不验证死活）。
@@ -301,6 +349,7 @@ export class McpManager {
     const all = effective
       .filter((s) => s && s.id && (s.url || s.command))
       .map((s) => ({ ...s, id: slug(s.id) }))
+      .map((s) => applyChromeAttachArgs(s))
     const legacy = getSetting<string[] | null>('agent.mcpServers', null)
     for (const config of all) {
       // 与 loadServerConfigs 同规则：白名单存在时以它为准。
@@ -393,6 +442,9 @@ export class McpManager {
   }
 
   async shutdown(): Promise<void> {
+    for (const id of [...this.live.keys(), ...this.starting.keys()]) {
+      this.generation.set(id, (this.generation.get(id) ?? 0) + 1)
+    }
     const clients = [...this.live.values()].map((s) => s.client)
     this.live.clear()
     this.starting.clear()
@@ -408,6 +460,9 @@ export class McpManager {
    * 真正的优雅关闭（等 exit 事件、最多 3 秒）仍走 shutdown()。
    */
   shutdownSync(): void {
+    for (const id of [...this.live.keys(), ...this.starting.keys()]) {
+      this.generation.set(id, (this.generation.get(id) ?? 0) + 1)
+    }
     const clients = [...this.live.values()].map((s) => s.client)
     this.live.clear()
     this.starting.clear()
@@ -424,12 +479,21 @@ export class McpManager {
     if (existing) return Promise.resolve(existing)
     const ongoing = this.starting.get(config.id)
     if (ongoing) return ongoing
+    const gen = this.generation.get(config.id) ?? 0
     const task = (async (): Promise<LiveServer | null> => {
       try {
         // url 模式（Magpie 识图/生图）：走 Streamable HTTP，不拉子进程。
         if (config.url) {
           const client = await HttpMcpClient.start({ url: config.url, bearerKey: config.bearerKey })
+          if ((this.generation.get(config.id) ?? 0) !== gen) {
+            await client.stop().catch(() => undefined)
+            return null
+          }
           const tools = await client.listTools()
+          if ((this.generation.get(config.id) ?? 0) !== gen) {
+            await client.stop().catch(() => undefined)
+            return null
+          }
           const live: LiveServer = { client, tools }
           this.live.set(config.id, live)
           this.lastError.delete(config.id)
@@ -442,7 +506,15 @@ export class McpManager {
           return null
         }
         const client = await McpClient.start({ command: config.command, args: config.args, env })
+        if ((this.generation.get(config.id) ?? 0) !== gen) {
+          await client.stop().catch(() => undefined)
+          return null
+        }
         const tools = await client.listTools()
+        if ((this.generation.get(config.id) ?? 0) !== gen) {
+          await client.stop().catch(() => undefined)
+          return null
+        }
         const live: LiveServer = { client, tools }
         this.live.set(config.id, live)
         this.lastError.delete(config.id)

@@ -13,7 +13,8 @@ import { getAllSettings, getSetting, setSetting } from '../settings'
 import { parseSettingValue } from '../settingsSchema'
 import { toolRegistry } from '../tools'
 import { checkTerminalCommand } from './terminalGuard'
-import { probeChromeDebugging } from '../browserProbe'
+import { launchChromeForDebugging, probeChromeDebugging, probeChromeDetails } from '../browserProbe'
+import { probeComputerStatus } from '../computer/diagnostics'
 import { agentRuntime } from '../agent/runtime'
 import { cCoreBridge } from '../agent/cCoreBridge'
 import {
@@ -374,8 +375,12 @@ export function registerIpcHandlers(): void {
     // 更新开关改完立即生效，不必等重启
     if (name.startsWith('app.update.')) updateService.syncSettings()
     // MCP 开关改完清掉 status() 30 秒缓存，下一次 refresh 立即可见
-    if (name === 'agent.mcpServers' || name === 'agent.mcp.servers') {
+    if (name === 'agent.mcpServers' || name === 'agent.mcp.servers' || name === 'browser.chromeAttach9222') {
       mcpManager.invalidateStatusCache()
+      // 9222 附着开关翻转后旧 chrome-devtools 参数过期，立刻停掉等下次冷启动
+      if (name === 'browser.chromeAttach9222' || name === 'agent.mcp.servers') {
+        void mcpManager.stopServer('chrome-devtools').catch(() => undefined)
+      }
     }
     // 远程开关/地址/准入密钥/策略改完立即生效
     if (
@@ -504,6 +509,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.browserChromeStatus, async () => ({
     connected: await probeChromeDebugging()
   }))
+
+  ipcMain.handle(IPC.browserChromeDetails, () => probeChromeDetails())
+
+  ipcMain.handle(IPC.browserLaunchChrome, () => launchChromeForDebugging(app.getPath('userData')))
+
+  ipcMain.handle(IPC.computerProbe, () => probeComputerStatus())
 
   ipcMain.handle(IPC.browserClearData, async () => {
     try {

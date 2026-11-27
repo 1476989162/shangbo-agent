@@ -73,9 +73,14 @@ export function setSetting(key: string, value: unknown): void {
       void import('./skills/loader').then((m) => m.invalidateSkillPacksCache?.()).catch(() => undefined)
       void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => undefined)
     }
-    if (key.startsWith('agent.mcp') || key === 'agent.mcpServers') {
+    if (key.startsWith('agent.mcp') || key === 'agent.mcpServers' || key === 'browser.chromeAttach9222') {
       void import('./mcp/manager').then((m) => {
         try { m.mcpManager.invalidateStatusCache() } catch { /* 状态缓存失效失败不影响主写，下次读自动重建 */ }
+        // 9222 附着开关翻转后旧 chrome-devtools 进程参数已过期，必须停掉等下次冷启动；
+        // agent.mcp.servers 改参同样可能影响它，一并重建最稳（stopServer 幂等、无实例时仅清缓存）。
+        if (key === 'browser.chromeAttach9222' || key === 'agent.mcp.servers') {
+          void m.mcpManager.stopServer('chrome-devtools').catch(() => undefined)
+        }
       }).catch(() => undefined)
       void import('./agent/agentLoop').then((m) => m.invalidateMcpSchemasCache?.()).catch(() => undefined)
       void import('./agent/runtime').then((m) => m.invalidateContextStaticsCache?.()).catch(() => undefined)

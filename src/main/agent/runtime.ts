@@ -600,6 +600,29 @@ export class AgentRuntime {
     return { abortedRun, clearedQueued }
   }
 
+  /**
+   * 全局急停：中断所有活跃会话（含正在跑 + 排队）。
+   * 由全局快捷键与"全部停止"入口调用；逐会话复用 abortConversationRuns，
+   * 保证看门狗、落库标记、审批拒绝语义与单会话停止完全一致。
+   */
+  abortAllRuns(): { abortedRuns: number; clearedQueued: number } {
+    const ids = new Set<string>()
+    for (const run of this.runs.values()) {
+      if (run.conversationId) ids.add(run.conversationId)
+    }
+    for (const conversationId of this.queues.keys()) {
+      if (conversationId) ids.add(conversationId)
+    }
+    let abortedRuns = 0
+    let clearedQueued = 0
+    for (const conversationId of ids) {
+      const result = this.abortConversationRuns(conversationId)
+      if (result.abortedRun) abortedRuns += 1
+      clearedQueued += result.clearedQueued
+    }
+    return { abortedRuns, clearedQueued }
+  }
+
   /** 启动某轮的看门狗：超时仍未收尾则强制 finishRun，界面恢复可操作。 */
   private armWatchdog(active: ActiveRun): void {
     if (active.watchdog) return

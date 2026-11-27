@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AppInfo, UpdateState } from '@shared/types'
 import AutonomousSettings from './settings/AutonomousSettings.vue'
+import BrowserSettings from './settings/BrowserSettings.vue'
+import ComputerUseSettings from './settings/ComputerUseSettings.vue'
 import ConnectorsSettings from './settings/ConnectorsSettings.vue'
 import CoworkSettings from './settings/CoworkSettings.vue'
 import PluginsSettings from './settings/PluginsSettings.vue'
@@ -49,10 +51,6 @@ export type SettingsTab =
 
 const activeTab = ref<SettingsTab>('preferences')
 const searchKeyword = ref('')
-
-// 电脑控制与浏览器自动化状态 (对标图 2、图 3)
-const computerUseEnabled = ref(true)
-const chromeConnected = ref(true)
 
 // 插件/技能徽标：插件总数固定 8（defaultPlugins），技能数为外部技能目录数。
 // skillsCount 在 load() 中零额外 IPC 同步，之后由 PluginsSettings 的 counts-change 实时更新。
@@ -171,7 +169,6 @@ async function load(): Promise<void> {
   autoApprove.value = ((settings['tools.autoApprove'] as string[]) ?? []).filter(
     (name) => name !== 'run_command'
   )
-  computerUseEnabled.value = (settings['agent.computerUse'] as boolean) ?? true
   const lang = settings['ui.language'] as SupportedLanguage | undefined
   if (lang) setLanguage(lang)
   // 侧边栏 skills 徽标：复用已拉取的 settings，零额外 IPC。
@@ -296,40 +293,8 @@ async function handleExportConversations(): Promise<void> {
   }
 }
 
-// 浏览器自动化真实检测与清理
-const chromePortConnected = ref(false)
-const checkingChromePort = ref(false)
 
-async function checkChromeDebuggingPort(): Promise<void> {
-  checkingChromePort.value = true
-  try {
-    const res = await window.shangbo.browser.chromeStatus()
-    chromePortConnected.value = res.connected
-  } catch {
-    chromePortConnected.value = false
-  } finally {
-    checkingChromePort.value = false
-  }
-}
-
-async function handleClearBrowserData(): Promise<void> {
-  try {
-    const ok = await window.shangbo.browser.clearData()
-    feedback.value = {
-      ok,
-      message: ok ? '已成功清除 Chromium 内置浏览器 Cookies 与本地缓存数据' : '清除浏览器数据失败'
-    }
-  } catch (err: any) {
-    feedback.value = { ok: false, message: `清除失败：${err.message || String(err)}` }
-  }
-}
-
-async function handleImportBrowserData(): Promise<void> {
-  const res = await window.shangbo.dialog.pickFolder()
-  if (res) {
-    feedback.value = { ok: true, message: `已从 ${res} 导入浏览器配置数据` }
-  }
-}
+// 浏览器自动化真实检测与清理（已迁至 settings/BrowserSettings.vue）
 
 function toggleDevTools(): void {
   window.shangbo.app.toggleDevTools()
@@ -368,17 +333,6 @@ function showFeedback(value: { ok: boolean; message: string }): void {
     feedback.value = null
     feedbackTimer = null
   }, 2000)
-}
-
-
-async function toggleComputerUse(): Promise<void> {
-  computerUseEnabled.value = !computerUseEnabled.value
-  await window.shangbo.settings.set('agent.computerUse', computerUseEnabled.value)
-  feedback.value = {
-    ok: true,
-    message: computerUseEnabled.value ? '已启用「电脑控制」能力' : '已停用「电脑控制」'
-  }
-  setTimeout(() => (feedback.value = null), 2000)
 }
 </script>
 
@@ -842,89 +796,15 @@ async function toggleComputerUse(): Promise<void> {
           @mcp-change="mcpCount = $event"
         />
 
-        <!-- ========================================================
-             8. 电脑控制 (Computer Use) - 图片 2 对标实现
-             ======================================================== -->
-        <section v-if="activeTab === 'computer_use'" class="content-pane computer-use-pane">
-          <h3 class="pane-large-title">电脑控制</h3>
+        <!-- 8. 电脑控制：已拆至 settings/ComputerUseSettings.vue -->
+        <ComputerUseSettings v-if="activeTab === 'computer_use'" @feedback="showFeedback" />
 
-          <div class="section-block">
-            <span class="section-sub-title">启用</span>
-
-            <div class="setting-card-box">
-              <div class="row-text">
-                <span class="card-main-title">启用电脑控制</span>
-                <span class="card-desc">允许 AI 助手控制您的鼠标和键盘，与桌面应用程序进行交互</span>
-              </div>
-              <label class="switch-control">
-                <input
-                  type="checkbox"
-                  :checked="computerUseEnabled"
-                  @change="toggleComputerUse"
-                />
-                <span class="switch-slider" />
-              </label>
-            </div>
-          </div>
-
-          <div class="guidance-box">
-            <h5 class="guide-h5">💡 电脑控制使用说明与安全保障</h5>
-            <ul class="guide-list">
-              <li><strong>操作范围：</strong>开启后，模型可以通过捕获屏幕画面识别按钮与输入框，自动移动鼠标、点击或输入文本。</li>
-              <li><strong>安全确认：</strong>默认开启手动审批模式，所有鼠标点击与按键操作前均会弹出参数确认卡片，经您同意后才执行。</li>
-              <li><strong>紧急停止：</strong>在自动化控制过程中，您可以随时在键盘上按下 <code>Esc</code> 键或点击底栏「停止」按钮瞬间阻断。</li>
-            </ul>
-          </div>
-        </section>
-
-        <!-- ========================================================
-             9. 浏览器控制 (Browser Automation) - 图片 3 对标实现
-             ======================================================== -->
-        <section v-if="activeTab === 'browser'" class="content-pane browser-pane">
-          <h3 class="pane-large-title">浏览器</h3>
-
-          <!-- 第一组：内置浏览器 -->
-          <div class="browser-group-block">
-            <div class="group-title-row">
-              <span class="browser-group-name">内置浏览器</span>
-              <button class="btn btn-ghost tiny btn-import-data" @click="handleImportBrowserData">导入…</button>
-            </div>
-
-            <div class="browser-card-item">
-              <div class="row-text">
-                <span class="card-main-title">浏览器数据</span>
-                <span class="card-desc">内置浏览器中的站点数据（如 Cookies、本地存储等）</span>
-              </div>
-              <button class="btn btn-ghost tiny btn-clear-data" @click="handleClearBrowserData">
-                清除
-              </button>
-            </div>
-          </div>
-
-          <!-- 第二组：外部浏览器 -->
-          <div class="browser-group-block">
-            <div class="group-title-row">
-              <span class="browser-group-name">外部浏览器</span>
-            </div>
-
-            <div class="browser-card-item chrome-conn-item">
-              <div class="row-text">
-                <span class="card-main-title">连接到 Chrome</span>
-                <span class="card-desc">如果未安装 Chrome 扩展或未启动调试端口，AI 可能无法正常打开浏览器。</span>
-                <a href="javascript:void(0)" class="chrome-link" @click="checkChromeDebuggingPort">尝试连接端口 9222 / 重新检测</a>
-              </div>
-              <div
-                class="chrome-status-badge"
-                :style="{ cursor: 'pointer' }"
-                title="点击重新检测 Chrome 调试端口 9222"
-                @click="checkChromeDebuggingPort"
-              >
-                <span :class="chromePortConnected ? 'status-green-dot' : 'status-dot-off'">{{ chromePortConnected ? '●' : '○' }}</span>
-                <span>{{ checkingChromePort ? '检测中…' : chromePortConnected ? '已连接 ▾' : '未连接 ▾' }}</span>
-              </div>
-            </div>
-          </div>
-        </section>
+        <!-- 9. 浏览器控制：已拆至 settings/BrowserSettings.vue -->
+        <BrowserSettings
+          v-if="activeTab === 'browser'"
+          @feedback="showFeedback"
+          @navigate="activeTab = $event as SettingsTab"
+        />
 
         <!-- ========================================================
              协同工作模式 (Cowork) 设置面板 (对标图 4 精准实现)
@@ -1342,209 +1222,8 @@ async function toggleComputerUse(): Promise<void> {
    图片 1 样式：MCP Servers 管理中心
    ======================================================== */
 
-/* ========================================================
-   图片 2 样式：电脑控制 (Computer Use)
-   ======================================================== */
-.computer-use-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.pane-large-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.section-sub-title {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-  margin-bottom: 8px;
-}
-
-.setting-card-box {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.card-main-title {
-  display: block;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.card-desc {
-  display: block;
-  font-size: 12px;
-  color: var(--text-subtle);
-  margin-top: 4px;
-}
-
-.guidance-box {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.guide-h5 {
-  margin: 0 0 8px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.guide-list {
-  margin: 0;
-  padding-left: 18px;
-  font-size: 12px;
-  color: var(--text-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-/* ========================================================
-   图片 3 样式：浏览器控制 (Browser Automation)
-   ======================================================== */
-.browser-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.browser-group-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.group-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.browser-group-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.btn-import-data {
-  font-size: 11px;
-}
-
-.browser-card-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  gap: 16px;
-}
-
-.btn-clear-data {
-  color: var(--danger);
-  border-color: rgba(207, 34, 46, 0.2);
-}
-
-.btn-clear-data:hover {
-  background: rgba(207, 34, 46, 0.08);
-}
-
-.chrome-conn-item {
-  align-items: flex-start;
-}
-
-.chrome-link {
-  display: inline-block;
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: var(--accent);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.chrome-status-badge {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text);
-  white-space: nowrap;
-}
-
-.status-green-dot {
-  color: var(--success);
-  font-size: 14px;
-}
-
-.status-dot-off {
-  color: var(--text-muted);
-  font-size: 14px;
-}
-
-/* 通用开关 Switch 样式 */
-.switch-control {
-  position: relative;
-  display: inline-block;
-  width: 36px;
-  height: 20px;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-
-.switch-control input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.switch-slider {
-  position: absolute;
-  inset: 0;
-  background: var(--border-strong);
-  border-radius: 20px;
-  transition: all 0.2s ease;
-}
-
-.switch-slider::before {
-  position: absolute;
-  content: '';
-  height: 14px;
-  width: 14px;
-  left: 3px;
-  bottom: 3px;
-  background: #ffffff;
-  border-radius: 50%;
-  transition: all 0.2s ease;
-}
-
-.switch-control input:checked + .switch-slider {
-  background: var(--success);
-}
-
-.switch-control input:checked + .switch-slider::before {
-  transform: translateX(16px);
-}
+/* 电脑控制 / 浏览器控制样式已随 Tab 拆分迁至
+   settings/ComputerUseSettings.vue 与 settings/BrowserSettings.vue。 */
 
 /* ========================================================
    对标图 4 样式：协同工作模式 (Cowork)

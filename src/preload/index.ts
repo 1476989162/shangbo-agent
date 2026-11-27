@@ -85,7 +85,13 @@ const api: ShangboApi = {
 
   browser: {
     clearData: () => ipcRenderer.invoke(IPC.browserClearData),
-    chromeStatus: () => ipcRenderer.invoke(IPC.browserChromeStatus)
+    chromeStatus: () => ipcRenderer.invoke(IPC.browserChromeStatus),
+    chromeDetails: () => ipcRenderer.invoke(IPC.browserChromeDetails),
+    launchChrome: () => ipcRenderer.invoke(IPC.browserLaunchChrome)
+  },
+
+  computer: {
+    probe: () => ipcRenderer.invoke(IPC.computerProbe)
   },
 
   backup: {

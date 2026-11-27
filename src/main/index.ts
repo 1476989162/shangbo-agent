@@ -15,6 +15,8 @@ import { settleOrphanAutonomousRuns } from './autonomous/store'
 import { settleOrphanDelegatedTasks } from './agent/taskDelegation'
 import { mcpManager } from './mcp/manager'
 import { cCoreBridge } from './agent/cCoreBridge'
+import { agentRuntime } from './agent/runtime'
+import { registerEmergencyStop, unregisterEmergencyStop } from './computer/diagnostics'
 // 固定应用名，让开发态与打包态落在同一个 userData 目录。
 // 否则打包后 productName「尚搏 Agent」会另建一个目录，用户会以为数据丢了。
 // 必须在 requestSingleInstanceLock 之前调用——单实例锁文件也在 userData 下。
@@ -76,6 +78,19 @@ if (!gotLock) {
     updateService.init()
     // 许愿式自主任务：默认关闭；用户开启后由主进程常驻调度。
     autonomousScheduler.start()
+    try {
+      const ok = registerEmergencyStop(() => {
+        try {
+          const result = agentRuntime.abortAllRuns()
+          log.info(`[app] 全局急停触发：中断 ${result.abortedRuns} 轮、清空 ${result.clearedQueued} 条排队`)
+        } catch (error) {
+          log.warn('[app] 全局急停执行失败', error)
+        }
+      })
+      log.info(`[app] 全局急停热键${ok ? '已注册 (Ctrl+Alt+X)' : '注册失败（可能被占用）'}`)
+    } catch (error) {
+      log.warn('[app] 全局急停注册异常（不影响主流程）', error)
+    }
   })
 
   app.on('activate', () => {
@@ -98,4 +113,8 @@ if (!gotLock) {
     mcpManager.shutdownSync()
     destroyTray()
     closeDatabase()
+  })
+
+  app.on('will-quit', () => {
+    unregisterEmergencyStop()
   })}
